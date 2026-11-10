@@ -6,7 +6,7 @@
     "config_hash": "a1b2c3d4_net_config",
     "run_start_utc": "2026-11-10T03:18:40.978819+00:00",
     "phases": {
-        "warmup_seconds": 30,
+        "warmup_seconds": 70,
         "measurement_seconds": 360,
         "drain_seconds": 10
     },

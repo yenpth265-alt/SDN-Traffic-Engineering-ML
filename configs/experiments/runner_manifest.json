@@ -1,0 +1,100 @@
+{
+    "version": "1.0",
+    "run_id": "run_001",
+    "schedule_id": "sch_01",
+    "seed": 1,
+    "split": "train",
+    "method": "M1",
+    "topology_version": "v1.0",
+    "config_hash": "a1b2c3d4_net_config",
+    "run_start_utc": "2026-11-10T10:27:59.694275+00:00",
+    "phases": {
+        "warmup_seconds": 70,
+        "measurement_seconds": 360,
+        "drain_seconds": 10
+    },
+    "seed_allocations": [
+        {
+            "seed": 1,
+            "split": "train"
+        },
+        {
+            "seed": 2,
+            "split": "train"
+        },
+        {
+            "seed": 3,
+            "split": "train"
+        },
+        {
+            "seed": 4,
+            "split": "train"
+        },
+        {
+            "seed": 5,
+            "split": "train"
+        },
+        {
+            "seed": 6,
+            "split": "train"
+        },
+        {
+            "seed": 7,
+            "split": "train"
+        },
+        {
+            "seed": 8,
+            "split": "train"
+        },
+        {
+            "seed": 9,
+            "split": "train"
+        },
+        {
+            "seed": 10,
+            "split": "train"
+        },
+        {
+            "seed": 11,
+            "split": "train"
+        },
+        {
+            "seed": 12,
+            "split": "train"
+        },
+        {
+            "seed": 13,
+            "split": "train"
+        },
+        {
+            "seed": 14,
+            "split": "train"
+        },
+        {
+            "seed": 15,
+            "split": "validation"
+        },
+        {
+            "seed": 16,
+            "split": "validation"
+        },
+        {
+            "seed": 17,
+            "split": "validation"
+        },
+        {
+            "seed": 18,
+            "split": "test"
+        },
+        {
+            "seed": 19,
+            "split": "test"
+        },
+        {
+            "seed": 20,
+            "split": "test"
+        }
+    ],
+    "status": "initialized",
+    "quality_flags": "OK"
+}

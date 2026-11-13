@@ -1,151 +1,220 @@
+#!/usr/bin/env python3
+"""UDP Traffic Generator: sends scheduled traffic for flow groups originating from ONE host (v1.4 compliant).
+
+Usage (run on virtual source host, e.g., h1):
+    python3 sender.py --host h1 --manifest run_manifest.json --schedule demand_plan.csv --schedule-id S1_seed01
+
+Outputs in results/<run_id>/:
+    requested_<host>.csv : time_offset_s,flow_group_id,requested_mbps,available_at_utc
+    sent_<host>.csv      : time_offset_s,flow_group_id,packets_sent,bytes_sent,late_packets
+    releases_<host>.jsonl: Online DemandRelease events emitted strictly after each 1s bin completes
+"""
+
+import argparse
 import csv
 import json
 import os
+import signal
 import socket
-import struct
 import sys
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+import urllib.request
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MANIFEST_PATH = PROJECT_ROOT / "configs" / "experiments" / "runner_manifest.json"
-DEFAULT_DEMAND_PLAN_PATH = PROJECT_ROOT / "network" / "traffic_schedules" / "demand_plan.csv"
+from common import HEADER, iso_utc, load_flow_groups, load_manifest
 
-def load_manifest(manifest_path=DEFAULT_MANIFEST_PATH):
-    """Đọc tệp manifest để lấy thông tin run_id, thời gian bắt đầu và các pha."""
-    if not os.path.exists(manifest_path):
-        raise FileNotFoundError(f"Không tìm thấy file manifest tại: {manifest_path}")
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+STOP = False
 
-def load_demand_plan(demand_csv_path, target_flow_group):
-    """Đọc file lịch nhu cầu (demand_plan) cho flow_group_id cụ thể."""
-    demands = {} # {time_offset_s: requested_mbps}
-    if not os.path.exists(demand_csv_path):
-        raise FileNotFoundError(f"Không tìm thấy file lịch tại: {demand_csv_path}")
-    
-    with open(demand_csv_path, "r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f, delimiter=';') # Hoặc đổi thành ',' tùy file CSV của bạn
-        for row in reader:
-            if row.get("flow_group_id") == target_flow_group:
-                t = int(row["time_offset_s"])
-                mbps = float(row["requested_mbps"])
-                demands[t] = mbps
-    return demands
 
-def run_sender(manifest_path, flow_group_id, dst_ip, dst_port, demand_csv_path):
-    # 1. Đọc manifest
-    manifest = load_manifest(manifest_path)
-    run_id = manifest.get("run_id", "run_001")
-    run_start_utc_str = manifest.get("run_start_utc", datetime.now(timezone.utc).isoformat())
-    
-    # Chuyển đổi run_start_utc sang timestamp (seconds) để tính available_at chuẩn xác
-    # Giả định định dạng ISO 8601
-    run_start_dt = datetime.fromisoformat(run_start_utc_str.replace("Z", "+00:00"))
-    run_start_timestamp = run_start_dt.timestamp()
+def _stop(*_):
+    global STOP
+    STOP = True
 
-    warmup_seconds = manifest.get("phases", {}).get("warmup_seconds", 70)
-    measurement_seconds = manifest.get("phases", {}).get("measurement_seconds", 360)
-    total_duration = warmup_seconds + measurement_seconds
 
-    # 2. Đọc lịch nhu cầu
-    demands = load_demand_plan(demand_csv_path, flow_group_id)
+def load_schedule(path: str, wanted: set[str], schedule_id: str | None = None) -> dict[tuple[int, str], float]:
+    """Loads demand schedule for wanted flow_group_ids, filtering by schedule_id if present."""
+    sched = {}
+    with open(path, encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        has_sched_col = reader.fieldnames and "schedule_id" in reader.fieldnames
+        if has_sched_col and not schedule_id:
+            sys.exit("Error: schedule CSV contains 'schedule_id' column; specify --schedule-id or set it in manifest.")
+        for r in reader:
+            if has_sched_col and r["schedule_id"].strip() != schedule_id:
+                continue
+            fg = r["flow_group_id"].strip()
+            if fg in wanted:
+                sched[(int(float(r["time_offset_s"])), fg)] = float(r["requested_mbps"])
+    return sched
 
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    requested_log_filename = f"requested_log_{flow_group_id}.csv"
-    sender_log_filename = f"sender_{flow_group_id}.jsonl"
 
-    print(f"[*] Bắt đầu phát luồng {flow_group_id} tới {dst_ip}:{dst_port} (Run ID: {run_id})")
-    print(f"[*] Warm-up: {warmup_seconds}s | Measurement: {measurement_seconds}s")
+def emit_release_event(event: dict, release_fp=None, release_url: str | None = None):
+    """Writes online DemandRelease event to local outbox and optionally POSTs to Data/SDN endpoint."""
+    payload = json.dumps(event, separators=(",", ":"))
+    if release_fp is not None:
+        release_fp.write(payload + "\n")
+        release_fp.flush()
+    if release_url:
+        try:
+            req = urllib.request.Request(
+                release_url,
+                data=payload.encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=0.2):
+                pass
+        except Exception as e:
+            print(f"[!] Warning: failed to POST DemandRelease {event['event_id']}: {e}", file=sys.stderr)
 
-    seq = 0
-    payload_size = 1000 # Kích thước gói cố định chuẩn (bytes)
 
-    # Mở file ghi requested_log.csv
-    with open(requested_log_filename, "w", encoding="utf-8", newline="") as req_file, \
-         open(sender_log_filename, "w", encoding="utf-8") as sender_log_file:
-        
-        req_writer = csv.writer(req_file, delimiter=',')
-        # Ghi header theo chuẩn yêu cầu
-        req_writer.writerow(["time_offset_s", "flow_group_id", "requested_mbps", "available_at_utc"])
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--host", required=True, help="Source host name, e.g., h1")
+    ap.add_argument("--manifest", required=True, help="Path to run_manifest.json")
+    ap.add_argument("--schedule", required=True, help="Path to demand_plan.csv")
+    ap.add_argument("--schedule-id", default=None, help="Schedule ID filter (e.g., S1_seed01); falls back to manifest")
+    ap.add_argument("--config-dir", default="config", help="Directory containing flow_groups.csv")
+    ap.add_argument("--outdir", default=None, help="Output directory (default: results/<run_id>)")
+    ap.add_argument("--payload-size", type=int, default=1000, help="UDP payload size in bytes (default: 1000)")
+    ap.add_argument("--flow-group", default=None, help="Optional single flow_group_id (e.g., 0x103) for testing")
+    ap.add_argument("--dst-override", default=None, help="Override destination IP for single-machine testing")
+    ap.add_argument("--host-cap-mbps", type=float, default=10.0, help="Host send capacity cap in Mbps (default: 10.0)")
+    ap.add_argument("--release-url", default=None, help="Optional HTTP endpoint to push DemandRelease events")
+    args = ap.parse_args()
 
-        # Vòng lặp theo từng giây của kịch bản
-        for current_second in range(total_duration):
-            loop_start = time.time()
-            is_warmup = current_second < warmup_seconds
+    if args.payload_size < HEADER.size:
+        sys.exit(f"payload-size must be >= {HEADER.size}")
 
-            # Lấy requested_mbps từ lịch, mặc định 0 nếu không có
-            requested_mbps = demands.get(current_second, 0.0)
+    man = load_manifest(args.manifest)
+    schedule_id = args.schedule_id or man.get("schedule_id")
 
-            # Tính toán số lượng gói cần gửi trong giây này
-            # Công thức: packets = (mbps * 10^6) / (8 * payload_size)
-            if requested_mbps > 0:
-                total_packets_this_sec = int((requested_mbps * 1_000_000) / (8 * payload_size))
-            else:
-                total_packets_this_sec = 0
+    groups = [g for g in load_flow_groups(args.config_dir) if g["src_host"] == args.host]
+    if args.flow_group:
+        target_fg = args.flow_group.strip()
+        groups = [g for g in groups if g["flow_group_id"] == target_fg]
+    if not groups:
+        sys.exit("No matching flow groups found for this source host")
 
-            # Tính available_at_utc cho bin giây này: run_start + (t + 1) giây
-            available_at_epoch = run_start_timestamp + current_second + 1
-            available_at_utc_str = datetime.fromtimestamp(available_at_epoch, timezone.utc).isoformat()
+    sched = load_schedule(args.schedule, {g["flow_group_id"] for g in groups}, schedule_id=schedule_id)
+    total = man["warmup"] + man["measurement"]
+    outdir = args.outdir or os.path.join("results", man["run_id"])
+    os.makedirs(outdir, exist_ok=True)
 
-            # Ghi nhận vào requested_log.csv (bao gồm cả pha warm-up để ML đủ lịch sử)
-            req_writer.writerow([current_second, flow_group_id, requested_mbps, available_at_utc_str])
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+    pad = bytes(args.payload_size - HEADER.size)
 
-            # Rải đều các gói tin trong khoảng 1 giây
-            if total_packets_this_sec > 0:
-                interval = 1.0 / total_packets_this_sec
-                for i in range(total_packets_this_sec):
-                    packet_start_time = time.time()
-                    seq += 1
-                    send_timestamp = time.time()
+    state = {}
+    for k, g in enumerate(groups):
+        state[g["flow_group_id"]] = {
+            "stt": int(g["stt"]),
+            "addr": (args.dst_override or g["dst_ip"], int(g["udp_port"])),
+            "seq": 0,
+            "carry": 0.0,
+            "phase": k / len(groups),
+        }
 
-                    # Đóng gói nhị phân (struct) để tối ưu CPU thay vì dùng json.dumps toàn bộ
-                    # Cấu trúc: sequence id (Q - unsigned long long), timestamp (d - double)
-                    packet_header = struct.pack("Qd", seq, send_timestamp)
-                    padding = b"X" * (payload_size - len(packet_header))
-                    payload = packet_header + padding
+    missing = sum(1 for g in groups for t in range(total) if (t, g["flow_group_id"]) not in sched)
+    if missing:
+        print(f"[!] Warning: schedule missing {missing} (second, flow_group) entries; treating as 0 Mbps", file=sys.stderr)
 
-                    try:
-                        client_socket.sendto(payload, (dst_ip, dst_port))
-                        
-                        # Ghi log chi tiết gói tin phía sender (chỉ ghi trong pha measurement hoặc ghi toàn bộ tùy yêu cầu)
-                        if not is_warmup:
-                            log_entry = {
-                                "run_id": run_id,
-                                "flow_group_id": flow_group_id,
-                                "seq": seq,
-                                "timestamp": send_timestamp,
-                                "payload_size_bytes": len(payload),
-                                "status": "sent"
-                            }
-                            sender_log_file.write(json.dumps(log_entry) + "\n")
+    over = [
+        t for t in range(total)
+        if sum(sched.get((t, g["flow_group_id"]), 0.0) for g in groups) > args.host_cap_mbps * 1.001
+    ]
+    if over:
+        print(
+            f"[!] Warning: {len(over)} seconds exceed {args.host_cap_mbps} Mbps host cap (e.g., t={over[0]})",
+            file=sys.stderr,
+        )
 
-                    except Exception as e:
-                        print(f"[!] Lỗi gửi gói {seq}: {e}")
+    t0 = man["t0"]
+    if t0 > time.time():
+        print(f"[*] Waiting until {iso_utc(t0)} ({t0 - time.time():.1f} s remaining)")
+        while time.time() < t0 and not STOP:
+            time.sleep(min(0.2, max(0.0, t0 - time.time())))
+    elif time.time() - t0 > 1.0:
+        sys.exit("run_start_utc has already passed; generate a new manifest")
+    elif time.time() - t0 > 0.2:
+        print(f"[!] Starting {time.time() - t0:.2f} s late relative to run_start_utc", file=sys.stderr)
 
-                    # Kiểm soát nhịp rải gói trong giây
-                    elapsed_pkt = time.time() - packet_start_time
-                    if elapsed_pkt < interval:
-                        time.sleep(interval - elapsed_pkt)
-            else:
-                # Nếu không có tải trong giây này, sleep đủ 1 giây
-                time.sleep(1.0)
+    req_path = os.path.join(outdir, f"requested_{args.host}.csv")
+    sent_path = os.path.join(outdir, f"sent_{args.host}.csv")
+    rel_path = os.path.join(outdir, f"releases_{args.host}.jsonl")
 
-            # Đồng hồ hóa nhịp giây tổng thể
-            elapsed_sec = time.time() - loop_start
-            if elapsed_sec < 1.0:
-                time.sleep(1.0 - elapsed_sec)
+    with open(req_path, "w", encoding="utf-8", newline="") as fr, \
+         open(sent_path, "w", encoding="utf-8", newline="") as fs, \
+         open(rel_path, "w", encoding="utf-8") as frel:
+        wr = csv.writer(fr, lineterminator="\n")
+        ws = csv.writer(fs, lineterminator="\n")
+        wr.writerow(["time_offset_s", "flow_group_id", "requested_mbps", "available_at_utc"])
+        ws.writerow(["time_offset_s", "flow_group_id", "packets_sent", "bytes_sent", "late_packets"])
 
-    client_socket.close()
-    print(f"[+] Hoàn thành phát luồng {flow_group_id}. Đã xuất file {requested_log_filename} và {sender_log_filename}")
+        for t in range(total):
+            if STOP:
+                break
+            sec_start = t0 + t
+            events, counts, late = [], {}, {}
+            for fg, st in state.items():
+                mbps = sched.get((t, fg), 0.0)
+                st["carry"] += mbps * 1e6 / 8 / args.payload_size
+                n = int(st["carry"])
+                st["carry"] -= n
+                counts[fg], late[fg] = 0, 0
+                for i in range(n):
+                    events.append((sec_start + (i + st["phase"]) / n, fg))
+            events.sort()
+
+            for when, fg in events:
+                if STOP:
+                    break
+                delta = when - time.time()
+                if delta > 0.0004:
+                    time.sleep(delta - 0.0002)
+                elif delta < -0.005:
+                    late[fg] += 1
+                st = state[fg]
+                st["seq"] += 1
+                now = time.time()
+                try:
+                    sock.sendto(HEADER.pack(st["stt"], t, st["seq"], now) + pad, st["addr"])
+                    counts[fg] += 1
+                except OSError as e:
+                    print(f"[!] Send error {fg} seq {st['seq']}: {e}", file=sys.stderr)
+
+            # Wait until bin [t, t+1) completes before releasing demand observation
+            while time.time() < sec_start + 1.0 and not STOP:
+                time.sleep(min(0.05, max(0.0, sec_start + 1.0 - time.time())))
+
+            released_at = iso_utc(time.time())
+            win_start_utc = iso_utc(sec_start)
+            win_end_utc = iso_utc(sec_start + 1.0)
+
+            for fg in state:
+                req_val = round(sched.get((t, fg), 0.0), 6)
+                wr.writerow([t, fg, f"{req_val:.6f}", released_at])
+                ws.writerow([t, fg, counts[fg], counts[fg] * args.payload_size, late[fg]])
+
+                release_event = {
+                    "event_id": f"network:{man['run_id']}:demand:{fg}:{t}",
+                    "run_id": man["run_id"],
+                    "flow_group_id": fg,
+                    "bin_index": t,
+                    "window_start_utc": win_start_utc,
+                    "window_end_utc": win_end_utc,
+                    "requested_mbps": req_val,
+                    "released_at_utc": released_at,
+                }
+                emit_release_event(release_event, release_fp=frel, release_url=args.release_url)
+
+            fr.flush()
+            fs.flush()
+
+    sock.close()
+    print(f"[+] Completed host {args.host}: logs saved in {outdir}")
+
 
 if __name__ == "__main__":
-    # Tham số truyền vào: manifest_path, flow_group_id, dst_ip, dst_port, demand_csv_path
-    m_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MANIFEST_PATH
-    g_id = sys.argv[2] if len(sys.argv) > 2 else "h1_h5"
-    ip = sys.argv[3] if len(sys.argv) > 3 else "10.0.0.5"
-    port = int(sys.argv[4]) if len(sys.argv) > 4 else 5005
-    csv_path = sys.argv[5] if len(sys.argv) > 5 else DEFAULT_DEMAND_PLAN_PATH
-
-    run_sender(m_path, g_id, ip, port, csv_path)
+    main()

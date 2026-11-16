@@ -24,14 +24,14 @@ Per `SDN_Traffic_Engineering_Role_Integration_Guide_v1.4.md` (Section 2 & Sectio
 
 | Interface ID | Producer | Consumer | Input | Output | Schema Class (`sdn.schemas`) | Owner | Status | `MUST-LOCK` Items |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`IF01`** (`topology_bundle`) | Network | SDN (`TopologyRegistry`) | `configs/network/topology_bundle.json` + 6 CSV catalogs | Validated `TopologyRegistry` (`8` hosts, `6` switches, `32` links, `16` fabric links, `48` flows, `96` paths) | `TopologyMetadata`, `HostEntry`, `SwitchEntry`, `LinkEntry`, `FlowGroupEntry`, `CandidatePathEntry` | Network (schema) / SDN (loader) | `IMPLEMENTED` (`PASS_MOCK`) | None (`ALIGNED_V1_4` locked) |
+| **`IF01`** (`topology_bundle`) | Network | SDN (`TopologyRegistry`) | `configs/network/topology_bundle.json` + 6 CSV catalogs | Validated `TopologyRegistry` (`8` hosts, `6` switches, `32` links, `16` fabric links, `48` flows, `96` paths) | `HostInfo`, `SwitchInfo`, `DirectedLink`, `FlowGroup`, `CandidatePath`, `InitialPathEntry` | Network (schema) / SDN (loader) | `IMPLEMENTED` (`PASS_MOCK`) | None (`ALIGNED_V1_4` locked) |
 | **`IF02` / `REQ-03`** (`released_demand_to_sdn`) | Network / Runner / Data | SDN (`SnapshotCreator` via `DemandHistoryProviderProtocol`) | `(run_id, flow_group_ids, start_bin, end_bin_exclusive)` | `Sequence[DemandObservationRecord]` with `window_end_utc`, `released_at_utc`, `available_at_utc`, `requested_mbps` | `DemandObservationRecord`, `OriginRefs` | Network / Runner / SDN | `IMPLEMENTED` via Protocol (`PASS_MOCK`) | **`MUST-LOCK #1`**: Concrete runtime delivery channel (shared memory / IPC / DB view) for causal `released_demand` to SDN |
 | **`IF03`** (`link_telemetry_refs`) | Network / Monitoring | SDN (`SnapshotCreator` via `LinkTelemetryProviderProtocol`) | `run_id` | `Sequence[LinkSampleRef]` with `sample_id`, `link_id`, `sample_at_utc`, `available_at_utc`, `valid` | `LinkSampleRef` | Network / SDN | `IMPLEMENTED` via Protocol (`PASS_MOCK`) | Calibrated link overhead factor `k_e` (`1.0` `UNCALIBRATED` until S0 lock) |
 | **`IF05`** (`create_snapshot`) | SDN (`SnapshotCreator`) | Data / Runner / ML | `(run_id, cutoff, lookback_L, snapshot_as_of_utc)` | Immutable `Snapshot` with `history` (`48 * L*` items), `routing_state` (`48` entries), `routing_history`, `provenance`, `quality_status`, `content_hash` | `Snapshot`, `SnapshotHistoryItem`, `SnapshotProvenance`, `SnapshotQualityStatus` | **SDN** (sole creator) / **Data** (sole DB writer) | `IMPLEMENTED` (`PASS_MOCK`) | None (`IF05` causality rules locked in v1.4) |
 | **`IF08`** (`routing_state` & `routing_history`) | SDN (`StateManager`) | Data / Optimization / Runner | `(run_id)` or `(run_id, as_of_utc)` | `RoutingStateSnapshot` (`state_version`, `routing_state_complete`, `reconcile_required`, `48` `RoutingStateEntry`), `tuple[RoutingHistoryInterval, ...]` | `RoutingStateSnapshot`, `RoutingStateEntry`, `RoutingHistoryInterval`, `UncertaintyGapRecord` | **SDN** (authoritative owner) | `IMPLEMENTED` (`PASS_MOCK`) | None (`ALIGNED_V1_4` locked) |
 | **`IF09`** (`ApplyRequest`) | Optimization / Runner | SDN (`DecisionHandler`) | `ApplyRequest` (or `TransportEnvelope` + JSON string) with `run_id`, `decision_batch_id`, `snapshot_id`, `expected_state_version`, `changes` (`1..B`) | Pre-write validation + two-phase OpenFlow install + verification execution | `ApplyRequest`, `ApplyFlowChange`, `TransportEnvelope` | Optimization (caller) / SDN (validator & executor) | `IMPLEMENTED` (`PASS_MOCK`) | **`MUST-LOCK #2`**: Transport mechanism (Python IPC vs. REST vs. Queue) & timeout budgets (`apply_timeout_ms`, `apply_guard_ms`) |
 | **`IF10`** (`ApplyResponse`) | SDN (`DecisionHandler`) | Optimization / Runner / Data | Executed or rejected `ApplyRequest` | `ApplyResponse` with `status`, `state_version`, `completed_at`, `results` (`ApplyFlowResult`), `rule_count`, `payload_hash`, `idempotent_replay` | `ApplyResponse`, `ApplyFlowResult`, `BatchStatus`, `FlowDecisionStatus`, `ReasonCode` | **SDN** (authoritative producer) | `IMPLEMENTED` (`PASS_MOCK`) | **`MUST-LOCK #3`**: Durable outbox / DB persistence of finalized `(run_id, decision_batch_id) -> ApplyResponse` across process restarts |
-| **`SOUTHBOUND`** (`SwitchDriverProtocol`) | SDN (`RuleInstaller`, `RuleVerifier`) | Switch Adapter (`InMemorySwitchDriver` / `RyuOpenFlowDriver`) | `HopFlowRule` (`dpid`, `command`, `priority`, `cookie`, `match_fields`, `out_port`), `Barrier`, `FlowStats`, probe | `FlowModInstallResult`, `BarrierResult`, ` Sequence[FlowStatsRecord]`, `ForwardingProbeResult` | `HopFlowRule`, `CompiledPathRules`, `VerificationEvidence` | **SDN** | `IMPLEMENTED` (`PASS_MOCK` on Windows) | **`MUST-LOCK #4`**: L2/L3/L4 match policy (`FlowMatchMode`) & active probe vs. counter window policy on live OVS (`UBUNTU_REQUIRED`) |
+| **`SOUTHBOUND`** (`SwitchDriverProtocol`) | SDN (`RuleInstaller`, `RuleVerifier`) | Switch Adapter (`InMemorySwitchDriver` / `RyuOpenFlowDriver`) | `OpenFlowRuleSpec`, `FlowModCommand`, `Barrier`, `FlowStats`, `CompiledPathPlan` | `FlowModReceipt`, `BarrierReceipt`, `tuple[SwitchFlowStatsEntry, ...]`, `ForwardingCheckResult` | `OpenFlowRuleSpec`, `CompiledPathPlan`, `VerificationEvidence` | **SDN** | `IMPLEMENTED` (`PASS_MOCK` on Windows) | **`MUST-LOCK #4`**: L3/L4 match policy (`FlowMatchPolicy`) & active probe vs. counter window policy (`ProbeVerificationPolicy`) on live OVS (`UBUNTU_REQUIRED`) |
 
 ---
 
@@ -65,40 +65,54 @@ Every cross-role schema in `sdn.schemas` provides deterministic serialization an
 ### 4.1 `SwitchDriverProtocol` (`sdn/flow_management/switch_driver.py`)
 Used by `RuleInstaller` and `RuleVerifier`. To swap `InMemorySwitchDriver` for `RyuOpenFlowDriver` on Ubuntu:
 ```python
+@runtime_checkable
 class SwitchDriverProtocol(Protocol):
     @property
     def evidence_mode(self) -> EvidenceMode: ...
-    def install_flow_mod(self, rule: HopFlowRule, *, phase: SwitchPhaseTag) -> FlowModInstallResult: ...
-    def send_barrier(self, dpid: int, *, phase: SwitchPhaseTag) -> BarrierResult: ...
+    def send_flow_mod(
+        self,
+        rule: OpenFlowRuleSpec,
+        command: FlowModCommand,
+        *,
+        phase: SwitchPhaseTag,
+    ) -> FlowModReceipt: ...
+    def send_barrier(
+        self,
+        dpid: int,
+        *,
+        phase: SwitchPhaseTag,
+    ) -> BarrierReceipt: ...
     def read_flow_stats(
         self,
         dpid: int,
         *,
-        cookie: Optional[int] = None,
-        cookie_mask: Optional[int] = None,
-        match_fields: Optional[Mapping[str, Any]] = None,
-        priority: Optional[int] = None,
-        table_id: int = 0,
-    ) -> Sequence[FlowStatsRecord]: ...
+        flow_group_id: Optional[str] = None,
+        cookie_int: Optional[int] = None,
+    ) -> tuple[SwitchFlowStatsEntry, ...]: ...
     def verify_forwarding_counter_or_probe(
         self,
+        compiled_plan: CompiledPathPlan,
         *,
-        flow_group_id: str,
-        path_id: str,
-        hop_rules: Sequence[HopFlowRule],
-    ) -> ForwardingProbeResult: ...
+        probe_id: Optional[str] = None,
+    ) -> ForwardingCheckResult: ...
+    def get_operation_log(self) -> tuple[SwitchOperationLogEntry, ...]: ...
 ```
 No changes to `DecisionHandler`, `StateManager`, `RuleInstaller`, `RuleVerifier`, or `SnapshotCreator` are required when injecting `RyuOpenFlowDriver`.
 
 ### 4.2 `DemandHistoryProviderProtocol` & `LinkTelemetryProviderProtocol` (`sdn/monitoring/snapshot_creator.py`)
 Used by `SnapshotCreator.create_snapshot(run_id, cutoff, lookback_L)`:
-- **Data / Runner Integration:** Implement `get_observations(run_id: str) -> Sequence[DemandObservationRecord]` to feed causal released demand records for `bins in [cutoff - lookback_L, cutoff)`.
-- Every record must carry `window_start_utc`, `window_end_utc`, `released_at_utc`, `available_at_utc`, `requested_mbps`, and `source_kind="released_demand"`.
+- **Data / Runner Integration:** Implement `DemandHistoryProviderProtocol`:
+  - `@property def provider_name(self) -> str`
+  - `@property def demand_channel_status(self) -> str`
+  - `def get_observations(self, run_id: str) -> Sequence[DemandObservationRecord]` to feed causal released demand records for `bins in [cutoff - lookback_L, cutoff)`.
+- Every `DemandObservationRecord` must carry `window_start_utc`, `window_end_utc`, `released_at_utc`, `available_at_utc`, `requested_mbps`, and `source_kind="released_demand"`.
+- Optional `LinkTelemetryProviderProtocol`: implement `def get_link_sample_refs(self, run_id: str) -> Sequence[LinkSampleRef]`.
 
 ### 4.3 `BatchIdempotencyStoreProtocol` (`sdn/controller/decision_handler.py`)
 Used by `DecisionHandler`:
-- Default: `InMemoryVolatileIdempotencyStore(is_durable=False)` — clears volatile cache on `notify_controller_restart(run_id)` so SDN never claims durable replay without persistent backing.
-- Production / Data Integration: Inject a SQLite/Redis/Data-backed implementation with `is_durable=True` so duplicate `(run_id, decision_batch_id)` requests re-submitted after a controller process restart return the persisted `ApplyResponse` (`idempotent_replay=True`) or reject conflicting payloads (`BATCH_ID_CONFLICT`).
+- Default: `InMemoryBatchIdempotencyStore()` (`is_durable == False`, `store_status == "VOLATILE_IN_MEMORY_MUST_LOCK_DURABLE_STORE"`) — clears volatile cache on `notify_controller_restart(run_id)` via `invalidate_run_on_restart(run_id)` so SDN never claims durable replay without persistent backing.
+- Production / Data Integration: Inject a SQLite/Redis/Data-backed implementation with `is_durable == True` so duplicate `(run_id, decision_batch_id)` requests re-submitted after a controller process restart return the persisted `ApplyResponse` (`idempotent_replay=True`) or reject conflicting payloads (`BATCH_ID_CONFLICT`).
+- **Snapshot Validation Policy (`DecisionHandlerConfig`):** Production/integration callers should use `DecisionHandlerConfig()` or `DecisionHandlerConfig.for_integration()` (`SnapshotValidationPolicy.FAIL_CLOSED_INTEGRATION`, `require_registered_snapshot=True`). `DecisionHandlerConfig.for_mock_unit_tests()` (`SnapshotValidationPolicy.TEST_ONLY_ALLOW_UNREGISTERED`) is reserved strictly for isolated unit-test fixtures.
 
 ---
 

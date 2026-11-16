@@ -13,13 +13,13 @@ The `sdn/` package implements the **SDN Control Plane, State Manager, Two-Phase 
 To support full development and deterministic contract testing on **Windows (Pure Python)** while remaining ready for **Ubuntu Linux (Mininet + Open vSwitch + Ryu OpenFlow 1.3)** without modifying any core control logic, `sdn/` strictly separates:
 1. **Pure-Python Control Plane Core (Zero Linux/Ryu/Mininet import dependencies):**
    - `TopologyRegistry`: Loads and validates `configs/network/topology_bundle.json` and canonical CSV catalogs (`hosts.csv`, `switches.csv`, `links.csv`, `flow_groups.csv`, `candidate_paths.csv`, `initial_paths.csv`), enforcing SHA-256 `topology_hash` and rejecting legacy identifiers.
-   - `FlowMatcher` & `RouteCompiler`: Compiles canonical `path_id` (`0x103_P1`, `0x103_P2`) into 3-hop OpenFlow 1.3 rules (`e_src`, `c1`/`c2`, `e_dst`) with configurable L2/L3/L4 matching (`FlowMatchPolicyConfig`) and cookie (`flow_cookie == flow_group_id`).
+   - `FlowMatcher` & `RouteCompiler`: Compiles canonical `path_id` (`0x103_P1`, `0x103_P2`) into 3-hop OpenFlow 1.3 rules (`e_src`, `c1`/`c2`, `e_dst`) with configurable L3/L4 matching (`FlowMatcherConfig`, `FlowMatchPolicy`) and cookie (`flow_cookie == flow_group_id`).
    - `StateManager`: Authoritative owner of per-run `state_version`, `routing_state`, `routing_history`, `uncertainty_gaps`, single-batch in-flight locks (`BUSY`), reconciliation locks (`RECONCILIATION_REQUIRED`), and hold-down evaluation (`T_hold`).
    - `RuleInstaller` & `RuleVerifier`: Executes two-phase downstream-first OpenFlow 1.3 installation (`c1`/`c2` + `e_dst` + `Barrier` $\rightarrow$ `e_src` + `Barrier`), multi-signal route verification (`Barrier` + `FlowStats` read-back + counter/probe confirmation), automatic rollback on failure, and `UNKNOWN` containment when verification is inconclusive.
    - `DecisionHandler`: Validates `ApplyRequest` pre-conditions (`AC-S02`), enforces idempotency (`AC-S08`), orchestrates `RuleInstaller` and `StateManager`, and guarantees crash consistency (never returning a false `REJECTED` after switch writes begin).
    - `SnapshotCreator`: Produces immutable online `Snapshot` objects (`create_snapshot(run_id, cutoff, lookback_L)`) enforcing all three causality inequalities (`window_end_utc <= history_cutoff_utc`, `released_at_utc <= snapshot_as_of_utc`, `available_at_utc <= snapshot_as_of_utc`) and preventing zero-substitution for missing demand.
 2. **Pluggable Runtime & External Boundary Adapters (`Protocol` interfaces):**
-   - `SwitchDriverProtocol` (`sdn/flow_management/switch_driver.py`): Abstracts OpenFlow 1.3 wire operations (`install_flow_mod`, `send_barrier`, `read_flow_stats`, `verify_forwarding_counter_or_probe`). Implemented by `InMemorySwitchDriver` on Windows (`PASS_MOCK`) and designed for `RyuOpenFlowDriver` on Ubuntu (`PASS_LIVE_OVS`).
+   - `SwitchDriverProtocol` (`sdn/flow_management/switch_driver.py`): Abstracts OpenFlow 1.3 wire operations (`send_flow_mod`, `send_barrier`, `read_flow_stats`, `verify_forwarding_counter_or_probe`, `get_operation_log`). Implemented by `InMemorySwitchDriver` on Windows (`PASS_MOCK`) and designed for `RyuOpenFlowDriver` on Ubuntu (`PASS_LIVE_OVS`).
    - `DemandHistoryProviderProtocol` & `LinkTelemetryProviderProtocol` (`sdn/monitoring/snapshot_creator.py`): Abstracts causal released-demand delivery (`REQ-03` / `IF02`) and link sample references.
    - `BatchIdempotencyStoreProtocol` (`sdn/controller/decision_handler.py`): Abstracts volatile vs. durable idempotency storage across controller restarts.
    - `TransportEnvelope` (`sdn/schemas/apply_models.py`): Wraps `ApplyRequest` / `ApplyResponse` across IPC/REST/Queue transport boundaries.
@@ -30,7 +30,7 @@ To support full development and deterministic contract testing on **Windows (Pur
 
 ```text
 sdn/
-├── __init__.py                         # Unified public API exports (102 symbols)
+├── __init__.py                         # Unified public API exports (103 symbols)
 ├── schemas/
 │   ├── __init__.py
 │   ├── state_models.py                 # RoutingStateEntry, RoutingHistoryInterval, VerificationEvidence, enums & strict validators
@@ -44,7 +44,7 @@ sdn/
 ├── flow_management/
 │   ├── __init__.py
 │   ├── flow_matcher.py                 # Configurable L2/L3/L4 OpenFlow 1.3 match builder
-│   ├── route_compiler.py               # Compiles path_id -> 3-hop HopFlowRule (e_src, core, e_dst)
+│   ├── route_compiler.py               # Compiles path_id -> 3-hop OpenFlowRuleSpec (e_src, core, e_dst)
 │   ├── switch_driver.py                # SwitchDriverProtocol & InMemorySwitchDriver (with fault injection F09-F12)
 │   └── rule_installer.py               # Downstream-first 2-phase installer, bootstrap, rollback & rule_count tracking
 ├── route_verification/
@@ -70,7 +70,7 @@ sdn/
 
 All unit, contract, serialization, and end-to-end mock integration tests run in pure Python on Windows using the repository's `.venv`:
 
-### 3.1 Run the Full Test Suite (`96` Tests)
+### 3.1 Run the Full Test Suite (`97` Tests)
 ```powershell
 .\.venv\bin\python.exe -m pytest -v -p no:cacheprovider sdn/tests/
 ```
@@ -86,7 +86,7 @@ All unit, contract, serialization, and end-to-end mock integration tests run in 
 # Phase 3: OpenFlow 1.3 Semantics, Two-Phase Install & Verification (19 tests)
 .\.venv\bin\python.exe -m pytest -v -p no:cacheprovider sdn/tests/test_flow_management_and_verification.py
 
-# Phase 4: DecisionHandler, Apply Contracts & Causal SnapshotCreator (22 tests)
+# Phase 4: DecisionHandler, Apply Contracts & Causal SnapshotCreator (23 tests)
 .\.venv\bin\python.exe -m pytest -v -p no:cacheprovider sdn/tests/test_phase4_decision_and_snapshot.py
 
 # Phase 5: E2E Mock Integration, Adapter Hot-Swap & Schema Serialization (6 suites)

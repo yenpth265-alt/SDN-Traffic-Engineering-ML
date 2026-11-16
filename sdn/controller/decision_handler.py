@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from enum import Enum
 from typing import Callable, Mapping, Optional, Protocol, runtime_checkable
 
 from sdn.controller.state_manager import (
@@ -137,6 +138,19 @@ class InMemoryBatchIdempotencyStore:
             self._entries.pop(k, None)
 
 
+class SnapshotValidationPolicy(str, Enum):
+    """
+    Controls how `DecisionHandler` validates `ApplyRequest.snapshot_id` and freshness:
+    - `FAIL_CLOSED_INTEGRATION`: Production / integration default. Never allows an
+      unregistered `snapshot_id` without verified freshness timestamps to proceed.
+    - `TEST_ONLY_ALLOW_UNREGISTERED`: Isolated unit-test policy only; allows synthetic
+      `ApplyRequest` fixtures that omit `SnapshotCreator` registration and timestamps.
+    """
+
+    FAIL_CLOSED_INTEGRATION = "FAIL_CLOSED_INTEGRATION"
+    TEST_ONLY_ALLOW_UNREGISTERED = "TEST_ONLY_ALLOW_UNREGISTERED"
+
+
 @dataclass(frozen=True)
 class DecisionHandlerConfig:
     """
@@ -149,11 +163,59 @@ class DecisionHandlerConfig:
     stale_threshold_s: float = 2.0
     apply_guard_s: float = 0.0
     require_topology_hash: bool = True
-    require_registered_snapshot: bool = False
+    require_registered_snapshot: bool = True
+    snapshot_validation_policy: SnapshotValidationPolicy = (
+        SnapshotValidationPolicy.FAIL_CLOSED_INTEGRATION
+    )
     expected_config_hash: Optional[str] = None
     cleanup_old_downstream: bool = False
     timing_budget_policy_status: str = "MUST_LOCK_TIMING_BUDGET"
     idempotency_store_status: str = "VOLATILE_IN_MEMORY_MUST_LOCK_DURABLE_STORE"
+
+    @classmethod
+    def for_integration(
+        cls,
+        *,
+        stale_threshold_s: float = 2.0,
+        apply_guard_s: float = 0.0,
+        require_topology_hash: bool = True,
+        expected_config_hash: Optional[str] = None,
+        cleanup_old_downstream: bool = False,
+    ) -> "DecisionHandlerConfig":
+        """Fail-closed configuration for integration and production runs."""
+        return cls(
+            stale_threshold_s=stale_threshold_s,
+            apply_guard_s=apply_guard_s,
+            require_topology_hash=require_topology_hash,
+            require_registered_snapshot=True,
+            snapshot_validation_policy=SnapshotValidationPolicy.FAIL_CLOSED_INTEGRATION,
+            expected_config_hash=expected_config_hash,
+            cleanup_old_downstream=cleanup_old_downstream,
+        )
+
+    @classmethod
+    def for_mock_unit_tests(
+        cls,
+        *,
+        stale_threshold_s: float = 2.0,
+        apply_guard_s: float = 0.0,
+        require_topology_hash: bool = True,
+        expected_config_hash: Optional[str] = None,
+        cleanup_old_downstream: bool = False,
+    ) -> "DecisionHandlerConfig":
+        """
+        Explicit test-only configuration for isolated unit tests that construct synthetic
+        `ApplyRequest` objects without registering a `Snapshot` in `SnapshotCreator`.
+        """
+        return cls(
+            stale_threshold_s=stale_threshold_s,
+            apply_guard_s=apply_guard_s,
+            require_topology_hash=require_topology_hash,
+            require_registered_snapshot=False,
+            snapshot_validation_policy=SnapshotValidationPolicy.TEST_ONLY_ALLOW_UNREGISTERED,
+            expected_config_hash=expected_config_hash,
+            cleanup_old_downstream=cleanup_old_downstream,
+        )
 
 
 class DecisionHandler:
@@ -646,6 +708,18 @@ class DecisionHandler:
                         rejected_at_utc=norm_decision_ts,
                         run_initialized=True,
                     )
+            elif (
+                self._config.snapshot_validation_policy
+                != SnapshotValidationPolicy.TEST_ONLY_ALLOW_UNREGISTERED
+            ):
+                # Fail-closed in integration/production mode: an unregistered snapshot_id
+                # with no history_cutoff_utc or snapshot_as_of_utc cannot verify freshness.
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.INVALID_REQUEST,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
 
         # 9. Check forecast_start, forecast_end, apply_deadline_utc & apply_guard_s (AC-S02)
         try:

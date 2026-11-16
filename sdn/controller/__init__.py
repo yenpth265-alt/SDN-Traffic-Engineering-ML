@@ -6,6 +6,7 @@ from sdn.controller.decision_handler import (
     DecisionHandler,
     DecisionHandlerConfig,
     InMemoryBatchIdempotencyStore,
+    SnapshotValidationPolicy,
 )
 from sdn.controller.state_manager import (
     BatchIdConflictError,
@@ -42,6 +43,7 @@ __all__ = [
     "InMemoryBatchIdempotencyStore",
     "InitialPathEntry",
     "ReconciliationRequiredError",
+    "SnapshotValidationPolicy",
     "StateManager",
     "StateManagerError",
     "StateValidationError",

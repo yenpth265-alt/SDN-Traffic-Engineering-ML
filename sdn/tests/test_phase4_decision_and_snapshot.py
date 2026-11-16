@@ -145,7 +145,7 @@ def _build_controller_stack(
         topology_registry=topology,
         state_manager=state_mgr,
         rule_installer=installer,
-        config=handler_config,
+        config=handler_config or DecisionHandlerConfig.for_mock_unit_tests(),
         snapshot_lookup=snap_creator.get_closed_snapshot,
     )
     return (
@@ -453,7 +453,7 @@ def test_07_deadline_expired_before_write_and_stale_snapshot(
 ) -> None:
     driver, _, _, state_mgr, handler, _, _ = _build_controller_stack(
         topology,
-        handler_config=DecisionHandlerConfig(
+        handler_config=DecisionHandlerConfig.for_mock_unit_tests(
             stale_threshold_s=2.0,
             apply_guard_s=0.5,
         ),
@@ -1096,6 +1096,7 @@ def test_16_multi_run_state_and_snapshot_isolation(
         topology,
         state_mgr,
         installer,
+        config=DecisionHandlerConfig.for_mock_unit_tests(),
         snapshot_lookup=snap_creator.get_closed_snapshot,
     )
 
@@ -1656,4 +1657,117 @@ def test_22_must_lock_parameter_tags_and_role_boundaries(
     assert fm_cfg.policy_status == "MUST_LOCK_PROVISIONAL_DEFAULT"
     rv_cfg = RuleVerifierConfig()
     assert rv_cfg.policy_status == "MUST_LOCK_PROVISIONAL_DEFAULT"
+
+
+def test_23_fail_closed_snapshot_validation_vs_test_only_policy(
+    topology: TopologyRegistry,
+) -> None:
+    """
+    Verify fail-closed snapshot validation in integration/production mode vs explicit
+    test-only policy (`DecisionHandlerConfig.for_mock_unit_tests()`):
+    1. Default `DecisionHandlerConfig()` (`FAIL_CLOSED_INTEGRATION`, `require_registered_snapshot=True`)
+       rejects any unregistered `snapshot_id`, even if timestamps are supplied.
+    2. `DecisionHandlerConfig(require_registered_snapshot=False)` (still `FAIL_CLOSED_INTEGRATION`)
+       rejects an unregistered `snapshot_id` when BOTH `history_cutoff_utc` and
+       `snapshot_as_of_utc` are missing (no freshness bypass!).
+    3. `DecisionHandlerConfig(require_registered_snapshot=False)` with a valid fresh
+       `history_cutoff_utc` checks staleness (`> stale_threshold_s` -> `STALE`, `<=` -> `APPLIED`).
+    4. Only explicit `DecisionHandlerConfig.for_mock_unit_tests()` (`TEST_ONLY_ALLOW_UNREGISTERED`)
+       allows synthetic unit-test requests without registered snapshot or timestamps.
+    """
+    from dataclasses import replace
+
+    # 1. Default fail-closed integration config rejects unregistered snapshot_id even with timestamps
+    driver_int, _, _, state_int, handler_int, _, _ = _build_controller_stack(
+        topology,
+        handler_config=DecisionHandlerConfig(),
+    )
+    driver_int.clear_operation_log()
+    req_unreg_with_ts = replace(
+        _make_valid_apply_request(
+            topology,
+            decision_batch_id="batch_fail_closed_default",
+            snapshot_id="snap:non_existent_id",
+        ),
+        history_cutoff_utc="2026-11-12T09:00:10Z",
+    )
+    resp_int = handler_int.handle_apply_request(
+        req_unreg_with_ts,
+        decision_time_utc="2026-11-12T09:00:10.200Z",
+    )
+    assert resp_int.status == BatchStatus.REJECTED
+    assert resp_int.reason == ReasonCode.INVALID_REQUEST.value
+    assert resp_int.rule_count == 0
+    assert state_int.get_state_version("run_p4_01") == 1
+    assert _count_flow_mods(driver_int) == 0
+
+    # 2. require_registered_snapshot=False under FAIL_CLOSED_INTEGRATION MUST STILL REJECT
+    #    when both history_cutoff_utc and snapshot_as_of_utc are missing!
+    driver_fc, _, _, state_fc, handler_fc, _, _ = _build_controller_stack(
+        topology,
+        handler_config=DecisionHandlerConfig(require_registered_snapshot=False),
+    )
+    driver_fc.clear_operation_log()
+    req_no_ts = _make_valid_apply_request(
+        topology,
+        decision_batch_id="batch_fail_closed_no_ts",
+        snapshot_id="snap:non_existent_id",
+    )
+    assert req_no_ts.history_cutoff_utc is None
+    assert req_no_ts.snapshot_as_of_utc is None
+
+    resp_no_ts = handler_fc.handle_apply_request(
+        req_no_ts,
+        decision_time_utc="2026-11-12T09:00:10.200Z",
+    )
+    assert resp_no_ts.status == BatchStatus.REJECTED
+    assert resp_no_ts.reason == ReasonCode.INVALID_REQUEST.value
+    assert resp_no_ts.rule_count == 0
+    assert state_fc.get_state_version("run_p4_01") == 1
+    assert _count_flow_mods(driver_fc) == 0
+
+    # 3. require_registered_snapshot=False with explicit timestamps still enforces T_stale_s
+    req_stale_ts = replace(
+        _make_valid_apply_request(
+            topology,
+            decision_batch_id="batch_unreg_stale_ts",
+            snapshot_id="snap:non_existent_id",
+        ),
+        history_cutoff_utc="2026-11-12T09:00:05Z",
+    )
+    resp_stale_ts = handler_fc.handle_apply_request(
+        req_stale_ts,
+        decision_time_utc="2026-11-12T09:00:10.200Z",
+    )
+    assert resp_stale_ts.status == BatchStatus.REJECTED
+    assert resp_stale_ts.reason == ReasonCode.STALE.value
+    assert resp_stale_ts.rule_count == 0
+
+    req_fresh_ts = replace(
+        _make_valid_apply_request(
+            topology,
+            decision_batch_id="batch_unreg_fresh_ts",
+            snapshot_id="snap:non_existent_id",
+        ),
+        history_cutoff_utc="2026-11-12T09:00:10Z",
+    )
+    resp_fresh_ts = handler_fc.handle_apply_request(
+        req_fresh_ts,
+        decision_time_utc="2026-11-12T09:00:10.200Z",
+    )
+    assert resp_fresh_ts.status == BatchStatus.APPLIED
+    assert resp_fresh_ts.state_version == 2
+
+    # 4. Explicit test-only policy allows synthetic fixtures without timestamps
+    _, _, _, _, handler_test_only, _, _ = _build_controller_stack(
+        topology,
+        handler_config=DecisionHandlerConfig.for_mock_unit_tests(),
+    )
+    resp_test_only = handler_test_only.handle_apply_request(
+        req_no_ts,
+        decision_time_utc="2026-11-12T09:00:10.200Z",
+    )
+    assert resp_test_only.status == BatchStatus.APPLIED
+    assert resp_test_only.state_version == 2
+
 

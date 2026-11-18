@@ -56,19 +56,19 @@
         },
         {
             "seed": 11,
-            "split": "train"
+            "split": "validation"
         },
         {
             "seed": 12,
-            "split": "train"
+            "split": "validation"
         },
         {
             "seed": 13,
-            "split": "train"
+            "split": "validation"
         },
         {
             "seed": 14,
-            "split": "train"
+            "split": "validation"
         },
         {
             "seed": 15,
@@ -76,11 +76,11 @@
         },
         {
             "seed": 16,
-            "split": "validation"
+            "split": "test"
         },
         {
             "seed": 17,
-            "split": "validation"
+            "split": "test"
         },
         {
             "seed": 18,

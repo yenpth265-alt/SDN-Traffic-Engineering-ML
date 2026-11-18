@@ -1,11 +1,13 @@
 # Giao diện tích hợp tổng hợp cho kiểm thử SDN
 
-- Phiên bản `testing_v2 2026-11-10`.
-- API mục tiêu `sdn_qa_api_v2`.
+- Phiên bản `testing_v2 2026-11-14`, đồng bộ Integration Guide `1.4-network-id-trimmed`.
+- API mục tiêu `sdn_qa_api_v2`; schema/API version triển khai phải được khóa cùng contract, không coi nhãn này là API đã hiện thực.
 - Phụ trách Testing/QA/QC.
 - Trạng thái: hoàn thiện đặc tả để owner xác nhận, chưa nghiệm thu triển khai.
 
-Đây là hợp đồng đích đề xuất dựa trên file từng role và báo cáo rà soát; chưa phải xác nhận API đã hiện thực. Các owner cần xác nhận C01–C16 trong test_plan_v2.md trước freeze. Giữ nguyên ranh giới: Network tạo tải; Data lưu/cấp snapshot; ML dự báo; Optimization quyết định; SDN thực thi/xác minh; Testing đối chiếu độc lập. Không sửa file thành viên trong đợt này.
+Nguồn đối chiếu là [Integration Guide v1.4](../../docs/architecture/SDN_Traffic_Engineering_Role_Integration_Guide_v1.4.md), đặc biệt mục 3–5 và 13. Các quy tắc ID, snapshot, 7-field predictions và mean/epsilon dưới đây thay thế quy ước cũ của Testing; chưa phải xác nhận API đã hiện thực. Theo thứ tự ưu tiên ở Guide mục 1, contract đã được nhóm duyệt → schema chung → config chung → tài liệu role → code; khác biệt phải được ghi nhận và sửa đồng bộ, không tự viết adapter riêng để giữ hai chuẩn. Owner khóa các mục OPEN/MUST_LOCK trong [test_plan_v2.md](test_plan_v2.md) trước freeze.
+
+Ranh giới: Network tạo tải/demand release; **SDN tạo snapshot và xác minh route**; **Data là DB writer duy nhất, lưu/cấp snapshot nguyên bản**; ML chọn L*/H*/epsilon* offline rồi gửi đúng 7 trường dự báo final; Optimization tự tính mean và quyết định; Runner gửi ApplyRequest; Testing đối chiếu độc lập. Các chi tiết vận chuyển, schema mở rộng và ngưỡng pilot dưới đây là đề xuất cần freeze; không mở lại các quyết định ownership đã xác nhận ở v1.4.
 
 ## 1. Danh mục và quyền sở hữu
 
@@ -14,11 +16,11 @@
 | IF01 | Network → SDN/Data/Optimization | TopologyBundle: host/switch/link/flow/path/initial map | Network; SDN đối soát port |
 | IF02 | Network → Data/Runner | ScheduleBundle: CSV + manifest/hash | Network+Data |
 | IF03 | Network/SDN → Data/Testing | PacketLog, ProbeLog, CounterLog | Producer; Data kiểm nguồn đo |
-| IF04 | Data → ML | TrainingBundle: X/y_vector/y_mean/metadata/split | Data+ML |
-| IF05 | Data+SDN → ML/Optimization | Snapshot lịch sử causal và confirmed state | Data+SDN |
-| IF06 | ML/baseline → Data → Optimization | H-step predictions, batch READY, mean adapter | ML+Data+Optimization |
-| IF07 | Data/Coordinator → Optimization | Demand mean+state → proposal/audit | Optimization |
-| IF08 | Optimization/adapter → SDN → Data/Optimization | ApplyRequest/ApplyResponse, verified state/history | Optimization+SDN+Data |
+| IF04 | Data → ML | TrainingBundle: X/y_vector/metadata/split; ML/Testing tính mean nhãn khi đánh giá offline | Data+ML |
+| IF05 | SDN → Data (lưu) → ML/Optimization (đọc) | Snapshot lịch sử causal do SDN tạo, ID/hash/cutoff và confirmed state | SDN tạo; Data validate/lưu/cấp |
+| IF06 | ML/baseline → Data → Optimization | Đúng 7 trường/hàng; Data tạo ForecastBatchRef READY đủ 48×H*; Optimization tự mean | ML+Data+Optimization |
+| IF07 | Data → Optimization → Runner/Data | H* rows/flow+state → Optimization tính mean, proposal/audit | Optimization |
+| IF08 | Runner/Orchestrator → SDN → Data | ApplyRequest từ proposal đã validate; ApplyResponse, verified state/history | Optimization+SDN+Data |
 | IF09 | Tất cả → Data/QA | Events, control ticks, metrics và provenance | Data+QA |
 | IF10 | Runner/QA → tất cả | RunManifest/frozen config/seed/order | Runner+QA, các owner echo version |
 
@@ -26,21 +28,21 @@ Coordinator là vai trò điều phối logic, có thể nằm trong runner; kh�
 
 ## 2. Quy ước định danh và thời gian
 
-### 2.1. Namespace chuẩn và adapter
+### 2.1. Namespace chuẩn theo Network
 
 | Khái niệm | Canonical | Nguồn cũ và chuyển đổi |
 | --- | --- | --- |
-| Nhóm có hướng | `flow_group_id=h1_h3` | `0x103` là cookie; `h1-h3`/nhom → tra mapping |
-| OpenFlow cookie | `flow_cookie=0x103` | Theo Network src×256+dst; không dùng thay primary ID |
-| Đường | `path_id=h1_h3_c1` / `h1_h3_c2` | P1/P2,c1/c2 chỉ resolve khi có flow + topology |
+| Nhóm có hướng | `flow_group_id=0x103` | Chuỗi hex Network `0x{src×256+dst:X}`; h1→h3 = `0x103` |
+| OpenFlow cookie | `flow_cookie=0x103` | Cùng trị số mã nhóm nhưng là field kỹ thuật OpenFlow; không thay flow object hoặc match rule |
+| Đường | `path_id=0x103_P1` / `0x103_P2` | Quy ước Data `<flow_group_id>_P1/_P2`; Network xuất catalog chính thức |
 | Nhãn đường | `path_label=P1` / `P2` | P1 qua c1, P2 qua c2 |
-| Link có hướng | `link_id=e1_to_c1` | e1>c1,e1_c1 → mapping; c1_to_e1 là link khác |
+| Link có hướng | `link_id=e1>c1` | Lấy nguyên catalog Network; `c1>e1` là link khác |
 | Batch forecast | `forecast_batch_id=fc_001` | Khác batch điều khiển; nhóm nhiều prediction rows |
 | Batch thực thi | `decision_batch_id=batch_001` | Optimization.batch_id → decision_batch_id |
 | Trạng thái | `state_version` integer toàn run | Không dùng bộ đếm riêng từng flow |
 | Phiên bản | config_version/topology_version/schema_version/api_version | Version có hash nội dung kèm; không dùng chuỗi v1 thay checksum |
 
-Network xuất mapping máy đọc được; Data/consumer không tự parse alias mơ hồ. Thứ tự vector48 nhóm theo cookie tăng dần trong manifest, song consumer phải join bằng flow_group_id và kiểm tập ID, không chỉ zip theo vị trí.
+Network xuất mapping máy đọc được; schema/fixtures/API/serializer/test phải dùng cùng catalog. `h1_h3`, `h1_h3_c1`, `e1_to_c1` chỉ là ví dụ **ID cũ bị loại**, không phải alias được chấp nhận online. Nếu chuyển dữ liệu cũ, migration có version/hash và kiểm tra ánh xạ trước ingest; không đổi dữ liệu Network theo chuẩn Testing cũ. Thứ tự vector 48 nhóm theo giá trị số của flow ID hex tăng dần, song consumer phải join bằng `flow_group_id` và kiểm tập ID, không chỉ zip theo vị trí.
 
 ### 2.2. Origin và khoảng thời gian
 
@@ -52,17 +54,17 @@ Baseline đề xuất:
 - `traffic_actual.window_start/end`: từ traffic_started_at_utc, giữ semantics Data §6.1.
 - `predictions.forecast_start/end`: từ measurement_started_at_utc, giữ semantics ML §6.3.
 - Snapshot/ApplyRequest UTC; mọi interval `[start,end)`. ML d[k] là giá trị trong [k,k+1) theo measurement origin; các bin warm-up âm có thể là lịch sử hợp lệ.
-- Quy đổi `utc=declared_origin+offset_s`; measurement=t0+70s và forecast bin100 thì schedule bin170. Không cộng warm-up hai lần.
+- Quy đổi `utc=declared_origin+offset_s`; pilot warm-up 60s, measurement=traffic origin+60s và forecast bin100 thì traffic offset160. Không cộng warm-up hai lần; luôn dùng origin thực trong manifest.
 
-Ví dụ TC-I03: traffic10:00:00Z; measurement10:01:10Z; forecast offsets100..105 → UTC10:02:50Z..10:02:55Z. Ví dụ run origin trong báo cáo chỉ áp khi field đó thực sự khai báo run origin.
+Ví dụ TC-I03 theo Guide mục 13.2: traffic `2026-11-12T09:00:00Z`; measurement `09:01:00Z`; forecast offsets100..105 → UTC `09:02:40Z`..`09:02:45Z`. Ví dụ run origin trong báo cáo chỉ áp khi field đó thực sự khai báo run origin.
 
-Ở cutoff t, X lấy [t−L,t), Y lấy [t,t+H); mẫu online chỉ dùng khi window_end≤cutoff và available_at≤snapshot_as_of≤decision time. `issued_at` là lúc forecast phát hành, không phải forecast_start và không bị backdate để khớp bin. `forecast_start` là target anchor t. Late history đến sau snapshot_as_of không được nhập lại snapshot bất biến.
+Ở cutoff t, X lấy [t−L,t), Y lấy [t,t+H); mẫu online chỉ dùng khi `window_end_utc≤history_cutoff_utc`, `released_at_utc≤snapshot_as_of_utc` và `available_at_utc≤snapshot_as_of_utc≤decision time`. `issued_at` là lúc forecast phát hành, có thể muộn hơn forecast_start và không bị backdate để khớp bin. `forecast_start` là target anchor t. Late history không được nhập lại snapshot SDN đã đóng.
 
 ### 2.3. Đơn vị và envelope
 
 Mbps=1.000.000 bit/s; payload bao gồm metadata ứng dụng. requested_mbps, sent_bytes, received_unique_bytes và Port TX bytes có semantics khác nhau. Dữ liệu thiếu=null+reason; 0 là giá trị thật. Demand hữu hạn≥0,capacity>0,k_e>0; dự báo lớn hơn capacity có thể hợp lệ. NaN/Infinity không hợp lệ JSON; ghi null+reason trong lỗi. Không clip utilization về1.
 
-Envelope batch/API gồm api_version,schema_version,run_id,producer,produced_at,config_version,config_hash,topology_version. Bảng predictions vẫn7 cột; các trường envelope/audit lưu ở batch registry/manifest liên kết, không bắt buộc lặp trong7 cột. Ingest có khóa/record ID, provenance raw file+line/hash; conflict không overwrite im lặng.
+Envelope vận chuyển do Runner/Data adapter tạo gồm api_version,schema_version,run_id,producer,produced_at,config_version,config_hash,topology_version,topology_hash; payload_hash dùng cho idempotency. **Payload ML→Data chỉ là PredictionRows đúng 7 trường**, không yêu cầu ML xuất envelope, batch ID hoặc config metadata bổ sung. Envelope/audit liên kết registry/RunManifest ở ngoài rows. Ingest có khóa/record ID, provenance raw file+line/hash; conflict không overwrite im lặng.
 
 ## 3. IF01 TopologyBundle
 
@@ -78,15 +80,17 @@ Envelope batch/API gồm api_version,schema_version,run_id,producer,produced_at,
 
 DPID e1..e4=1..4,c1=5,c2=6; edge port1/2 host,3 c1,4 c2; spine port1..4 e1..e4. 8 host/6 switch/48 directed groups/96 candidates/16 fabric directions/32 all directions. Mỗi path4 link có hướng, đúng2 fabric links, không vòng. Cặp cùng edge phục vụ chuyển tiếp riêng, ngoài F tối ưu. Mỗi fabric direction xuất hiện trong12 candidates; tổng incidence192.
 
-Ví dụ h1_h3_c1: [h1_to_e1,e1_to_c1,c1_to_e2,e2_to_h3]. Match phải lấy IP/MAC từ config; không tự suy MAC. Tham số baseline10Mbps mỗi chiều,1ms host/5ms fabric,queue50 là cấu hình thiết kế; k_e/measurement point có calibration_id, chưa đo không ghi đã hiệu chuẩn.
+Ví dụ `0x103_P1`: `[h1>e1,e1>c1,c1>e2,e2>h3]`. Match phải lấy IP/MAC từ config; không tự suy MAC. Tham số baseline10Mbps mỗi chiều,1ms host/5ms fabric,queue50 là cấu hình thiết kế; k_e/measurement point có calibration_id, chưa đo không ghi đã hiệu chuẩn.
 
 ## 4. IF02 ScheduleBundle và IF10 RunManifest
 
 CSV khóa `(schedule_id,flow_group_id,time_offset_s)`; cột requested_mbps; core dense48 dòng/bin, zero explicit. Manifest ghi scenario/rho/seed/parent_family_id/split, origin,Δ=1s,duration_s,generator version/params,packet payload,content hash,series fingerprint,config version/hash,topology version,CORE/HOST_STRESS label,validation report. Nếu rescale/cap, lưu thuật toán và tỷ lệ biến đổi thực; không khẳng định S2b/S5 luôn đạt rho danh nghĩa.
 
-Lịch phải phủ warm-up+360s; nhãn forecast của tick cuối cần lịch đủ đến target_end (thêm tối đa H_max nếu chấm tất cả tick). Đo truyền chính vẫn kết thúc sau360s, không phát thêm tail vào cohort; tương lai tail chỉ oracle/offline evaluator được đọc. Không đủ nhãn tail thì báo exclusion/coverage đồng nhất mọi provider.
+Lịch phải phủ warm-up 60s + measurement 360s theo pilot. Theo Guide mục 3.4, chỉ phát hành forecast khi `forecast_end≤measurement_end`; với H*=10, cutoff cuối hợp lệ là350. M1–M3 dùng cùng policy; oracle dùng cùng tập target khi so sánh. Label tail là thay đổi cần duyệt/freeze riêng (Guide mục 11), không mặc định thêm tail hoặc trộn tail vào metrics chính.
 
-RunManifest ghi experiment/run/schedule/method/scenario,split,parent family,schedule/model/solver/order/fault seeds,repeat/attempt/order index,code/env/model/config/topology hashes,Δ/T_ctl/L/H/MA_window,epsilon_owner/ratio,initial_paths_hash,calibration_id,origins UTC+mono,measurement_end/drain_end,timeout/guard/deadline policy,files/hashes,status/quality/inclusion/reason/supersedes_run_id. Những trường chưa biết ban đầu bổ sung khi hoàn tất, không giả trị số.
+Split trước window theo seed/run family. **Tỷ lệ train/validation/test đã xác nhận là70/15/15**, tương ứng14/3/3 khi tập chia có20 seeds; Guide mục3.5, YAML mục3.6 và bảng mục6 dùng thống nhất tỷ lệ này. Còn MUST_LOCK là danh sách seed cụ thể, phạm vi áp dụng theo scenario/cấu hình và hash của `split_manifest`. Tổng schedules/runs lấy từ `benchmark_matrix` đã khóa; không mặc định225 runs hoặc coi mỗi cấu hình rho là một scenario có20 seeds nếu chưa được xác nhận.
+
+RunManifest ghi experiment/run/schedule/method/scenario,split,parent family,schedule/model/solver/order/fault seeds,repeat/attempt/order index,code/env/model/config/topology hashes,Δ/T_ctl/MA_window,**ml_config_ref/hash/version và L*/H*/epsilon* đã được ML chọn offline**,initial_paths_hash,calibration_id,origins UTC+mono,measurement_end/drain_end,timeout/guard/deadline policy,files/hashes,status/quality/inclusion/reason/supersedes_run_id. Runner freeze config trước run; Data đọc H* từ config/manifest này để kiểm48×H*, không suy H từ số rows nhận được hoặc yêu cầu ML gửi config theo mỗi forecast. Những trường chỉ biết sau run bổ sung khi hoàn tất, không thay config đã khóa hoặc giả trị số.
 
 Method M3 không đổi thành M1 khi fallback. Data runs `ok/failed/discarded` là reporting view; lưu status chi tiết ở manifest/source table: CREATED/RUNNING/COMPLETED/FAILED/INVALID_INFRASTRUCTURE. Inclusion riêng INCLUDED/EXCLUDED/PARTIAL_METRICS/PENDING_QA. Giữ mọi attempt.
 
@@ -103,93 +107,105 @@ Sequence duy nhất theo run/group, không reset mỗi giây. Nếu restart ph�
 
 Counter chuẩn một chiều dùng PORT_TX ở nguồn; không cộng TX nguồn+RX đích. Mapping host TX không nhất thiết có OpenFlow port ở host: Network cung cấp nguồn host counter riêng hoặc ghi unavailable; MLU chỉ yêu cầu16 fabric. Mẫu đầu/reset/epoch đổi/Δt≤0: delta/throughput=null,valid=false; lấy baseline mới. Không giả counter đọc đúng tick; sample_time_basis và uncertainty phải khai báo nếu dùng request/reply estimate. SDN hoặc Data có thể tính derivative nhưng chỉ một implementation là authoritative, Data recompute đối chiếu được.
 
-S0 hiệu chuẩn k_e=link_rate/payload_sent_rate ở tải thấp không mất gói, lặp nhiều mức, lưu residual/sai số/point/version. Không ước lượng k_e bằng requested rate trong lúc sender bị throttle, không nhân k_e lên throughput đo lần nữa. Điểm đếm trước shaping phải được gắn nhãn offered load; không tuyên bố egress utilization khi chưa chứng minh.
+S0 hiệu chuẩn `k_e=median(port_tx_mbps/offered_payload_mbps)` theo từng directed link ở tải thấp không mất gói, lặp nhiều mức, lưu số mẫu/độ phân tán/sai số/point/version. Mẫu số là payload thực phát từ sender; không dùng receiver goodput hoặc requested rate trong lúc sender bị throttle. Chưa đủ calibration dùng `k_e=1.0` và gắn `UNCALIBRATED`; không nhân k_e lên throughput/actual MLU đo lần nữa. Điểm đếm trước shaping phải được gắn nhãn offered load; không tuyên bố egress utilization khi chưa chứng minh.
 
 ## 6. IF04 TrainingBundle
 
-Khóa sample_id nối X,y_vector,y_mean,sample_metadata một–một. Metadata: schedule/group,split,parent family,cutoff t,origin,Δ,L,H,feature schema/order,dtypes,source hashes. Split trước window, cùng lịch/parent family ở cùng split; seed và fingerprint không rò chéo. Không nối lịch/run/group khi tạo window.
+Khóa sample_id nối X,y_vector,sample_metadata một–một; ML/Testing có thể tính y_mean để đánh giá offline theo cùng sample_id. Metadata: schedule/group,split,parent family,cutoff t,origin,Δ,L,H,feature schema/order,dtypes,source hashes. Split trước window, cùng lịch/parent family ở cùng split; seed và fingerprint không rò chéo. Không nối lịch/run/group khi tạo window.
 
-Với Δ1s và L30,H5,t100: X từ bins70..99; y_vector từ100..104; y_mean=sum(y_vector)/5. Nếu cần thứ tự demand_lag_1 gần nhất nhưng vector cũ→mới, feature_schema phải nêu mapping rõ. X/y_vector là sản phẩm Data cần bổ sung; file y.parquet scalar hiện mô tả chưa đủ multi-output. y_mean có thể là derived view, không dùng thay nhãn train H bước.
+Với Δ1s và L30,H5,t100: X từ bins70..99; y_vector từ100..104; y_mean=sum(y_vector)/5. Nếu cần thứ tự demand_lag_1 gần nhất nhưng vector cũ→mới, feature_schema phải nêu mapping rõ. X/y_vector là đầu ra Data; nếu triển khai còn chỉ có nhãn scalar thì phải bổ sung multi-output trước tích hợp. y_mean là phép tính đánh giá offline của ML/Testing, không dùng thay nhãn train H bước hoặc giao Data tính mean dự báo cho Optimization.
 
 Offline dùng lịch đầy đủ để tạo nhãn hợp lệ; online không truy cập lịch tương lai. Fit preprocessing trên train; tuning/epsilon/MA window trên validation; test độc lập. Scenario/seed/schedule future params không vào feature. One-hot group ID chỉ nhận diện48 nhóm, không tự cấm nếu đúng ML design; mapping version phải khóa.
 
 ## 7. IF05 Snapshot online
 
-`get_snapshot(run_id,as_of_utc,history_cutoff_utc)` là chữ ký logic. Snapshot bất biến, cùng run/config và global state version. Có snapshot_id,created_at,available_at,as_of_utc,history_cutoff_utc,origin refs,flow_group_ids,history[],routing_state[],link_samples refs,quality_status,missing_groups,routing_state_complete,unknown_flow_group_ids.
+Chữ ký logic theo Guide mục4.2:
 
-Mỗi history item: group,window_start/end,requested_mbps,available_at,valid/reason,release_record_id. Network/Data ghi demand release ledger khi bin hoàn tất; không coi file lịch tạo trước run là đã available. Có thể derive availability ở provider nhưng phải giữ audit tái hiện được. Online M1–M3 chỉ thấy ledger đã phát hành; forecast labels/oracle store tách quyền. Metamorphic test sửa tương lai ẩn nhưng giữ history thì M1–M3 output không đổi.
+```python
+# SDN tạo và phát hành; lookback_L lấy từ frozen ML config
+create_snapshot(run_id, cutoff, lookback_L) -> Snapshot
+# Data validate, lưu nguyên bản và chỉ đọc lại bản SDN đã phát hành
+ingest_snapshot(sdn_snapshot) -> SnapshotStoreAck
+get_stored_snapshot(run_id, cutoff) -> Snapshot
+```
 
-Age từ history cutoff/nguồn dùng thực, không từ lúc worker trả output. T_stale đề xuất2Δ cần khóa. Nếu latest bin chưa available: chờ hữu hạn trong budget hoặc fallback còn mới/skip theo policy khóa; không dịch target âm thầm. Nếu UNKNOWN state hoặc thiếu bất kỳ demand cần thiết sau fallback thì skip toàn tick, log KEPT. Snapshot phát hành trong batch apply/reconcile bị chặn hoặc mang routing_state_complete=false; không cấp state confirmed giả.
+Snapshot có snapshot_id,snapshot_as_of_utc,history_cutoff_utc,state_version,config_version/hash,topology_version/hash,content_hash,origin refs,flow_group_ids,history[],routing_state[],link_samples refs,quality_status,missing_groups,routing_state_complete,unknown_flow_group_ids. SDN chốt ID/hash/nội dung; Data không tự gán ID, tạo lại snapshot từ query hoặc sửa snapshot sau ingest. Metadata nhận/lưu của Data nằm riêng. SDN chịu trách nhiệm causality chính; Data kiểm schema/ID/hash/cutoff tại boundary và từ chối bản sai.
+
+Mỗi history item: flow_group_id,window_start_utc/window_end_utc,requested_mbps,released_at_utc,available_at_utc,valid/reason,release_record_id. Snapshot VALID phải đủ48 nhóm×L* bins, đáp ứng cả ba bất đẳng thức ở §2.2. Network release bin đã hoàn tất; Data ghi available time thực. **API/kênh cấp requested_mbps đã release/available tới SDN vẫn MUST_LOCK** giữa Network/SDN/Data; không dùng goodput hoặc port counters để suy demand, không coi lịch tạo trước run là available, không giả availability. Online M1–M3 chỉ thấy snapshot đã lưu; forecast labels/oracle store tách quyền. Metamorphic test sửa tương lai ẩn nhưng giữ history thì M1–M3 output không đổi.
+
+Age từ history cutoff/nguồn dùng thực, không từ lúc worker trả output. T_stale đề xuất2Δ cần khóa. Nếu latest bin chưa available: chờ hữu hạn trong budget hoặc skip/fallback theo policy đã freeze; không dịch target âm thầm và không gắn VALID cho snapshot thiếu L* bins. History không hợp lệ hoặc batch thiếu thì skip tick. Nếu route UNKNOWN/INCONSISTENT thì skip toàn tick, log KEPT. Snapshot trong apply/reconcile bị chặn hoặc mang routing_state_complete=false; không cấp confirmed state giả. PARTIAL/INCONSISTENT phải reconcile trước tick tiếp theo.
 
 ## 8. IF06 H-step predictions và mean adapter
 
-### 8.1. Request và output logic
+### 8.1. Input và output ML→Data
 
-Request: envelope,forecast_batch_id,snapshot_id,target_start_utc,target_end_utc,L_s,H_s,Δ_s,feature_schema_version,history đủ48 nhóm. Không chứa labels/future schedule. Δ1s nên H giây tương ứng H bước. predict_batch trả H giá trị hữu hạn không âm mỗi nhóm, nguồn/status/reason,model_version,latency,completed_at. RF native có thể clip âm→0 theo ML §3.1 nhưng phải ghi raw/clipping_count; output sau chuẩn hóa vẫn âm/NaN/inf bị reject.
+`predict_batch(snapshot, frozen_ml_config) -> list[PredictionRow]`: input là snapshot SDN do Data cấp lại và config L*/H*/epsilon*/feature schema do ML tự chọn offline. Không có labels/future schedule. Δ=1s nên H* giây tương ứng H* bước. ML tạo48 vector×H* giá trị nội bộ rồi chỉ xuất48×H* hàng final dưới đây. Model/version/latency/reason thuộc artifact/audit riêng, không phải trường bổ sung của result gửi Data. Chuẩn hóa âm theo công thức §8.3; output final âm/NaN/inf bị reject.
 
-Data giữ7 cột vật lý ML yêu cầu:
+Mỗi PredictionRow có **đúng 7 trường**:
 
 | Cột | Kiểu / semantics |
 | --- | --- |
 | run_id | TEXT; đúng run |
-| flow_group_id | TEXT canonical h1_h3 |
+| flow_group_id | TEXT canonical Network hex, ví dụ `0x103` |
 | issued_at | UTC timestamp; cùng toàn đợt phát hành, không tạo từng group bằng now() |
 | forecast_start | REAL offset measurement origin, đầu một bin |
 | forecast_end | REAL offset measurement origin, cuối bin=start+1 |
-| predicted_mbps | REAL final prediction của bin, đã áp epsilon nếu metadata khai báo |
-| source | TEXT versioned provider, ví dụ rf_v1/persistence/moving_avg/fallback/oracle |
+| predicted_mbps | REAL final prediction của bin; ML đã áp epsilon* theo frozen config đúng một lần |
+| source | TEXT provider, ví dụ rf_v1/persistence/moving_avg/fallback_persistence/oracle; cùng source trong batch |
 
-**PK bắt buộc sửa Data v1:** `(run_id,flow_group_id,issued_at,forecast_start)`. Khóa3 trường cũ không chứa được H dòng. Mỗi run có một forecast batch hoạt động tại một issued_at; registry bắt conflict nhiều source cho cùng group/bin. Thí nghiệm model khác dùng run/batch khác hoặc schema khóa mở rộng có version; không overwrite một giá trị.
+**PK:** `(run_id,flow_group_id,issued_at,forecast_start)`. Khóa3 trường cũ không chứa được H dòng; triển khai còn dùng khóa cũ phải migrate trước tích hợp. Mỗi run có một đợt forecast tại một issued_at; registry bắt conflict nhiều source cho cùng group/bin. Model khác dùng run hoặc thời điểm phát hành khác; thêm batch ID ngoài bảng không tránh được xung đột PK này. Không overwrite một giá trị.
 
 ### 8.2. Batch registry và completeness
 
-Bảng/manifest `forecast_batches` chứa run_id,forecast_batch_id,snapshot_id,issued_at,config/schema/model refs,source map từng nhóm,full target UTC range,H/Δ/L,expected_rows=48H,actual_rows,ready_at,status,epsilon metadata,raw_forecast_refs,content_hash. `forecast_batch_rows` map batch với các PK7-field rows; row source giữ nguồn thực nếu fallback.
+Data thực hiện `commit_prediction_rows(rows_7_fields) -> ForecastBatchRef` và tự tạo registry nội bộ: run_id,forecast_batch_id,snapshot_id,issued_at,source,config/schema/model refs,full target UTC range,H* từ frozen config,expected_rows=48×H*,actual_rows,ready_at,status,content_hash. Snapshot/config refs lấy từ ngữ cảnh tick do Runner/Data quản lý; không buộc ML gửi thêm trường ngoài7 fields. Nếu không liên kết duy nhất được rows với tick/config thì reject, không đoán. `forecast_batch_rows` map batch với PK các rows.
 
-WRITING → READY chỉ sau validate đủ48 nhóm×H contiguous bins, không duplicate/gap/mixed issued_at/target/config. NOT_READY/INVALID/EXPIRED không được Optimization đọc như complete. Ingest lại cùng batch+hash idempotent; cùng ID khác nội dung conflict. Chỉ read atomically batch READY, ready_at≤decision time. File manifest commit marker hoặc transaction đều được nếu owner chứng minh không đọc nửa batch.
+WRITING → READY chỉ sau validate đủ48 nhóm×H* contiguous bins, không duplicate/gap/mixed issued_at/**source**/target/config. H* lấy từ config/RunManifest đã khóa, không suy từ số hàng nhận. NOT_READY/INVALID/EXPIRED không được Optimization đọc như complete. Ingest lại cùng rows+hash idempotent, trả lại cùng batch ref; cùng khóa khác nội dung conflict. Chỉ đọc atomically batch READY, ready_at≤decision time. Transaction/commit marker và cách gắn tick là chi tiết vận chuyển MUST_LOCK; registry không phải output ML.
 
 ### 8.3. Vector, mean và epsilon
 
-Data→Optimization trả vector hoặc H rows từ batch READY. Optimization/adapter tính `b_f=mean(predicted_mbps[0:H])`. Có thể trả derived forecast_mean_mbps để audit nhưng phải kiểm bằng H rows; không bắt ML thêm cột mean vào predictions.
+Data→Optimization trả **H* rows/flow** từ batch READY, không tạo scalar mean. Optimization tự tính `b_f=mean(predicted_mbps[0:H*])` rồi tạo vector48 scalar cho solver; mean chỉ là derived audit của Optimization. Fixture `[2,2.5,3,3.5,3]` → b=2.8 Mbps; H*=5,F=48→240 rows.
 
-Fixture: [2,2.5,3,3.5,3] → b=2.8 Mbps; H5,F48→240 rows. Lưu raw vector ref nếu có hiệu chỉnh. **Policy v2 chọn ML-owned theo ML §6.5:** final=max(0,(1+epsilon_ml)×raw), Data lưu final, Optimization không nhân epsilon nữa. Registry ghi epsilon_owner=ML,epsilon_applied=true/false,epsilon_ratio,raw_forecast_ref. Baselines và oracle mặc định epsilon0; M3 adjusted là một phương pháp đầy đủ gồm RF+calibration. Muốn kết luận riêng lợi ích RF phải có ablation raw RF/epsilon0 hoặc policy calibration chung đã khóa.
+**ML-owned epsilon theo Guide mục5.3:** `final=max(0,(1+epsilon*)×raw)`, Data lưu final, Optimization không nhân epsilon nữa. ML chọn L*/H*/epsilon* trên validation, lưu `ml_config.yaml`/model metadata riêng và Runner pin hash trong RunManifest; raw forecast nếu cần chỉ ở artifact nội bộ ML. Không gửi L/H/epsilon/raw/final/mean/epsilon_owner/horizon_steps hoặc batch metadata trong payload ML→Data; `predicted_mbps` đã là final. Epsilon candidates0/0.05/0.1/0.2 là đề xuất; không cải thiện hoặc hòa với0 thì chọn0. Baseline/Oracle config phải freeze riêng; epsilon0 cho các phương pháp này là đề xuất, chưa phải kết quả được duyệt. Muốn kết luận riêng lợi ích RF cần ablation hoặc calibration policy chung đã khóa.
 
-Nếu owner chọn phương án opt-owned từ Rà soát C07 thì đổi protocol: ML xuất raw/epsilon_applied=false, Optimization nhân một lần và ghi b_raw/b_used. Không cho phép hai policy chạy chung vô tình. Fixture raw4,eps.1,k1 → final/b_used4.4, không4.84. Tolerance numeric_epsilon không phải epsilon dự báo.
+Fixture raw4,eps.1,k1 → final/b_used4.4, không4.84. Tolerance numeric_epsilon không phải epsilon dự báo. Không có policy Optimization-owned trong v1.4.
 
-Fallback đề xuất: RF lỗi/timeout → persistence còn mới cho nhóm lỗi; cả H bước cùng value cuối; source=fallback và reason. Không đủ cho một nhóm→skip toàn tick. M3 vẫn method=M3; batch DEGRADED nếu trộn nguồn. Source/vectors được chấm tách native/fallback; baseline M1/M2 cũng dùng cùng khoảng target và history availability. M0 không tạo dự báo giả; M4 đọc tương lai trong lane ORACLE riêng.
+Fallback khi RF lỗi nhưng history hợp lệ có thể dùng Persistence với `source=fallback_persistence`. Batch READY không trộn RF/fallback source. **Đề xuất cần freeze:** tạo lại toàn bộ48×H* hàng Persistence, cùng source và issued_at, mọi giá trị vẫn causal/còn hạn; reason lưu audit riêng. Nếu history không hợp lệ, batch thiếu hoặc chưa có policy fallback được khóa thì skip toàn tick. M3 vẫn method=M3; degraded/fallback là nhãn quality riêng, không thay readiness READY. Báo riêng native/fallback frequency; M1/M2 dùng cùng target và history availability. M0 không tạo dự báo giả; M4 đọc future demand chỉ trong evaluation offline, không deploy.
 
 ## 9. IF07 Optimization và audit
 
-Input gồm run/snapshot/forecast_batch IDs,expected_state_version,config/hash,full48-group b vector,16 fabric capacities,k_e/calibration refs,candidate paths/current paths/last_successful_change_at,TH/N/h/B/hold/lambda,numeric tolerances,cutoff/target UTC/deadline. Không cộng counter load của chính F lên predicted load lần nữa.
+`get_optimization_input(run_id,forecast_batch_id)` do Data cung cấp gồm run/snapshot/forecast_batch IDs,expected_state_version,config/hash,đủ48×H* prediction rows,16 fabric capacities,k_e/calibration refs,candidate paths/current verified paths/last_successful_change_at,cutoff/target UTC/deadline. Optimization tra H* từ frozen config và tự mean thành b vector; TH/N/h/B/hold/lambda và numeric tolerances từ config chung. Thiếu rows hoặc current UNKNOWN thì skip tick. Không cộng counter load của chính F lên predicted load lần nữa.
 
 Mô hình chuẩn khi ML đã hiệu chỉnh: `L_e=k_e Σ_f,p b_f a_fpe x_fp`; `Σ_p x_fp=1`; `L_e≤U C_e`; `y_f=1−x_f,current`; `Σ y_f≤B`; hold chưa đủ thì x_current=1; x/y binary,U≥0. F cố định48 kể cả nhóm0. Không hard cap U≤.9 hay1. Dùng J=U+lambda×n_changes/48; current có n_changes0 nên J_old=U_current.
 
 Trigger strict U_current>TH trong N tick hợp lệ liên tiếp. Baseline đề xuất N3; invalid/stale/busy/reconciled-state-change reset count; sau batch final reset. Acceptance: actual proposed changes≥1,J_old>numeric_epsilon,J_new≤(1−h)J_old theo tolerance khóa, đủ hạn/state đúng. Independent validator recompute constraints/U/J, không chỉ tin solver output.
 
-Output audit: decision_batch_id,control_tick_id,forecast_batch_id,snapshot_id,state/config refs,target UTC,U_old/U_new,J_old/J_new,solver_status,solve_ms/gap/bound,trigger_count,full_routes,changes,validation_status,disposition/reason. Solver enum NOT_RUN/OPTIMAL/FEASIBLE_TIME_LIMIT/NO_INCUMBENT/INFEASIBLE/ERROR/INVALID_RESULT. Time-limit incumbent chỉ dùng khi integer feasible, pass validator và còn hạn. Không có nghiệm hợp lệ→KEPT, không bịa OPTIMAL.
+Output `OptimizationResult`/audit: decision_batch_id,control_tick_id,forecast_batch_id,snapshot_id,state/config refs,target UTC,U_old/U_new,J_old/J_new,solver_status,solve_ms/gap/bound,has_incumbent,trigger_count,full_routes,changes,validation_status,disposition/reason. `solver_status` theo Guide mục5.4: OPTIMAL/FEASIBLE/INFEASIBLE/TIME_LIMIT/ERROR; mapping từ solver cụ thể phải khóa. NOT_RUN/NO_INCUMBENT/INVALID_RESULT là outcome/reason kiểm thử, không thay enum trên wire; chưa solve thì solver_status=null. Pilot ưu tiên OPTIMAL. FEASIBLE hoặc TIME_LIMIT có incumbent chỉ dùng khi config cho phép, có max_gap đã khóa và đáp ứng gap, integer feasible, validator độc lập pass, đủ improvement/state/deadline. Chưa khóa policy/max_gap thì giữ đường với nghiệm chưa chứng minh OPTIMAL. Không có nghiệm hợp lệ→KEPT, không bịa OPTIMAL. Chỉ Runner/Orchestrator tạo ApplyRequest; Optimization không gọi Ryu trực tiếp.
 
 Ví dụ F48,lambda.1,U_new.58: một đổi J_new=.5820833333; bốn đổi J_new=.5883333333. Ví dụ .61 của Optimization không khớp các tham số này. Fixture F2,b6/6,k1,C10 cùng nhánh→U_old1.2; đổi1→U_new.6,J_new.65. Phân biệt mẫu số F2 fixture và F48 production.
 
 ## 10. IF08 ApplyRequest và ApplyResponse
 
-Theo sdn_interfaces.md §4–5, canonical request `decision_batch_id/changes`. Metadata solver lưu audit riêng, không buộc SDN giải lại MILP.
+Theo Guide mục4/5/13, canonical request `decision_batch_id/changes` do Runner/Orchestrator tạo sau OptimizationResult hợp lệ. Metadata solver lưu audit riêng, không buộc SDN giải lại MILP. Ví dụ dưới đây cùng timeline §2.2, giá trị chỉ là fixture.
 
 ```json
 {
   "run_id":"run_001","decision_batch_id":"batch_001","snapshot_id":"snap_100",
   "expected_state_version":15,"config_version":"v1",
-  "forecast_start":"2026-11-10T10:01:40Z","forecast_end":"2026-11-10T10:01:45Z",
-  "changes":[{"flow_group_id":"h1_h3","old_path_id":"h1_h3_c1","new_path_id":"h1_h3_c2"}]
+  "forecast_start":"2026-11-12T09:02:40Z","forecast_end":"2026-11-12T09:02:45Z",
+  "apply_deadline_utc":"2026-11-12T09:02:44Z",
+  "changes":[{"flow_group_id":"0x103","old_path_id":"0x103_P1","new_path_id":"0x103_P2"}]
 }
 ```
 
-Ví dụ lõi; envelope ở §2.3 đi cùng transport/audit. Adapter map old_path/new_path P1/P2 sang full path bằng danh mục; target_interval5s không đủ thay target timestamps. Validation trước write: run/config/topology/snapshot/version đúng, old_path VERIFIED, membership hợp lệ, changes không trùng và1..B, hold-down theo confirmed time, đủ guard trước forecast_end, không batch khác flight.
+Ví dụ lõi; envelope ở §2.3 mang topology/config hashes và payload_hash đi cùng transport/audit. Lệnh dùng full path ID từ catalog; P1/P2 chỉ là path_label, không chấp nhận làm path_id thiếu flow context. `forecast_start/end` ở ApplyRequest là UTC, khác offset của PredictionRows. target_interval5s không đủ thay target timestamps. Validation trước write: run/config/topology/snapshot/version đúng, old_path VERIFIED, membership hợp lệ, changes không trùng và1..B, hold-down theo confirmed time, chưa qua apply_deadline_utc và còn guard trước forecast_end, không batch khác flight.
 
 ```json
 {
   "run_id":"run_001","decision_batch_id":"batch_001","status":"APPLIED",
-  "state_version":16,"completed_at":"2026-11-10T10:01:41Z",
-  "results":[{"flow_group_id":"h1_h3","actual_path_id":"h1_h3_c2","status":"APPLIED",
-  "reason":null,"rule_count":1,"applied_at":"2026-11-10T10:01:41Z"}]
+  "state_version":16,"completed_at":"2026-11-12T09:02:40.850Z",
+  "results":[{"flow_group_id":"0x103","actual_path_id":"0x103_P2","status":"APPLIED",
+  "verification_status":"VERIFIED","reason":null,"rule_count":1,
+  "applied_at":"2026-11-12T09:02:40.850Z"}]
 }
 ```
 
@@ -206,9 +222,9 @@ Group final: APPLIED/KEPT/FAILED/ROLLED_BACK/UNKNOWN. PROPOSED/APPLYING/RECONCIL
 
 Duplicate `(run,decision_batch_id)` cùng payload_hash→trả kết quả cũ, không thêm FlowMod; nếu chưa final trả ack PROCESSING theo transport khóa, không giả final APPLIED. Khác payload→BATCH_ID_CONFLICT; batch mới khi bận→BUSY. Timeout phía client không có nghĩa Controller chưa write; phải query/reconcile trước retry. Retry cùng ID giữ semantics, không tạo ID mới để né dedup.
 
-Preinstall downstream hai nhánh, đổi source uplink3↔4. Barrier chỉ là evidence xử lý thông điệp; verify read-back rule và probe/counter đúng nhóm/nhánh khi phù hợp. Traffic0 dùng probe; check đến đích và đúng nhánh riêng. Một batch liên switch không atomic; mọi FlowMod kể cả lỗi/rollback được đếm.
+Preinstall downstream hai nhánh theo baseline; khi cần cài/cập nhật đường mới, downstream trước → Barrier/ack → source uplink3↔4 sau → verify → mới dọn rule cũ. Barrier chỉ là evidence xử lý thông điệp; verify read-back rule và probe/counter đúng nhóm/nhánh khi phù hợp. Traffic0 dùng probe; check đến đích và đúng nhánh riêng. Một batch liên switch không atomic; mọi FlowMod kể cả lỗi/rollback được đếm. `rule_count` phải đo/đếm thực, không hard-code theo ví dụ.
 
-Forecast expiry phải kiểm trước write. Nếu write rồi verify trễ forecast_end, ghi deadline_missed và reconcile actual; không che thay đổi có thật bằng REJECTED hoặc đường cũ. Kết quả xác minh thành công muộn vẫn ghi actual cùng late flag, là lỗi vận hành deadline để QA đánh giá. UNKNOWN→pause toàn cục đến resync trong core policy. Không queue proposal cũ để apply sau.
+Forecast expiry/apply deadline phải kiểm trước write. Nếu write rồi verify trễ forecast_end, ghi deadline_missed và reconcile actual; không che thay đổi có thật bằng REJECTED hoặc đường cũ. Kết quả xác minh thành công muộn vẫn ghi actual cùng late flag, là lỗi vận hành deadline để QA đánh giá. PARTIAL/INCONSISTENT→chặn tick tiếp theo đến khi reconcile; UNKNOWN không được điền old_path làm actual. Ryu restart cũng phải reconcile actual routes trước nhận request mới; chi tiết phục hồi cần freeze. Không queue proposal cũ để apply sau.
 
 ## 11. Verified state và Data ETL
 
@@ -221,7 +237,7 @@ Forecast expiry phải kiểm trước write. Nếu write rồi verify trễ for
 | link_statistics / (run,link,sample_id) | raw bytes,delta,time/source/point/epoch,valid/reason |
 | event_log / (run,event_id) | component,event_at,severity,batch/flow/switch/xid,detail JSON |
 
-SDN là writer duy nhất state/history. Theo SDN §2/5: tăng global state_version tối đa1 lần ở final batch nếu confirmed state hoặc độ chắc chắn thay đổi; đồng bộ mọi state row của run. Bao gồm mốc hold-down/confirmed metadata thay đổi có ý nghĩa; reject trước write không tăng. Không tăng vì tiếp nhận proposal. Trạng thái vật lý có thể chuyển qua nhiều bước trong batch: giữ event trace, chưa công bố confirmed snapshot mới đến final. Final rollback về path cũ nhưng timestamp lần đổi verified thay đổi cũng phải invalidate snapshot cũ; owner xác nhận rule này trước freeze.
+**SDN là nguồn sự thật duy nhất của live routing state/history; Data là DB writer duy nhất**, ghi mirror/event theo kết quả SDN, không tự đổi actual route hoặc tự tăng version. Chi tiết đề xuất cần freeze: tăng global state_version tối đa1 lần ở final batch nếu confirmed state hoặc độ chắc chắn thay đổi; đồng bộ mọi state row của run, bao gồm mốc hold-down/confirmed metadata thay đổi có ý nghĩa; reject trước write không tăng. Không tăng vì tiếp nhận proposal. Trạng thái vật lý có thể chuyển qua nhiều bước trong batch: giữ event trace, chưa công bố confirmed snapshot mới đến final. Final rollback về path cũ nhưng timestamp lần đổi verified thay đổi cũng phải invalidate snapshot cũ; owner xác nhận rule này trước freeze. Controller retry event cùng event_id khi chưa được Data ack; Data ingest idempotent, restart phải reconcile.
 
 Hold-down dùng lần chuyển actual path đã verify, kể cả verified rollback làm đổi path; không cập nhật bởi proposal/thao tác lỗi chưa biết. Bootstrap last_successful_change_at=null, Optimization hiểu chưa có lần đổi/không khóa. last_optimization_change_at có thể lưu riêng cho metric chính.
 
@@ -243,14 +259,14 @@ MetricRecord: experiment/run/schedule/scenario/method,metric_name/version,value/
 
 | Bộ fixture | Nội dung / case |
 | --- | --- |
-| Topology | 48/96/16/32, alias mapping, sai port/path, reverse/same-edge; TC-N01/I01 |
-| Time/causality | t100,L30,H5; bin âm warm-up; exact boundary/late/sửa hidden future; TC-D04/I02/I03 |
-| Forecast storage | 240 rows cùng issue,H5; thiếu1/dup/mixed issue/source; TC-D06 |
+| Topology | 48/96/16/32, canonical Network IDs, reject ID cũ, sai port/path, reverse/same-edge; TC-N01/I01 |
+| Time/causality | t100,L30,H5; warm-up60s; cả release/available cutoff; SDN tạo/Data lưu cùng ID/hash; exact boundary/late/sửa hidden future; TC-D04/I02/I03 |
+| Forecast storage | Đúng7 fields, H*=5 lấy từ config→240 rows; reject thêm config/raw/mean fields, thiếu1/dup/mixed issue/source; TC-D06 |
 | Epsilon/mean | vector mean2.8; raw4→final4.4, không4.84; TC-M01/M04 |
-| MILP | F2 và F48 toy; λ0,y chính xác; N3,hold/B/h/timeout; TC-O01..O05 |
-| Apply/state | valid/stale/wrong path,duplicate/conflict/BUSY,partial+rollback+UNKNOWN,expiry sau write; TC-S01..S03/D07 |
+| MILP | F2 và F48 toy; λ0,y chính xác; N3,hold/B/h/timeout, FEASIBLE/max_gap policy; TC-O01..O05 |
+| Apply/state | valid/stale/wrong path,duplicate/conflict/BUSY,PARTIAL+rollback+UNKNOWN,restart reconciliation,expiry sau write; TC-S01..S03/D07 |
 | Metrics | 100send/90unique/2duplicates,late/cohort/counter reset; TC-D05/E01 |
 
 Mỗi producer giao valid/invalid input, expected output, schema/version/hash; consumer validate và ghi actual/evidence. JSON Schema, parser và executable fixtures là đầu ra triển khai tiếp theo, chưa có trong bộ tài liệu này. QA không ghi PASS chỉ vì ví dụ JSON parse được.
 
-Owner sign-off C01–C16 dùng decision log trong test_plan. Mọi mục còn OPEN ở bản này. Các field MUST_LOCK: transport/ack/retry/timeouts,origins/Δ/L/H/MA window/epsilon policy,TH/N/h/B/hold/lambda,tolerances,k_e/point/calibration,initial paths/ARP,pacing/headroom,probe/deadline/drain/coverage,rebin,seed/split/run matrix. Chỉ freeze khi đã có giá trị thực, owner/time và hashes; đổi semantics phải bump version và regression các case liên quan.
+Owner sign-off dùng decision log trong [test_plan_v2.md](test_plan_v2.md); gates theo Guide là **G0–G8**. Ownership/ID/7-field payload/ML-owned epsilon/Optimization mean đã có quyết định v1.4; tỷ lệ split70/15/15 đã được người dùng xác nhận. Xác nhận triển khai và executable evidence vẫn cần hoàn tất. Các mục MUST_LOCK: kênh demand lịch sử tới SDN,transport/ack/retry/timeouts,origins/Δ,config L*/H*/epsilon* do ML chọn offline và MA window,baseline/Oracle/fallback policy,TH/N/h/B/hold/lambda,allow_feasible/max_gap,tolerances,k_e/point/calibration,initial paths/ARP,restart/version policy,pacing/headroom,probe/deadline/drain/coverage,rebin,danh sách seed/phạm vi trong split_manifest/benchmark_matrix và policy cuối run. Chỉ freeze khi có giá trị thực, owner/time và hashes; đổi semantics phải bump version và regression các case liên quan. Không mở lại tỷ lệ split đã chốt khi khóa manifest.

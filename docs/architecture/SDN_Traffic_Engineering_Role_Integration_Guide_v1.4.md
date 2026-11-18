@@ -270,11 +270,10 @@ Snapshot do **SDN phát hành** phải immutable. Data lưu nguyên bản (cùng
 
 ## 3.5. Data split và leakage
 
-Kế hoạch benchmark **đề xuất**: mỗi scenario S1–S5 có 20 seeds:
+**Tỷ lệ split đã xác nhận:** train/validation/test = **70/15/15**. Với một tập 20 seeds, chia **14 train / 3 validation / 3 test**.
 
-- 10 train.
-- 5 validation.
-- 5 test.
+Quy mô benchmark **đề xuất**: mỗi scenario S1–S5 có 20 seeds. Danh sách seed cụ thể, phạm vi áp dụng theo scenario/cấu hình và tổng lượt chạy cần khóa trong `split_manifest` / `benchmark_matrix`; tỷ lệ 70/15/15 không còn là quyết định mở.
+
 
 Chia theo seed/run family **trước khi tạo các cửa sổ chồng lấn**. Không random split các window của cùng schedule sang train và test.
 
@@ -320,12 +319,12 @@ optimization:
   lambda: 0.1
 
 evaluation:
-  seeds_train: 10
-  seeds_validation: 5
-  seeds_test: 5
+  seeds_train: 14
+  seeds_validation: 3
+  seeds_test: 3
 ```
 
-Đây là **danh sách ứng viên**/pilot defaults để nhóm duyệt, không phải `L/H/epsilon` mà ML phải gửi cho Data.
+Đây là **danh sách ứng viên**/pilot defaults để nhóm duyệt, không phải `L/H/epsilon` mà ML phải gửi cho Data. Riêng tỷ lệ split **70/15/15 đã xác nhận**; ví dụ 20 seeds ở trên tương ứng 14/3/3, danh sách seed và phạm vi benchmark được khóa trong manifest.
 
 **Ví dụ artifact riêng của ML (chỉ minh họa, không phải kết quả validation thực tế):**
 
@@ -1072,7 +1071,7 @@ Contract report, integration report, S0 calibration report, benchmark raw result
 | k_e                      | Calibration theo directed link                  |
 | Predicted U/actual MLU   | Hai metric riêng                                |
 | Warm-up                  | 60s                                             |
-| Seed split               | 10/5/5 trước windowing                          |
+| Seed split               | **70/15/15 đã xác nhận**; 20 seeds → 14/3/3, chia trước windowing |
 | M4                       | Oracle offline                                  |
 | Human approval           | Không đưa vào realtime loop; validation tự động |
 

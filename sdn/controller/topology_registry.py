@@ -132,6 +132,35 @@ class SwitchHop:
     egress_link_id: str
 
 
+@dataclass(frozen=True)
+class PortAndAdjacencyValidationReport:
+    """
+    Structured validation report separating three distinct verification levels (`Phase 7.5`):
+    1. `catalog_validated`: Static topology bundle & CSV catalog invariants (8 hosts, 6 switches,
+       32 links, 16 fabric links, 48 flows, 96 paths, SHA-256 `topology_hash`).
+    2. `port_desc_validated`: Live OpenFlow 1.3 `OFPPortDescStatsReply` check across all 6 DPIDs
+       confirming every required switch port exists and is administrative/link UP (`is_live=True`).
+    3. `link_adjacency_verified`: Physical peer-to-peer link adjacency verification (`from_node:from_port -> to_node:to_port`).
+       NEVER set to `True` merely because port numbers exist on switches; requires explicit
+       `observed_peer_links` evidence (from OVS/Mininet/LLDP).
+    """
+
+    catalog_validated: bool
+    port_desc_validated: bool
+    link_adjacency_verified: bool
+    adjacency_status: str
+    missing_switches: tuple[str, ...] = ()
+    missing_ports_by_switch: dict[str, tuple[int, ...]] = None  # type: ignore[assignment]
+    down_ports_by_switch: dict[str, tuple[int, ...]] = None  # type: ignore[assignment]
+    adjacency_mismatches: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.missing_ports_by_switch is None:
+            object.__setattr__(self, "missing_ports_by_switch", {})
+        if self.down_ports_by_switch is None:
+            object.__setattr__(self, "down_ports_by_switch", {})
+
+
 def compute_network_topology_hash(bundle_data: Mapping[str, Any]) -> str:
     """
     Compute the SHA-256 topology_hash using the exact canonical algorithm
@@ -1395,4 +1424,92 @@ class TopologyRegistry:
         """
         self.get_candidate_path(path_id)
         return self._switch_hops_by_path[path_id]
+
+    def get_required_ports_by_switch(self) -> dict[str, tuple[int, ...]]:
+        """Return required canonical OpenFlow port numbers per switch from `links.csv`."""
+        ports_by_sw: dict[str, set[int]] = {sw_id: set() for sw_id in self._switches_by_id}
+        for lk in self._links_by_id.values():
+            if lk.from_node in ports_by_sw:
+                ports_by_sw[lk.from_node].add(lk.from_port)
+            if lk.to_node in ports_by_sw:
+                ports_by_sw[lk.to_node].add(lk.to_port)
+        return {sw_id: tuple(sorted(p_set)) for sw_id, p_set in sorted(ports_by_sw.items())}
+
+    def validate_live_port_descriptions(
+        self,
+        port_desc_by_dpid: Mapping[int, Sequence[Any]],
+        *,
+        observed_peer_links: Mapping[tuple[str, int], tuple[str, int]] | None = None,
+    ) -> PortAndAdjacencyValidationReport:
+        """
+        Validate live OpenFlow 1.3 `OFPPortDescStatsReply` entries (`SwitchPortDescEntry`)
+        against the canonical `TopologyRegistry` (`Phase 7.5`):
+        - Checks that all 6 canonical switch DPIDs (`1..6`) reported port descriptions.
+        - Checks that every required switch port exists and has `is_live == True` (not DOWN).
+        - Strictly distinguishes `port_desc_validated` from `link_adjacency_verified`:
+          `link_adjacency_verified` is `True` ONLY when `observed_peer_links` (`(from_node, from_port) -> (to_node, to_port)`)
+          is supplied and matches all 32 directed links in the catalog.
+        """
+        missing_switches: list[str] = []
+        missing_ports: dict[str, tuple[int, ...]] = {}
+        down_ports: dict[str, tuple[int, ...]] = {}
+        required_by_sw = self.get_required_ports_by_switch()
+
+        for sw in self.get_all_switches():
+            entries = port_desc_by_dpid.get(sw.dpid)
+            if entries is None:
+                missing_switches.append(sw.switch_id)
+                continue
+            live_by_port: dict[int, bool] = {}
+            for e in entries:
+                p_no = int(getattr(e, "port_no", e) if not isinstance(e, int) else e)
+                is_live = bool(getattr(e, "is_live", True)) if not isinstance(e, int) else True
+                live_by_port[p_no] = is_live
+
+            req_ports = required_by_sw.get(sw.switch_id, ())
+            sw_missing = tuple(sorted(p for p in req_ports if p not in live_by_port))
+            sw_down = tuple(
+                sorted(p for p in req_ports if p in live_by_port and not live_by_port[p])
+            )
+            if sw_missing:
+                missing_ports[sw.switch_id] = sw_missing
+            if sw_down:
+                down_ports[sw.switch_id] = sw_down
+
+        port_desc_ok = (
+            len(missing_switches) == 0
+            and len(missing_ports) == 0
+            and len(down_ports) == 0
+        )
+
+        adjacency_mismatches: list[str] = []
+        if observed_peer_links is None:
+            adjacency_ok = False
+            adj_status = "PORT_DESC_ONLY_ADJACENCY_UNVERIFIED"
+        else:
+            for lk in sorted(self._links_by_id.values(), key=lambda x: x.link_id):
+                expected_peer = (lk.to_node, lk.to_port)
+                actual_peer = observed_peer_links.get((lk.from_node, lk.from_port))
+                if actual_peer != expected_peer:
+                    adjacency_mismatches.append(
+                        f"Link '{lk.link_id}' ({lk.from_node}:{lk.from_port}): "
+                        f"expected peer {expected_peer}, observed {actual_peer}"
+                    )
+            adjacency_ok = port_desc_ok and len(adjacency_mismatches) == 0
+            adj_status = (
+                "LINK_ADJACENCY_VERIFIED"
+                if adjacency_ok
+                else "LINK_ADJACENCY_MISMATCH"
+            )
+
+        return PortAndAdjacencyValidationReport(
+            catalog_validated=True,
+            port_desc_validated=port_desc_ok,
+            link_adjacency_verified=adjacency_ok,
+            adjacency_status=adj_status,
+            missing_switches=tuple(missing_switches),
+            missing_ports_by_switch=missing_ports,
+            down_ports_by_switch=down_ports,
+            adjacency_mismatches=tuple(adjacency_mismatches),
+        )
 

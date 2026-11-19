@@ -101,12 +101,13 @@ No changes to `DecisionHandler`, `StateManager`, `RuleInstaller`, `RuleVerifier`
 
 ### 4.2 `DemandHistoryProviderProtocol` & `LinkTelemetryProviderProtocol` (`sdn/monitoring/snapshot_creator.py`)
 Used by `SnapshotCreator.create_snapshot(run_id, cutoff, lookback_L)`:
-- **Data / Runner Integration:** Implement `DemandHistoryProviderProtocol`:
+- **Data / Runner / Network Integration:** Implement `DemandHistoryProviderProtocol`:
   - `@property def provider_name(self) -> str`
   - `@property def demand_channel_status(self) -> str`
   - `def get_observations(self, run_id: str) -> Sequence[DemandObservationRecord]` to feed causal released demand records for `bins in [cutoff - lookback_L, cutoff)`.
+  - `MockReleasedDemandProvider.ingest_network_release_event(event, origin_refs=..., available_at_utc=...)` directly converts `DemandRelease` JSONL/HTTP events emitted by `network/traffic_generator/sender.py` into canonical `DemandObservationRecord` items.
 - Every `DemandObservationRecord` must carry `window_start_utc`, `window_end_utc`, `released_at_utc`, `available_at_utc`, `requested_mbps`, and `source_kind="released_demand"`.
-- Optional `LinkTelemetryProviderProtocol`: implement `def get_link_sample_refs(self, run_id: str) -> Sequence[LinkSampleRef]`.
+- Optional `LinkTelemetryProviderProtocol`: implement `def get_link_sample_refs(self, run_id: str) -> Sequence[LinkSampleRef]` (or use `MockLinkTelemetryProvider.ingest_network_telemetry_batch(batch_event)` for `network/telemetry/telemetry_collector.py` events).
 
 ### 4.3 `BatchIdempotencyStoreProtocol` (`sdn/controller/decision_handler.py`)
 Used by `DecisionHandler`:

@@ -204,6 +204,59 @@ class MockReleasedDemandProvider:
         """Return a defensive tuple of observations for `run_id`."""
         return tuple(self._records_by_run.get(run_id, ()))
 
+    def ingest_network_release_event(
+        self,
+        event: Mapping[str, object],
+        *,
+        origin_refs: Optional[OriginRefs] = None,
+        available_at_utc: Optional[str] = None,
+    ) -> DemandObservationRecord:
+        """
+        Convert and store a `DemandRelease` JSON event emitted by `network/traffic_generator/sender.py`
+        (`event_id`, `run_id`, `flow_group_id`, `bin_index`, `window_start_utc`, `window_end_utc`,
+        `requested_mbps`, `released_at_utc`) into a canonical `DemandObservationRecord` (`Phase 7.7`).
+        """
+        run_id = str(event["run_id"]).strip()
+        fid = str(event["flow_group_id"]).strip()
+        w_start = format_utc_timestamp(str(event["window_start_utc"]))
+        w_end = format_utc_timestamp(str(event["window_end_utc"]))
+        rel_utc = format_utc_timestamp(str(event["released_at_utc"]))
+        avail_utc = format_utc_timestamp(
+            available_at_utc if available_at_utc is not None else str(event.get("available_at_utc", rel_utc))
+        )
+        if origin_refs is not None:
+            meas_dt = parse_utc_timestamp(origin_refs.measurement_started_at_utc)
+            w_start_dt = parse_utc_timestamp(w_start)
+            delta_s = origin_refs.delta_s if origin_refs.delta_s > 0 else 1
+            bin_idx = int(round((w_start_dt - meas_dt).total_seconds())) // delta_s
+        else:
+            bin_idx = int(event["bin_index"])  # type: ignore[arg-type]
+
+        raw_req = event.get("requested_mbps")
+        req_mbps = float(raw_req) if raw_req is not None else None  # type: ignore[arg-type]
+        rec_id = str(
+            event.get("release_record_id")
+            or event.get("event_id")
+            or f"network:{run_id}:demand:{fid}:{bin_idx}"
+        )
+        src_kind = str(event.get("source_kind", DemandSourceKind.RELEASED_DEMAND.value))
+        rec = DemandObservationRecord(
+            run_id=run_id,
+            flow_group_id=fid,
+            bin_index=bin_idx,
+            window_start_utc=w_start,
+            window_end_utc=w_end,
+            requested_mbps=req_mbps,
+            released_at_utc=rel_utc,
+            available_at_utc=avail_utc,
+            release_record_id=rec_id,
+            source_kind=src_kind,
+            valid=(req_mbps is not None),
+            reason=None if req_mbps is not None else ReasonCode.DATA_MISSING.value,
+        )
+        self.add_observations((rec,))
+        return rec
+
 
 class MockLinkTelemetryProvider:
     """In-memory mock provider for directional link telemetry sample references (`IF05`)."""
@@ -214,6 +267,43 @@ class MockLinkTelemetryProvider:
     def add_samples(self, run_id: str, samples: Sequence[LinkSampleRef]) -> None:
         bucket = self._samples_by_run.setdefault(run_id, [])
         bucket.extend(samples)
+
+    def ingest_network_telemetry_batch(
+        self,
+        batch_event: Mapping[str, object],
+        *,
+        available_at_utc: Optional[str] = None,
+    ) -> tuple[LinkSampleRef, ...]:
+        """
+        Convert and store a `LinkSampleBatch` JSON event emitted by
+        `network/telemetry/telemetry_collector.py` (`batch_id`, `run_id`, `bin_index`,
+        `sampled_at_utc`, `samples`) into canonical `LinkSampleRef` records (`Phase 7.7`).
+        """
+        run_id = str(batch_event["run_id"]).strip()
+        batch_id = str(batch_event.get("batch_id", f"network:{run_id}:telemetry"))
+        sampled_utc = format_utc_timestamp(str(batch_event["sampled_at_utc"]))
+        avail_utc = format_utc_timestamp(
+            available_at_utc if available_at_utc is not None else sampled_utc
+        )
+        raw_samples = batch_event.get("samples", ())
+        created: list[LinkSampleRef] = []
+        if isinstance(raw_samples, Sequence):
+            for s in raw_samples:
+                if not isinstance(s, Mapping):
+                    continue
+                lid = str(s["link_id"]).strip()
+                status = str(s.get("counter_status", "OK")).strip().upper()
+                is_valid = status == "OK"
+                ref = LinkSampleRef(
+                    sample_id=f"{batch_id}:{lid}",
+                    link_id=lid,
+                    sample_at_utc=sampled_utc,
+                    available_at_utc=avail_utc,
+                    valid=is_valid,
+                )
+                created.append(ref)
+        self.add_samples(run_id, created)
+        return tuple(created)
 
     def get_link_sample_refs(self, run_id: str) -> tuple[LinkSampleRef, ...]:
         return tuple(self._samples_by_run.get(run_id, ()))

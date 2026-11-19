@@ -2,7 +2,7 @@
 
 **Project:** `SDN-Traffic-Engineering-ML`  
 **Role:** SDN Controller (`sdn/`)  
-**Current Verification Status:** `PASS_MOCK` (`97/97` core/contract tests) + `PASS_MOCK_ADAPTER` (`5/5` OpenFlow/S0 adapter tests = `102/102` on Windows)  
+**Current Verification Status:** `PASS_MOCK` (`98/98` core/contract tests) + `PASS_MOCK_ADAPTER` (`11/11` OpenFlow/S0 adapter tests = `109/109` on Windows)  
 **Target Live Status:** `PENDING_UBUNTU_VALIDATION` $\rightarrow$ `PASS_LIVE_OVS` (Requires Ubuntu Linux + Mininet + Open vSwitch + Ryu / OS-Ken OpenFlow 1.3)
 
 ---
@@ -107,7 +107,7 @@ A test or acceptance criterion (`AC-S01`–`AC-S10`) may only be marked **`PASS_
 1. Raw `ovs-vsctl show` and `ovs-ofctl -O OpenFlow13 dump-flows <switch>` outputs before and after route changes.
 2. Live `FlowStatsReply` (`packet_count`, `byte_count`) and OVS port counter dumps (`ovs-ofctl -O OpenFlow13 dump-ports <switch>`).
 3. `ApplyResponse` and `Snapshot` JSON artifacts carrying `evidence_mode: "LIVE_OVS"`.
-4. Zero regressions in the 102 Windows tests (`pytest sdn/tests/`).
+4. Zero regressions in the 109 Windows tests (`pytest sdn/tests/`).
 
 ---
 
@@ -115,71 +115,119 @@ A test or acceptance criterion (`AC-S01`–`AC-S10`) may only be marked **`PASS_
 
 > **Important:** All commands below are prepared for Ubuntu Linux + Mininet + Open vSwitch and have **not** been executed on Windows. Their live status is **`PENDING_UBUNTU_VALIDATION`**, never `PASS_LIVE_OVS`.
 
-### 6.1 Implemented Runtime Files
+### 6.1 Implemented Runtime Files & Dependency Manifest
 - **OpenFlow 1.3 Driver:** `sdn/flow_management/ryu_openflow_driver.py` (`RyuOpenFlowDriver(SwitchDriverProtocol)`).
 - **S0 Ryu / OS-Ken Application:** `sdn/apps/ryu_s0_app.py` (`RyuS0App` + pure-Python `S0ControllerOrchestrator`).
+- **Ubuntu Dependency Manifest:** `sdn/requirements-ubuntu.txt`.
 
-### 6.2 Python & Ryu / OS-Ken Compatibility
-- **Ryu (`ryu==4.34`) + `eventlet`:** Recommended on Python `3.8`–`3.10`.
-- **OS-Ken (`os-ken`):** Recommended on Python `3.10+` (`osken-manager` CLI).
-- **Port Alignment with Network (`network/topology/topology.py`):**
-  `network/topology/topology.py` connects all 6 OVS switches (`e1`–`e4`, `c1`–`c2`, `protocols='OpenFlow13'`) to `RemoteController('c0', ip='127.0.0.1', port=6633)`. Because Ryu/OS-Ken default to port `6653`, **always pass `--ofp-tcp-listen-port 6633`** (unless Network updates `port=6653`).
+### 6.2 15-Step Copy-Pasteable Ubuntu Validation Runbook (`PENDING_UBUNTU_VALIDATION`)
 
-### 6.3 Exact Launch Commands (`PENDING_UBUNTU_VALIDATION`)
+#### Step 1 — Check Ubuntu & Python Version
+```bash
+lsb_release -a || cat /etc/os-release
+python3 --version
+```
 
-1. **Terminal 1 — Start SDN S0 Controller (choose Ryu or OS-Ken):**
-   ```bash
-   # Option A: Ryu (Python 3.8-3.10)
-   PYTHONPATH=. ryu-manager --ofp-tcp-listen-port 6633 sdn/apps/ryu_s0_app.py
+#### Step 2 — Install System Dependencies (`mininet`, `openvswitch-switch`, `iperf3`)
+```bash
+sudo apt update
+sudo apt install -y mininet openvswitch-switch openvswitch-common iperf3 iputils-ping iproute2 tcpdump net-tools python3-venv python3-pip
+```
 
-   # Option B: OS-Ken (Python 3.10+)
-   PYTHONPATH=. osken-manager --ofp-tcp-listen-port 6633 sdn/apps/ryu_s0_app.py
-   ```
-   Optional environment flags (defaults are `0` / strict):
-   - `SDN_RUN_ID`: default `s0_live_run`
-   - `SDN_ENABLE_INTRA_EDGE_L3=1`: install helper rules for the 8 intra-edge host pairs (`INTRA_EDGE_HOST_PAIRS`, cookie `0xFFFF0001`, separate from the 48 canonical TE flows)
-   - `SDN_ENABLE_ARP_EDGE_LOCAL_FLOOD=1`: install controlled edge-local ARP helper rules (cookie `0xFFFF0002`) if Mininet `staticArp()` is not used
-   - `SDN_PREINSTALL_BOTH_DOWNSTREAM=1`: default `1` (pre-installs both `P1` and `P2` downstream hops)
+#### Step 3 — Create Python Virtual Environment & Install Ryu / OS-Ken (`sdn/requirements-ubuntu.txt`)
+```bash
+# Inside repository root:
+python3 -m venv .venv_ubuntu
+source .venv_ubuntu/bin/activate
+pip install --upgrade pip
+pip install -r sdn/requirements-ubuntu.txt
 
-2. **Terminal 2 — Start Network's Mininet Topology:**
-   ```bash
-   sudo mn -c
-   sudo python3 network/topology/topology.py
-   ```
-   *(Verify `RemoteController` connects to `127.0.0.1:6633` and all 6 DPIDs `1..6` appear in controller logs.)*
+# Choose Option A (Python 3.8-3.10 with classic Ryu) OR Option B (Python 3.10+ with OS-Ken):
+# Option A:
+#   pip install "ryu==4.34" "eventlet==0.33.3" "setuptools<68"
+# Option B:
+pip install "os-ken>=2.8.0" "eventlet>=0.35.2"
+```
 
-3. **Terminal 3 — Inspect OVS Switches & Flow Tables (`PENDING_UBUNTU_VALIDATION`):**
-   ```bash
-   sudo ovs-vsctl show
-   for sw in e1 e2 e3 e4 c1 c2; do
-       echo "=== $sw ==="
-       sudo ovs-ofctl -O OpenFlow13 dump-flows "$sw"
-   done
-   ```
+#### Step 4 — Start & Verify Open vSwitch Service
+```bash
+sudo systemctl enable --now openvswitch-switch
+sudo systemctl status openvswitch-switch --no-pager
+sudo ovs-vsctl --version
+```
 
-4. **Data-Plane & Counter Verification (`PENDING_UBUNTU_VALIDATION`):**
-   - Generate inter-edge traffic (e.g., `mininet> h1 ping -c 5 10.0.0.3` or `iperf3` between inter-edge pairs).
-   - Verify OVS counters increment on `P1` hops:
-     ```bash
-     sudo ovs-ofctl -O OpenFlow13 dump-flows e1 | grep cookie=0x103
-     sudo ovs-ofctl -O OpenFlow13 dump-ports e1
-     ```
-   - Trigger/confirm `orchestrator.reconcile_after_reconnect_or_traffic()` (or active probe) so the 48 flows only transition to `VERIFIED` (`LIVE_OVS`) after real `packet_count` delta / active probe evidence.
+#### Step 5 — Start SDN S0 Controller on Port `6633` (Terminal 1)
+`network/topology/topology.py` connects all 6 OVS bridges (`e1`–`e4`, `c1`–`c2`, `protocols='OpenFlow13'`) to `127.0.0.1:6633`. Always pass `--ofp-tcp-listen-port 6633`:
+```bash
+source .venv_ubuntu/bin/activate
+SDN_RUN_ID=s0_live_run \
+SDN_VERIFY_PORT_DESC=1 \
+SDN_ENABLE_INTRA_EDGE_L3=1 \
+SDN_ENABLE_ARP_EDGE_LOCAL_FLOOD=1 \
+SDN_PREINSTALL_BOTH_DOWNSTREAM=1 \
+PYTHONPATH=. osken-manager --ofp-tcp-listen-port 6633 sdn/apps/ryu_s0_app.py
+# (Use `ryu-manager` instead of `osken-manager` if running Option A)
+```
 
-### 6.4 `pingall` Scope: 48 Inter-Edge TE Flows vs. 8 Intra-Edge Pairs & ARP
-- **Canonical TE Scope (`configs/network/flow_groups.csv`):** Exactly **48 directed inter-edge flows** (`h_i -> h_j` where `src_edge != dst_edge`).
-- **Outside the 48 Canonical Flows (8 directed intra-edge pairs):**
-  - `e1`: `h1 -> h2`, `h2 -> h1`
-  - `e2`: `h3 -> h4`, `h4 -> h3`
-  - `e3`: `h5 -> h6`, `h6 -> h5`
-  - `e4`: `h7 -> h8`, `h8 -> h7`
-- **ARP Requirement:** `network/topology/topology.py` currently does **not** call `net.staticArp()`. Without either:
-  1. `net.staticArp()` in Mininet (recommended by Network/SDN integration), **or**
-  2. opt-in `SDN_ENABLE_ARP_EDGE_LOCAL_FLOOD=1` + `SDN_ENABLE_INTRA_EDGE_L3=1` in `RyuS0App`,
-  a full `mininet> pingall` will drop intra-edge pings and/or ARP resolution even when all 48 inter-edge flows are installed and working.
+#### Step 6 — Start Network's Mininet Topology (Terminal 2)
+```bash
+sudo mn -c
+sudo python3 network/topology/topology.py
+```
 
-### 6.5 S0 Evidence Checklist (Required from Ubuntu Run)
-- [ ] `PENDING_UBUNTU_VALIDATION`: Controller log showing all 6 switches (`DPID 1..6`) connected via OpenFlow 1.3 (`0x04`) and topology hash verified.
-- [ ] `PENDING_UBUNTU_VALIDATION`: `ovs-ofctl -O OpenFlow13 dump-flows` on `e1`–`e4`, `c1`–`c2` confirming downstream-first + Barrier + source-edge `P1` rules.
-- [ ] `PENDING_UBUNTU_VALIDATION`: Inter-edge `ping` / `iperf3` raw output + non-zero `packet_count` in `dump-flows` / `FlowStatsReply`.
-- [ ] `PENDING_UBUNTU_VALIDATION`: `S0BootstrapReport.verified_48_flows == True` only after real counter/probe evidence (`EvidenceMode.LIVE_OVS`).
+#### Step 7 — Verify All 6 Datapaths (`DPID 1..6`) Connected
+In Terminal 3:
+```bash
+sudo ovs-vsctl show
+for sw in e1 e2 e3 e4 c1 c2; do
+    sudo ovs-ofctl -O OpenFlow13 show "$sw" | head -n 5
+done
+```
+
+#### Step 8 — Verify Live Port Mapping (`OFPPortDescStatsReply` / `dump-ports-desc`)
+```bash
+for sw in e1 e2 e3 e4 c1 c2; do
+    echo "=== PortDesc $sw ==="
+    sudo ovs-ofctl -O OpenFlow13 dump-ports-desc "$sw"
+done
+```
+*(Confirm controller log shows `port_desc_validated=True` across all 6 switches.)*
+
+#### Step 9 — Verify Two-Phase Bootstrap of 48 `P1` Rules (`RULES_INSTALLED` / `VERIFICATION_PENDING`)
+```bash
+for sw in e1 e2 e3 e4 c1 c2; do
+    echo "=== Flow Table $sw ==="
+    sudo ovs-ofctl -O OpenFlow13 dump-flows "$sw"
+done
+```
+*(Before traffic, `readiness_state` is `VERIFICATION_PENDING`, `bootstrapped_48_inter_edge_installed=True`, `verified_48_flows=False`.)*
+
+#### Step 10 — Run `pingall` in Mininet CLI (Terminal 2)
+```text
+mininet> pingall
+```
+*(Note: With `SDN_ENABLE_INTRA_EDGE_L3=1` and `SDN_ENABLE_ARP_EDGE_LOCAL_FLOOD=1`, both the 48 inter-edge flows and the 8 intra-edge helper pairs `0xFFF0` + loop-free `c1` ARP tree `0xFFF1` are active, yielding `0% dropped` across all 56 host pairs.)*
+
+#### Step 11 — Confirm Incremental Traffic Verification Transitions All 48 Flows to `VERIFIED`
+After `pingall` (or `iperf3` across inter-edge pairs), every one of the 48 `P1` paths has `n_packets >= 1` across all 3 hops (`e_src`, `c1`, `e_dst`). The controller's non-blocking reconcile loop logs:
+`S0 Reconciled & VERIFIED all 48 flows (state_version=2).`
+
+#### Step 12 — Inspect OVS `dump-flows` Packet Counters (`n_packets > 0`)
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-flows e1 | grep "cookie=0x103"
+sudo ovs-ofctl -O OpenFlow13 dump-flows c1 | grep "cookie=0x103"
+sudo ovs-ofctl -O OpenFlow13 dump-flows e2 | grep "cookie=0x103"
+```
+
+#### Step 13 — Verify Two-Phase Route Switch (`0x103: P1 -> P2` and `P2 -> P1`)
+Verify downstream `c2`/`e2` rules are active and source-edge `e1` flips `output:3` $\leftrightarrow$ `output:4` with `OFPFF_RESET_COUNTS`, followed by `FlowStats` + counter delta confirmation.
+
+#### Step 14 — Verify Rollback & Switch Reconnect Reconciliation
+```bash
+# Simulate wiped switch table on e1 and trigger traffic + reconciliation:
+sudo ovs-ofctl -O OpenFlow13 del-flows e1
+```
+*(Verify controller locks `reconcile_required=True`, reinstalls missing `P1` and helper rules on `e1` without touching `e2..e4`, and restores `VERIFIED` once traffic flows.)*
+
+#### Step 15 — Collect Raw Evidence Artifacts for Testing Sign-Off
+Save `ovs-vsctl show`, `ovs-ofctl -O OpenFlow13 dump-flows`, `dump-ports-desc`, `dump-ports`, controller logs, and `pingall` output per `sdn/LIVE_TEST_CHECKLIST.md`.

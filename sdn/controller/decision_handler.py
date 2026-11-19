@@ -38,6 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum
+import time
 from typing import Callable, Mapping, Optional, Protocol, runtime_checkable
 
 from sdn.controller.state_manager import (
@@ -623,17 +624,14 @@ class DecisionHandler:
                 run_initialized=True,
             )
         eff_cfg_hash = request.effective_config_hash
-        if (
-            self._config.expected_config_hash is not None
-            and eff_cfg_hash is not None
-            and eff_cfg_hash != self._config.expected_config_hash
-        ):
-            return self._reject_pre_write(
-                request,
-                reason=ReasonCode.CONFIG_MISMATCH,
-                rejected_at_utc=norm_decision_ts,
-                run_initialized=True,
-            )
+        if self._config.expected_config_hash is not None:
+            if not eff_cfg_hash or eff_cfg_hash != self._config.expected_config_hash:
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.CONFIG_MISMATCH,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
 
         # 7. Check expected_state_version (AC-S02, S4)
         if request.expected_state_version != current_state_snap.state_version:
@@ -644,8 +642,58 @@ class DecisionHandler:
                 run_initialized=True,
             )
 
-        # 8. Check snapshot_id validity and staleness (T_stale_s) (AC-S02, S2)
+        # 8. Check snapshot_id validity, future timestamps, consistency & staleness (T_stale_s) (AC-S02, S2, Phase 7.4)
         if not isinstance(request.snapshot_id, str) or not request.snapshot_id.strip():
+            return self._reject_pre_write(
+                request,
+                reason=ReasonCode.INVALID_REQUEST,
+                rejected_at_utc=norm_decision_ts,
+                run_initialized=True,
+            )
+
+        req_cutoff_dt = None
+        req_as_of_dt = None
+        if request.history_cutoff_utc is not None:
+            try:
+                req_cutoff_dt = parse_utc_timestamp(request.history_cutoff_utc)
+            except StateValidationError:
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.INVALID_REQUEST,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
+            if req_cutoff_dt > decision_dt:
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.INVALID_REQUEST,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
+
+        if request.snapshot_as_of_utc is not None:
+            try:
+                req_as_of_dt = parse_utc_timestamp(request.snapshot_as_of_utc)
+            except StateValidationError:
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.INVALID_REQUEST,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
+            if req_as_of_dt > decision_dt:
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.INVALID_REQUEST,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
+
+        if (
+            req_cutoff_dt is not None
+            and req_as_of_dt is not None
+            and req_as_of_dt < req_cutoff_dt
+        ):
             return self._reject_pre_write(
                 request,
                 reason=ReasonCode.INVALID_REQUEST,
@@ -656,7 +704,14 @@ class DecisionHandler:
         reg_snapshot = self.get_registered_snapshot(
             request.run_id, request.snapshot_id
         )
-        if self._config.require_registered_snapshot and reg_snapshot is None:
+        # Under FAIL_CLOSED_INTEGRATION, require_registered_snapshot=False MUST NOT
+        # bypass authoritative registered snapshot verification (Phase 7.4 Req 1-4).
+        must_have_registered_snapshot = (
+            self._config.snapshot_validation_policy
+            == SnapshotValidationPolicy.FAIL_CLOSED_INTEGRATION
+        ) or self._config.require_registered_snapshot
+
+        if must_have_registered_snapshot and reg_snapshot is None:
             return self._reject_pre_write(
                 request,
                 reason=ReasonCode.INVALID_REQUEST,
@@ -672,6 +727,33 @@ class DecisionHandler:
                     rejected_at_utc=norm_decision_ts,
                     run_initialized=True,
                 )
+            if (
+                reg_snapshot.topology_version != self._topology.topology_version
+                or reg_snapshot.topology_hash != self._topology.topology_hash
+            ):
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.TOPOLOGY_MISMATCH,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
+            if reg_snapshot.config_version != current_state_snap.config_version:
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.CONFIG_MISMATCH,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
+            if (
+                self._config.expected_config_hash is not None
+                and reg_snapshot.config_hash != self._config.expected_config_hash
+            ):
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.CONFIG_MISMATCH,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
             if reg_snapshot.state_version != request.expected_state_version:
                 return self._reject_pre_write(
                     request,
@@ -680,6 +762,38 @@ class DecisionHandler:
                     run_initialized=True,
                 )
             snap_ref_dt = parse_utc_timestamp(reg_snapshot.history_cutoff_utc)
+            snap_as_of_dt = parse_utc_timestamp(reg_snapshot.snapshot_as_of_utc)
+            if (
+                snap_ref_dt > decision_dt
+                or snap_as_of_dt > decision_dt
+                or snap_as_of_dt < snap_ref_dt
+            ):
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.INVALID_REQUEST,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
+            if (
+                req_cutoff_dt is not None
+                and format_utc_timestamp(req_cutoff_dt) != reg_snapshot.history_cutoff_utc
+            ):
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.INVALID_REQUEST,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
+            if (
+                req_as_of_dt is not None
+                and format_utc_timestamp(req_as_of_dt) != reg_snapshot.snapshot_as_of_utc
+            ):
+                return self._reject_pre_write(
+                    request,
+                    reason=ReasonCode.INVALID_REQUEST,
+                    rejected_at_utc=norm_decision_ts,
+                    run_initialized=True,
+                )
             if (decision_dt - snap_ref_dt).total_seconds() > self._config.stale_threshold_s:
                 return self._reject_pre_write(
                     request,
@@ -688,19 +802,11 @@ class DecisionHandler:
                     run_initialized=True,
                 )
         else:
-            ref_ts_str = request.history_cutoff_utc or request.snapshot_as_of_utc
-            if ref_ts_str is not None:
-                try:
-                    snap_ref_dt = parse_utc_timestamp(ref_ts_str)
-                except StateValidationError:
-                    return self._reject_pre_write(
-                        request,
-                        reason=ReasonCode.INVALID_REQUEST,
-                        rejected_at_utc=norm_decision_ts,
-                        run_initialized=True,
-                    )
+            # Reachable ONLY when snapshot_validation_policy == TEST_ONLY_ALLOW_UNREGISTERED
+            ref_dt = req_cutoff_dt or req_as_of_dt
+            if ref_dt is not None:
                 if (
-                    decision_dt - snap_ref_dt
+                    decision_dt - ref_dt
                 ).total_seconds() > self._config.stale_threshold_s:
                     return self._reject_pre_write(
                         request,
@@ -708,18 +814,6 @@ class DecisionHandler:
                         rejected_at_utc=norm_decision_ts,
                         run_initialized=True,
                     )
-            elif (
-                self._config.snapshot_validation_policy
-                != SnapshotValidationPolicy.TEST_ONLY_ALLOW_UNREGISTERED
-            ):
-                # Fail-closed in integration/production mode: an unregistered snapshot_id
-                # with no history_cutoff_utc or snapshot_as_of_utc cannot verify freshness.
-                return self._reject_pre_write(
-                    request,
-                    reason=ReasonCode.INVALID_REQUEST,
-                    rejected_at_utc=norm_decision_ts,
-                    run_initialized=True,
-                )
 
         # 9. Check forecast_start, forecast_end, apply_deadline_utc & apply_guard_s (AC-S02)
         try:
@@ -876,6 +970,7 @@ class DecisionHandler:
         # or state commit MUST NEVER return a fake REJECTED! Instead, transition affected flows
         # to UNKNOWN (actual_path_id=None) and return BatchStatus.INCONSISTENT.
         try:
+            t_exec_start = time.monotonic()
             install_result = self._rule_installer.install_batch(
                 run_id=request.run_id,
                 decision_batch_id=request.decision_batch_id,
@@ -883,6 +978,14 @@ class DecisionHandler:
                 applied_at_utc=norm_applied_ts,
                 cleanup_old_downstream=self._config.cleanup_old_downstream,
             )
+            elapsed_exec_s = max(0.0, time.monotonic() - t_exec_start)
+            if (
+                completed_at_utc is None
+                and self._rule_installer.switch_driver.evidence_mode.value == "LIVE_OVS"
+                and elapsed_exec_s >= 0.001
+            ):
+                completed_dt = applied_dt + timedelta(seconds=elapsed_exec_s)
+                norm_completed_ts = format_utc_timestamp(completed_dt)
 
             batch_status, result_state_version = self._state_manager.commit_batch_outcome(
                 run_id=request.run_id,

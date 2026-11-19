@@ -82,6 +82,39 @@ class FlowModCountBreakdown:
 
 
 @dataclass(frozen=True)
+class BootstrapInstallReport:
+    """
+    Granular outcome of S0 two-phase rule bootstrap separating switch installation &
+    FlowStats rule-presence read-back from data-plane counter/probe verification (`Phase 7.1`):
+    - `rules_installed_48`: True ONLY when all 48 initial P1 rules (and pre-installed P2
+      downstream rules) were accepted by switches, confirmed by Barriers, and confirmed
+      present in switch flow tables via `FlowStats` read-back.
+    - `all_48_verified`: True ONLY when all 48 initial P1 paths also passed real data-plane
+      counter/probe verification (`len(verified_evidences) == 48`).
+    - Lack of traffic (`pending_traffic_flow_ids` non-empty while `rules_installed_48 == True`)
+      is NEVER treated as an installation failure (`failed_stage is None`).
+    - Any FlowMod rejection/exception, Barrier failure/timeout, or FlowStats rule mismatch
+      sets `rules_installed_48 = False` and records `failed_stage` + `error_detail`.
+    """
+
+    run_id: str
+    installed_at_utc: str
+    downstream_installed_ok: bool
+    downstream_barrier_ok: bool
+    source_edge_installed_ok: bool
+    source_edge_barrier_ok: bool
+    flow_stats_readback_ok: bool
+    rules_installed_48: bool
+    all_48_verified: bool
+    verified_evidences: dict[str, VerificationEvidence] = field(default_factory=dict)
+    pending_traffic_flow_ids: tuple[str, ...] = ()
+    failed_flow_ids: tuple[str, ...] = ()
+    failed_stage: Optional[str] = None
+    error_detail: Optional[str] = None
+    xids_by_flow: dict[str, tuple[int, ...]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class BatchInstallResult:
     """
     Aggregated result of executing a multi-flow decision batch on switches.
@@ -172,6 +205,310 @@ class RuleInstaller:
             except SwitchTimeoutError:
                 continue
         return total
+
+    def install_initial_paths_and_readback(
+        self,
+        run_id: str,
+        installed_at_utc: str,
+        *,
+        preinstall_both_downstream_branches: bool = True,
+    ) -> BootstrapInstallReport:
+        """
+        Execute S0 two-phase rule installation + Barrier + FlowStats read-back + counter/probe
+        check while strictly separating rule installation success from traffic verification (`Phase 7.1`).
+        Never raises on missing traffic; returns a structured `BootstrapInstallReport`.
+        """
+        norm_ts = format_utc_timestamp(installed_at_utc)
+        topology = self._compiler.topology
+        all_flows = topology.get_all_flow_groups()
+        xids_by_flow: dict[str, list[int]] = {fg.flow_group_id: [] for fg in all_flows}
+        touched_downstream_dpids: set[int] = set()
+        touched_source_dpids: set[int] = set()
+
+        # Phase 1A: Pre-install downstream rules for all 48 flows
+        for fg in all_flows:
+            fid = fg.flow_group_id
+            p1_plan, p2_plan = self._compiler.compile_flow_candidates(fid)
+            plans_to_preinstall = (
+                (p1_plan, p2_plan) if preinstall_both_downstream_branches else (p1_plan,)
+            )
+            for plan in plans_to_preinstall:
+                for ds_rule in plan.downstream_rules:
+                    try:
+                        rec = self._driver.send_flow_mod(
+                            ds_rule,
+                            FlowModCommand.ADD,
+                            phase=SwitchPhaseTag.BOOTSTRAP,
+                        )
+                    except Exception as exc:
+                        return BootstrapInstallReport(
+                            run_id=run_id,
+                            installed_at_utc=norm_ts,
+                            downstream_installed_ok=False,
+                            downstream_barrier_ok=False,
+                            source_edge_installed_ok=False,
+                            source_edge_barrier_ok=False,
+                            flow_stats_readback_ok=False,
+                            rules_installed_48=False,
+                            all_48_verified=False,
+                            failed_flow_ids=(fid,),
+                            failed_stage="DOWNSTREAM_FLOWMOD",
+                            error_detail=(
+                                f"Bootstrap downstream FlowMod exception on switch "
+                                f"'{ds_rule.switch_id}' for flow '{fid}': {exc}"
+                            ),
+                        )
+                    xids_by_flow[fid].append(rec.xid)
+                    touched_downstream_dpids.add(ds_rule.dpid)
+                    if not rec.accepted:
+                        return BootstrapInstallReport(
+                            run_id=run_id,
+                            installed_at_utc=norm_ts,
+                            downstream_installed_ok=False,
+                            downstream_barrier_ok=False,
+                            source_edge_installed_ok=False,
+                            source_edge_barrier_ok=False,
+                            flow_stats_readback_ok=False,
+                            rules_installed_48=False,
+                            all_48_verified=False,
+                            failed_flow_ids=(fid,),
+                            failed_stage="DOWNSTREAM_FLOWMOD",
+                            error_detail=(
+                                f"Bootstrap downstream FlowMod failed on switch "
+                                f"'{ds_rule.switch_id}' for flow '{fid}': {rec.error_reason}"
+                            ),
+                        )
+
+        # Phase 1B: Downstream Barriers
+        for dpid in sorted(touched_downstream_dpids):
+            try:
+                b_rec = self._driver.send_barrier(dpid, phase=SwitchPhaseTag.BOOTSTRAP)
+            except Exception as exc:
+                return BootstrapInstallReport(
+                    run_id=run_id,
+                    installed_at_utc=norm_ts,
+                    downstream_installed_ok=True,
+                    downstream_barrier_ok=False,
+                    source_edge_installed_ok=False,
+                    source_edge_barrier_ok=False,
+                    flow_stats_readback_ok=False,
+                    rules_installed_48=False,
+                    all_48_verified=False,
+                    failed_stage="DOWNSTREAM_BARRIER",
+                    error_detail=f"Bootstrap downstream Barrier exception on dpid={dpid}: {exc}",
+                )
+            if not b_rec.confirmed:
+                return BootstrapInstallReport(
+                    run_id=run_id,
+                    installed_at_utc=norm_ts,
+                    downstream_installed_ok=True,
+                    downstream_barrier_ok=False,
+                    source_edge_installed_ok=False,
+                    source_edge_barrier_ok=False,
+                    flow_stats_readback_ok=False,
+                    rules_installed_48=False,
+                    all_48_verified=False,
+                    failed_stage="DOWNSTREAM_BARRIER",
+                    error_detail=(
+                        f"Bootstrap downstream Barrier failed on switch '{b_rec.switch_id}' "
+                        f"(dpid={dpid}): {b_rec.error_reason}"
+                    ),
+                )
+
+        # Phase 2A: Install source-edge initial P1 rules for all 48 flows
+        for fg in all_flows:
+            fid = fg.flow_group_id
+            init_cp = topology.get_initial_candidate_path(fid)
+            init_plan = self._compiler.compile_path(init_cp.path_id)
+            src_rule = init_plan.source_edge_rule
+            try:
+                rec = self._driver.send_flow_mod(
+                    src_rule,
+                    FlowModCommand.ADD,
+                    phase=SwitchPhaseTag.BOOTSTRAP,
+                )
+            except Exception as exc:
+                return BootstrapInstallReport(
+                    run_id=run_id,
+                    installed_at_utc=norm_ts,
+                    downstream_installed_ok=True,
+                    downstream_barrier_ok=True,
+                    source_edge_installed_ok=False,
+                    source_edge_barrier_ok=False,
+                    flow_stats_readback_ok=False,
+                    rules_installed_48=False,
+                    all_48_verified=False,
+                    failed_flow_ids=(fid,),
+                    failed_stage="SOURCE_EDGE_FLOWMOD",
+                    error_detail=(
+                        f"Bootstrap source-edge FlowMod exception on switch "
+                        f"'{src_rule.switch_id}' for flow '{fid}': {exc}"
+                    ),
+                )
+            xids_by_flow[fid].append(rec.xid)
+            touched_source_dpids.add(src_rule.dpid)
+            if not rec.accepted:
+                return BootstrapInstallReport(
+                    run_id=run_id,
+                    installed_at_utc=norm_ts,
+                    downstream_installed_ok=True,
+                    downstream_barrier_ok=True,
+                    source_edge_installed_ok=False,
+                    source_edge_barrier_ok=False,
+                    flow_stats_readback_ok=False,
+                    rules_installed_48=False,
+                    all_48_verified=False,
+                    failed_flow_ids=(fid,),
+                    failed_stage="SOURCE_EDGE_FLOWMOD",
+                    error_detail=(
+                        f"Bootstrap source-edge FlowMod failed on switch "
+                        f"'{src_rule.switch_id}' for flow '{fid}': {rec.error_reason}"
+                    ),
+                )
+
+        # Phase 2B: Source-Edge Barriers
+        for dpid in sorted(touched_source_dpids):
+            try:
+                b_rec = self._driver.send_barrier(dpid, phase=SwitchPhaseTag.BOOTSTRAP)
+            except Exception as exc:
+                return BootstrapInstallReport(
+                    run_id=run_id,
+                    installed_at_utc=norm_ts,
+                    downstream_installed_ok=True,
+                    downstream_barrier_ok=True,
+                    source_edge_installed_ok=True,
+                    source_edge_barrier_ok=False,
+                    flow_stats_readback_ok=False,
+                    rules_installed_48=False,
+                    all_48_verified=False,
+                    failed_stage="SOURCE_EDGE_BARRIER",
+                    error_detail=f"Bootstrap source-edge Barrier exception on dpid={dpid}: {exc}",
+                )
+            if not b_rec.confirmed:
+                return BootstrapInstallReport(
+                    run_id=run_id,
+                    installed_at_utc=norm_ts,
+                    downstream_installed_ok=True,
+                    downstream_barrier_ok=True,
+                    source_edge_installed_ok=True,
+                    source_edge_barrier_ok=False,
+                    flow_stats_readback_ok=False,
+                    rules_installed_48=False,
+                    all_48_verified=False,
+                    failed_stage="SOURCE_EDGE_BARRIER",
+                    error_detail=(
+                        f"Bootstrap source-edge Barrier failed on switch '{b_rec.switch_id}' "
+                        f"(dpid={dpid}): {b_rec.error_reason}"
+                    ),
+                )
+
+        # Phase 3: Read-back FlowStats & check forwarding counter/probe across all 48 flows
+        evidences: dict[str, VerificationEvidence] = {}
+        pending_traffic: list[str] = []
+        failed_readback: list[str] = []
+        first_readback_error: Optional[str] = None
+
+        for fg in all_flows:
+            fid = fg.flow_group_id
+            init_path_id = topology.get_initial_candidate_path(fid).path_id
+            v_res = self._verifier.verify_flow_path(
+                run_id=run_id,
+                flow_group_id=fid,
+                expected_path_id=init_path_id,
+                verified_at_utc=norm_ts,
+                barrier_confirmed=True,
+                xid_refs=xids_by_flow[fid],
+            )
+            if not v_res.rule_readback_ok:
+                failed_readback.append(fid)
+                if first_readback_error is None:
+                    first_readback_error = (
+                        f"Bootstrap FlowStats read-back failed for flow '{fid}' "
+                        f"on '{init_path_id}': {v_res.detail}"
+                    )
+                continue
+
+            # If preinstall_both_downstream_branches=True, also verify P2 downstream rules exist in FlowStats
+            if preinstall_both_downstream_branches:
+                _, p2_plan = self._compiler.compile_flow_candidates(fid)
+                p2_ds_ok = True
+                for ds_rule in p2_plan.downstream_rules:
+                    try:
+                        entries = self._driver.read_flow_stats(
+                            ds_rule.dpid,
+                            flow_group_id=fid,
+                            cookie_int=ds_rule.cookie_int,
+                        )
+                    except Exception as exc:
+                        p2_ds_ok = False
+                        if first_readback_error is None:
+                            first_readback_error = (
+                                f"Bootstrap P2 downstream FlowStats read-back failed for "
+                                f"flow '{fid}' on switch '{ds_rule.switch_id}': {exc}"
+                            )
+                        break
+                    matched_ds = [
+                        e
+                        for e in entries
+                        if (e.table_id, e.priority, e.match.match_tuple_key)
+                        == ds_rule.table_entry_key
+                        and e.cookie_int == ds_rule.cookie_int
+                        and e.out_port == ds_rule.out_port
+                    ]
+                    if not matched_ds:
+                        p2_ds_ok = False
+                        if first_readback_error is None:
+                            first_readback_error = (
+                                f"Bootstrap P2 downstream rule missing in FlowStats for "
+                                f"flow '{fid}' on switch '{ds_rule.switch_id}'."
+                            )
+                        break
+                if not p2_ds_ok:
+                    failed_readback.append(fid)
+                    continue
+
+            if v_res.is_verified and v_res.evidence is not None:
+                evidences[fid] = v_res.evidence
+            else:
+                pending_traffic.append(fid)
+
+        if failed_readback:
+            return BootstrapInstallReport(
+                run_id=run_id,
+                installed_at_utc=norm_ts,
+                downstream_installed_ok=True,
+                downstream_barrier_ok=True,
+                source_edge_installed_ok=True,
+                source_edge_barrier_ok=True,
+                flow_stats_readback_ok=False,
+                rules_installed_48=False,
+                all_48_verified=False,
+                verified_evidences=evidences,
+                pending_traffic_flow_ids=tuple(pending_traffic),
+                failed_flow_ids=tuple(failed_readback),
+                failed_stage="FLOW_STATS_READBACK",
+                error_detail=first_readback_error,
+                xids_by_flow={k: tuple(v) for k, v in xids_by_flow.items()},
+            )
+
+        all_verified = len(evidences) == len(all_flows) and len(pending_traffic) == 0
+        return BootstrapInstallReport(
+            run_id=run_id,
+            installed_at_utc=norm_ts,
+            downstream_installed_ok=True,
+            downstream_barrier_ok=True,
+            source_edge_installed_ok=True,
+            source_edge_barrier_ok=True,
+            flow_stats_readback_ok=True,
+            rules_installed_48=True,
+            all_48_verified=all_verified,
+            verified_evidences=evidences,
+            pending_traffic_flow_ids=tuple(pending_traffic),
+            failed_flow_ids=(),
+            failed_stage=None,
+            error_detail=None,
+            xids_by_flow={k: tuple(v) for k, v in xids_by_flow.items()},
+        )
 
     def bootstrap_initial_paths(
         self,

@@ -1726,23 +1726,8 @@ def test_23_fail_closed_snapshot_validation_vs_test_only_policy(
     assert state_fc.get_state_version("run_p4_01") == 1
     assert _count_flow_mods(driver_fc) == 0
 
-    # 3. require_registered_snapshot=False with explicit timestamps still enforces T_stale_s
-    req_stale_ts = replace(
-        _make_valid_apply_request(
-            topology,
-            decision_batch_id="batch_unreg_stale_ts",
-            snapshot_id="snap:non_existent_id",
-        ),
-        history_cutoff_utc="2026-11-12T09:00:05Z",
-    )
-    resp_stale_ts = handler_fc.handle_apply_request(
-        req_stale_ts,
-        decision_time_utc="2026-11-12T09:00:10.200Z",
-    )
-    assert resp_stale_ts.status == BatchStatus.REJECTED
-    assert resp_stale_ts.reason == ReasonCode.STALE.value
-    assert resp_stale_ts.rule_count == 0
-
+    # 3. Under FAIL_CLOSED_INTEGRATION, require_registered_snapshot=False MUST NOT allow
+    #    an unregistered snapshot_id even when a fresh history_cutoff_utc is supplied (Phase 7.4 Req 1-4)!
     req_fresh_ts = replace(
         _make_valid_apply_request(
             topology,
@@ -1755,19 +1740,153 @@ def test_23_fail_closed_snapshot_validation_vs_test_only_policy(
         req_fresh_ts,
         decision_time_utc="2026-11-12T09:00:10.200Z",
     )
-    assert resp_fresh_ts.status == BatchStatus.APPLIED
-    assert resp_fresh_ts.state_version == 2
+    assert resp_fresh_ts.status == BatchStatus.REJECTED
+    assert resp_fresh_ts.reason == ReasonCode.INVALID_REQUEST.value
+    assert resp_fresh_ts.rule_count == 0
+    assert state_fc.get_state_version("run_p4_01") == 1
+    assert _count_flow_mods(driver_fc) == 0
 
-    # 4. Explicit test-only policy allows synthetic fixtures without timestamps
+    # 4. Explicit test-only policy (TEST_ONLY_ALLOW_UNREGISTERED) allows synthetic fixtures,
+    #    while still enforcing T_stale_s when timestamps are provided.
     _, _, _, _, handler_test_only, _, _ = _build_controller_stack(
         topology,
         handler_config=DecisionHandlerConfig.for_mock_unit_tests(),
     )
+    req_stale_ts = replace(
+        _make_valid_apply_request(
+            topology,
+            decision_batch_id="batch_unreg_stale_ts",
+            snapshot_id="snap:non_existent_id",
+        ),
+        history_cutoff_utc="2026-11-12T09:00:05Z",
+    )
+    resp_stale_ts = handler_test_only.handle_apply_request(
+        req_stale_ts,
+        decision_time_utc="2026-11-12T09:00:10.200Z",
+    )
+    assert resp_stale_ts.status == BatchStatus.REJECTED
+    assert resp_stale_ts.reason == ReasonCode.STALE.value
+    assert resp_stale_ts.rule_count == 0
+
     resp_test_only = handler_test_only.handle_apply_request(
         req_no_ts,
         decision_time_utc="2026-11-12T09:00:10.200Z",
     )
     assert resp_test_only.status == BatchStatus.APPLIED
     assert resp_test_only.state_version == 2
+
+
+def test_24_phase7_4_future_timestamps_inconsistent_snapshot_and_missing_config_hash(
+    topology: TopologyRegistry,
+) -> None:
+    """
+    Phase 7.4 pre-write validation tests:
+    - Future `history_cutoff_utc` or `snapshot_as_of_utc` (> `decision_time_utc`) rejected with `INVALID_REQUEST` (0 FlowMods).
+    - Request timestamps inconsistent with registered `Snapshot` rejected with `INVALID_REQUEST` (0 FlowMods).
+    - Missing `config_hash` when `expected_config_hash` is required rejected with `CONFIG_MISMATCH` (0 FlowMods).
+    """
+    from dataclasses import replace
+
+    driver, _, _, state_mgr, handler, demand_prov, snap_creator = _build_controller_stack(
+        topology,
+        handler_config=DecisionHandlerConfig.for_integration(
+            expected_config_hash="sdn_config_v1_hash",
+        ),
+    )
+    demand_prov.populate_uniform_window(
+        run_id="run_p4_01",
+        flow_group_ids=[fg.flow_group_id for fg in topology.get_all_flow_groups()],
+        origin_refs=snap_creator.get_run_origin_refs("run_p4_01"),
+        start_bin=0,
+        end_bin_exclusive=15,
+    )
+    snap = snap_creator.create_snapshot(
+        run_id="run_p4_01",
+        cutoff=10,
+        lookback_L=5,
+        snapshot_as_of_utc="2026-11-12T09:00:10Z",
+    )
+    assert snap.is_valid is True
+    handler.register_snapshot(snap)
+    driver.clear_operation_log()
+
+    base_req = replace(
+        _make_valid_apply_request(
+            topology,
+            decision_batch_id="batch_p74_base",
+            snapshot_id=snap.snapshot_id,
+        ),
+        config_hash="sdn_config_v1_hash",
+    )
+
+    # 1. Future history_cutoff_utc (> decision_time_utc) -> REJECTED (INVALID_REQUEST, 0 FlowMods)
+    req_future_cutoff = replace(
+        base_req,
+        decision_batch_id="batch_p74_future_cutoff",
+        history_cutoff_utc="2026-11-12T09:00:12Z",
+    )
+    r1 = handler.handle_apply_request(
+        req_future_cutoff, decision_time_utc="2026-11-12T09:00:10.200Z"
+    )
+    assert r1.status == BatchStatus.REJECTED
+    assert r1.reason == ReasonCode.INVALID_REQUEST.value
+    assert r1.rule_count == 0
+    assert _count_flow_mods(driver) == 0
+
+    # 2. Future snapshot_as_of_utc (> decision_time_utc) -> REJECTED (INVALID_REQUEST, 0 FlowMods)
+    req_future_as_of = replace(
+        base_req,
+        decision_batch_id="batch_p74_future_asof",
+        snapshot_as_of_utc="2026-11-12T09:00:15Z",
+    )
+    r2 = handler.handle_apply_request(
+        req_future_as_of, decision_time_utc="2026-11-12T09:00:10.200Z"
+    )
+    assert r2.status == BatchStatus.REJECTED
+    assert r2.reason == ReasonCode.INVALID_REQUEST.value
+    assert r2.rule_count == 0
+    assert _count_flow_mods(driver) == 0
+
+    # 3. Request history_cutoff_utc inconsistent with registered Snapshot -> REJECTED (INVALID_REQUEST)
+    req_mismatch_ts = replace(
+        base_req,
+        decision_batch_id="batch_p74_mismatch_ts",
+        history_cutoff_utc="2026-11-12T09:00:09Z",
+    )
+    r3 = handler.handle_apply_request(
+        req_mismatch_ts, decision_time_utc="2026-11-12T09:00:10.200Z"
+    )
+    assert r3.status == BatchStatus.REJECTED
+    assert r3.reason == ReasonCode.INVALID_REQUEST.value
+    assert r3.rule_count == 0
+    assert _count_flow_mods(driver) == 0
+
+    # 4. Missing config_hash when expected_config_hash is required -> REJECTED (CONFIG_MISMATCH)
+    req_no_cfg_hash = replace(
+        base_req,
+        decision_batch_id="batch_p74_missing_cfghash",
+        config_hash=None,
+    )
+    r4 = handler.handle_apply_request(
+        req_no_cfg_hash, decision_time_utc="2026-11-12T09:00:10.200Z"
+    )
+    assert r4.status == BatchStatus.REJECTED
+    assert r4.reason == ReasonCode.CONFIG_MISMATCH.value
+    assert r4.rule_count == 0
+    assert state_mgr.get_state_version("run_p4_01") == 1
+    assert _count_flow_mods(driver) == 0
+
+    # 5. Valid consistent request succeeds
+    req_ok = replace(
+        base_req,
+        decision_batch_id="batch_p74_valid_ok",
+        history_cutoff_utc=snap.history_cutoff_utc,
+        snapshot_as_of_utc=snap.snapshot_as_of_utc,
+    )
+    r5 = handler.handle_apply_request(
+        req_ok, decision_time_utc="2026-11-12T09:00:10.200Z"
+    )
+    assert r5.status == BatchStatus.APPLIED
+    assert r5.state_version == 2
 
 

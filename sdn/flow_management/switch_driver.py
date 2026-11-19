@@ -108,6 +108,20 @@ class SwitchFlowStatsEntry:
 
 
 @dataclass(frozen=True)
+class SwitchPortDescEntry:
+    """OpenFlow 1.3 Port Description (`OFPPortDescStatsReply` / `OFPPort`) read from a switch."""
+
+    dpid: int
+    switch_id: str
+    port_no: int
+    name: str
+    hw_addr: str = "00:00:00:00:00:00"
+    config: int = 0
+    state: int = 0
+    is_live: bool = True
+
+
+@dataclass(frozen=True)
 class ForwardingCheckResult:
     """
     Result of verifying actual data-plane forwarding (counter increment or active probe)
@@ -919,4 +933,23 @@ class InMemorySwitchDriver(SwitchDriverProtocol):
     def get_operation_log(self) -> tuple[SwitchOperationLogEntry, ...]:
         """Return the chronological log of all switch operations."""
         return tuple(self._op_log)
+
+    def read_port_desc(self, dpid: int) -> tuple[SwitchPortDescEntry, ...]:
+        """Return simulated OpenFlow 1.3 port descriptions for `dpid` from `TopologyRegistry`."""
+        sw = self._topology.get_switch_by_dpid(dpid)
+        ports: list[SwitchPortDescEntry] = []
+        seen_ports: set[int] = set()
+        for lk in self._topology.get_all_links():
+            if lk.from_node == sw.switch_id and lk.from_port not in seen_ports:
+                seen_ports.add(lk.from_port)
+                ports.append(
+                    SwitchPortDescEntry(
+                        dpid=dpid,
+                        switch_id=sw.switch_id,
+                        port_no=lk.from_port,
+                        name=f"{sw.switch_id}-eth{lk.from_port}",
+                        is_live=True,
+                    )
+                )
+        return tuple(sorted(ports, key=lambda p: p.port_no))
 

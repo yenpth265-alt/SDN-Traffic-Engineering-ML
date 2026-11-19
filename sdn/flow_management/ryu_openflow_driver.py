@@ -31,6 +31,7 @@ from sdn.flow_management.switch_driver import (
     SwitchFlowStatsEntry,
     SwitchOperationLogEntry,
     SwitchPhaseTag,
+    SwitchPortDescEntry,
     SwitchTimeoutError,
 )
 from sdn.schemas.state_models import EvidenceMode
@@ -54,6 +55,8 @@ class _PendingBarrier:
     xid: int
     phase: SwitchPhaseTag
     event: Any
+    conn_epoch: int = 0
+    datapath_id: int = 0
     confirmed: bool = False
     error_reason: Optional[str] = None
 
@@ -63,7 +66,20 @@ class _PendingFlowStats:
     dpid: int
     xid: int
     event: Any
+    conn_epoch: int = 0
+    datapath_id: int = 0
     raw_stats: list[Any] = field(default_factory=list)
+    error_reason: Optional[str] = None
+
+
+@dataclass
+class _PendingPortDesc:
+    dpid: int
+    xid: int
+    event: Any
+    conn_epoch: int = 0
+    datapath_id: int = 0
+    raw_ports: list[Any] = field(default_factory=list)
     error_reason: Optional[str] = None
 
 
@@ -204,10 +220,15 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
 
         self._pending_barriers: dict[tuple[int, int], _PendingBarrier] = {}
         self._pending_flow_stats: dict[tuple[int, int], _PendingFlowStats] = {}
-        self._recent_flowmod_errors: dict[tuple[int, int], str] = {}
-        self._flowmod_xids_by_dpid: dict[int, list[int]] = {}
+        self._pending_port_desc: dict[tuple[int, int], _PendingPortDesc] = {}
+        self._recent_flowmod_errors: dict[tuple[int, int, int], str] = {}
+        self._flowmod_xids_by_dpid: dict[int, list[tuple[int, int]]] = {}
         self._baseline_packet_counts: dict[tuple[int, str, str], int] = {}
+        self._connection_epochs: dict[int, int] = {}
+        self._datapath_identities: dict[int, int] = {}
+        self._rule_generations: dict[tuple[int, int, int, tuple[tuple[str, Any], ...]], int] = {}
         self._disconnect_events: list[tuple[int, str]] = []
+        self._ignored_stale_events: list[tuple[int, str]] = []
 
     @property
     def evidence_mode(self) -> EvidenceMode:
@@ -232,6 +253,27 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         with self._lock:
             return tuple(self._disconnect_events)
 
+    @property
+    def ignored_stale_events(self) -> tuple[tuple[int, str], ...]:
+        with self._lock:
+            return tuple(self._ignored_stale_events)
+
+    def get_connection_epoch(self, dpid: int) -> int:
+        """Return the monotonically increasing connection epoch for `dpid` (`0` if never connected)."""
+        with self._lock:
+            return self._connection_epochs.get(int(dpid), 0)
+
+    def get_active_datapath_id(self, dpid: int) -> Optional[int]:
+        """Return `id(datapath)` for the currently active datapath on `dpid`, or `None`."""
+        with self._lock:
+            return self._datapath_identities.get(int(dpid))
+
+    def get_rule_generation(self, rule: OpenFlowRuleSpec) -> int:
+        """Return the current rule generation counter for `(dpid, table_id, priority, match_tuple_key)`."""
+        key = (rule.dpid, rule.table_id, rule.priority, rule.match.match_tuple_key)
+        with self._lock:
+            return self._rule_generations.get(key, 0)
+
     # -------------------------------------------------------------------------
     # Datapath Connection Lifecycle
     # -------------------------------------------------------------------------
@@ -239,7 +281,7 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
     def register_datapath(self, datapath: Any) -> bool:
         """
         Register an OpenFlow 1.3 switch datapath.
-        Returns `True` if this replaced a duplicate/existing datapath for `dpid`.
+        Returns `True` if this replaced a different active datapath for `dpid`.
         """
         dpid = int(getattr(datapath, "id"))
         if self._config.strict_dpid_validation and dpid not in self._expected_dpids:
@@ -254,23 +296,53 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
                 "but OpenFlow 1.3 (0x04) is required."
             )
         with self._lock:
-            replaced = dpid in self._datapaths
+            existing = self._datapaths.get(dpid)
+            if existing is datapath:
+                # Duplicate features event on the exact same active datapath instance
+                return False
+            replaced = existing is not None
+            self._connection_epochs[dpid] = self._connection_epochs.get(dpid, 0) + 1
             self._datapaths[dpid] = datapath
+            self._datapath_identities[dpid] = id(datapath)
+            self._clear_baseline_counts_for_dpid(dpid)
             if replaced:
-                self._clear_baseline_counts_for_dpid(dpid)
                 self._fail_pending_waiters_for_dpid(
                     dpid, reason=f"DUPLICATE_SWITCH_RECONNECT_DPID_{dpid}"
                 )
             return replaced
 
-    def unregister_datapath(self, dpid: int, reason: str = "SWITCH_DISCONNECTED") -> None:
-        """Unregister a disconnected switch and fail any pending barrier/stats waiters."""
+    def unregister_datapath(
+        self,
+        dpid: int,
+        reason: str = "SWITCH_DISCONNECTED",
+        *,
+        datapath: Optional[Any] = None,
+    ) -> bool:
+        """
+        Unregister a disconnected switch and fail any pending barrier/stats waiters.
+        If `datapath` is supplied and does not match the currently active datapath for `dpid`
+        (e.g. a late `DEAD_DISPATCHER` from an already-replaced connection), ignores the stale
+        event and returns `False`.
+        """
         with self._lock:
             dpid_int = int(dpid)
+            active_dp = self._datapaths.get(dpid_int)
+            if datapath is not None and active_dp is not None and active_dp is not datapath:
+                self._ignored_stale_events.append(
+                    (dpid_int, f"STALE_UNREGISTER_IGNORED:{reason}:old_id={id(datapath)}")
+                )
+                return False
+            if active_dp is None and datapath is not None:
+                self._ignored_stale_events.append(
+                    (dpid_int, f"UNREGISTER_ALREADY_DISCONNECTED:{reason}")
+                )
+                return False
             self._datapaths.pop(dpid_int, None)
+            self._datapath_identities.pop(dpid_int, None)
             self._clear_baseline_counts_for_dpid(dpid_int)
             self._disconnect_events.append((dpid_int, reason))
             self._fail_pending_waiters_for_dpid(dpid_int, reason=reason)
+            return True
 
     def _clear_baseline_counts_for_dpid(self, dpid: int) -> None:
         for k in [k for k in self._baseline_packet_counts if k[0] == dpid]:
@@ -283,6 +355,10 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
                 waiter.error_reason = reason
                 waiter.event.set()
         for (p_dpid, xid), waiter in list(self._pending_flow_stats.items()):
+            if p_dpid == dpid:
+                waiter.error_reason = reason
+                waiter.event.set()
+        for (p_dpid, xid), waiter in list(self._pending_port_desc.items()):
             if p_dpid == dpid:
                 waiter.error_reason = reason
                 waiter.event.set()
@@ -397,6 +473,10 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
             else 0
         )
 
+        base_flags = getattr(ofproto, "OFPFF_SEND_FLOW_REM", 0)
+        if command in (FlowModCommand.ADD, FlowModCommand.MODIFY_STRICT):
+            base_flags = base_flags | getattr(ofproto, "OFPFF_RESET_COUNTS", 0x0004)
+
         msg = parser.OFPFlowMod(
             datapath=dp,
             cookie=rule.cookie_int,
@@ -409,13 +489,22 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
             buffer_id=getattr(ofproto, "OFP_NO_BUFFER", 0xFFFFFFFF),
             out_port=out_port_field,
             out_group=out_group_field,
-            flags=getattr(ofproto, "OFPFF_SEND_FLOW_REM", 0),
+            flags=base_flags,
             match=match,
             instructions=instructions,
         )
         xid = self._next_xid(dp, msg)
+        gen_key = (rule.dpid, rule.table_id, rule.priority, rule.match.match_tuple_key)
         with self._lock:
-            self._flowmod_xids_by_dpid.setdefault(rule.dpid, []).append(xid)
+            conn_epoch = self._connection_epochs.get(rule.dpid, 0)
+            self._flowmod_xids_by_dpid.setdefault(rule.dpid, []).append((conn_epoch, xid))
+            self._rule_generations[gen_key] = self._rule_generations.get(gen_key, 0) + 1
+            for bk in [
+                bk
+                for bk in self._baseline_packet_counts
+                if bk[0] == rule.dpid and bk[1] == rule.flow_group_id
+            ]:
+                self._baseline_packet_counts.pop(bk, None)
 
         try:
             accepted = dp.send_msg(msg)
@@ -516,13 +605,16 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
 
         msg = parser.OFPBarrierRequest(dp)
         xid = self._next_xid(dp, msg)
-        waiter = _PendingBarrier(
-            dpid=dpid,
-            xid=xid,
-            phase=phase,
-            event=self._event_factory(),
-        )
         with self._lock:
+            conn_epoch = self._connection_epochs.get(dpid, 0)
+            waiter = _PendingBarrier(
+                dpid=dpid,
+                xid=xid,
+                phase=phase,
+                event=self._event_factory(),
+                conn_epoch=conn_epoch,
+                datapath_id=id(dp),
+            )
             self._pending_barriers[(dpid, xid)] = waiter
 
         try:
@@ -629,10 +721,11 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         )
 
     def _pop_recent_flowmod_error_locked(self, dpid: int) -> Optional[str]:
+        active_epoch = self._connection_epochs.get(dpid, 0)
         xids = self._flowmod_xids_by_dpid.pop(dpid, [])
-        for xid in xids:
-            err = self._recent_flowmod_errors.pop((dpid, xid), None)
-            if err is not None:
+        for epoch, xid in xids:
+            err = self._recent_flowmod_errors.pop((dpid, epoch, xid), None)
+            if err is not None and epoch == active_epoch:
                 return err
         return None
 
@@ -666,8 +759,15 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
             match=parser.OFPMatch(),
         )
         xid = self._next_xid(dp, msg)
-        waiter = _PendingFlowStats(dpid=dpid, xid=xid, event=self._event_factory())
         with self._lock:
+            conn_epoch = self._connection_epochs.get(dpid, 0)
+            waiter = _PendingFlowStats(
+                dpid=dpid,
+                xid=xid,
+                event=self._event_factory(),
+                conn_epoch=conn_epoch,
+                datapath_id=id(dp),
+            )
             self._pending_flow_stats[(dpid, xid)] = waiter
 
         try:
@@ -761,6 +861,123 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         )
         return tuple(entries)
 
+    def read_port_desc(self, dpid: int) -> tuple[SwitchPortDescEntry, ...]:
+        """
+        Query OpenFlow 1.3 `OFPPortDescStatsRequest` (`OFPMP_PORT_DESC`) from switch `dpid`
+        and return the live `SwitchPortDescEntry` tuple (`Phase 7.5`).
+        """
+        dp = self._get_datapath(dpid)
+        ofproto = dp.ofproto
+        parser = dp.ofproto_parser
+        switch_id = self._switch_id_for_dpid(dpid)
+
+        if hasattr(parser, "OFPPortDescStatsRequest"):
+            msg = parser.OFPPortDescStatsRequest(dp, 0)
+        else:
+            raise SwitchDriverError(
+                f"Datapath parser on DPID {dpid} does not support OFPPortDescStatsRequest."
+            )
+        xid = self._next_xid(dp, msg)
+        with self._lock:
+            conn_epoch = self._connection_epochs.get(dpid, 0)
+            waiter = _PendingPortDesc(
+                dpid=dpid,
+                xid=xid,
+                event=self._event_factory(),
+                conn_epoch=conn_epoch,
+                datapath_id=id(dp),
+            )
+            self._pending_port_desc[(dpid, xid)] = waiter
+
+        try:
+            sent = dp.send_msg(msg)
+            if sent is False:
+                raise SwitchDriverError(f"PortDescStatsRequest send failed on DPID {dpid}.")
+            signaled = waiter.event.wait(timeout=self._config.flow_stats_timeout_s)
+        finally:
+            with self._lock:
+                self._pending_port_desc.pop((dpid, xid), None)
+
+        if not signaled:
+            self._record_log(
+                op_type="PORT_DESC",
+                xid=xid,
+                dpid=dpid,
+                switch_id=switch_id,
+                phase=SwitchPhaseTag.VERIFICATION,
+                flow_group_id=None,
+                path_id=None,
+                hop_stage=None,
+                out_port=None,
+                success=False,
+                timed_out=True,
+                error_reason=f"PORT_DESC_TIMEOUT_DPID_{dpid}",
+            )
+            raise SwitchTimeoutError(
+                f"PortDesc timeout on switch '{switch_id}' (DPID={dpid}, xid={xid})."
+            )
+
+        if waiter.error_reason is not None:
+            self._record_log(
+                op_type="PORT_DESC",
+                xid=xid,
+                dpid=dpid,
+                switch_id=switch_id,
+                phase=SwitchPhaseTag.VERIFICATION,
+                flow_group_id=None,
+                path_id=None,
+                hop_stage=None,
+                out_port=None,
+                success=False,
+                error_reason=waiter.error_reason,
+            )
+            raise SwitchDriverError(waiter.error_reason)
+
+        port_down_flag = getattr(ofproto, "OFPPC_PORT_DOWN", 1)
+        link_down_flag = getattr(ofproto, "OFPPS_LINK_DOWN", 1)
+        ofpp_max = getattr(ofproto, "OFPP_MAX", 0xFFFFFF00)
+        entries: list[SwitchPortDescEntry] = []
+        for p in waiter.raw_ports:
+            p_no = int(getattr(p, "port_no", 0))
+            if p_no <= 0 or p_no > int(ofpp_max):
+                continue
+            raw_name = getattr(p, "name", f"{switch_id}-eth{p_no}")
+            if isinstance(raw_name, bytes):
+                p_name = raw_name.decode("utf-8", errors="replace").rstrip("\x00")
+            else:
+                p_name = str(raw_name)
+            p_cfg = int(getattr(p, "config", 0))
+            p_st = int(getattr(p, "state", 0))
+            is_live = ((p_cfg & int(port_down_flag)) == 0) and (
+                (p_st & int(link_down_flag)) == 0
+            )
+            entries.append(
+                SwitchPortDescEntry(
+                    dpid=dpid,
+                    switch_id=switch_id,
+                    port_no=p_no,
+                    name=p_name,
+                    hw_addr=str(getattr(p, "hw_addr", "00:00:00:00:00:00")),
+                    config=p_cfg,
+                    state=p_st,
+                    is_live=is_live,
+                )
+            )
+
+        self._record_log(
+            op_type="PORT_DESC",
+            xid=xid,
+            dpid=dpid,
+            switch_id=switch_id,
+            phase=SwitchPhaseTag.VERIFICATION,
+            flow_group_id=None,
+            path_id=None,
+            hop_stage=None,
+            out_port=None,
+            success=True,
+        )
+        return tuple(sorted(entries, key=lambda item: item.port_no))
+
     def snapshot_flow_counters(
         self, compiled_plan: CompiledPathPlan
     ) -> dict[tuple[int, str, str], int]:
@@ -800,6 +1017,10 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         2. Otherwise, read OpenFlow `FlowStats` counters across all 3 hops and verify
            a real positive `packet_count` delta (`>= min_counter_packet_delta`) compared
            to the baseline (never returning `counter_or_probe_ok=True` when counters are 0).
+        3. If any hop counter decreased (`pkt_now < prev`), detect counter reset, update
+           baseline to `pkt_now`, and return `COUNTER_RESET_DETECTED` (`counter_or_probe_ok=False`).
+        4. Only advance `_baseline_packet_counts` across all 3 hops when `ok == True`
+           so a partial/zero check never destroys pre-verification baselines.
         """
         if self._active_probe_callback is not None:
             res = self._active_probe_callback(compiled_plan, probe_id)
@@ -820,6 +1041,9 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
             return res
 
         hop_deltas: list[int] = []
+        observed_counts: dict[tuple[int, str, str], int] = {}
+        counter_reset_keys: dict[tuple[int, str, str], int] = {}
+
         for hop in compiled_plan.ordered_hop_rules:
             stats = self.read_flow_stats(
                 hop.dpid,
@@ -848,13 +1072,50 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
                 )
             pkt_now = sum(s.packet_count for s in matched)
             key = (hop.dpid, hop.flow_group_id, compiled_plan.path_id)
+            observed_counts[key] = pkt_now
             with self._lock:
                 prev = self._baseline_packet_counts.get(key, 0)
-                self._baseline_packet_counts[key] = pkt_now
-            hop_deltas.append(max(0, pkt_now - prev))
+            if pkt_now < prev:
+                counter_reset_keys[key] = pkt_now
+                hop_deltas.append(0)
+            else:
+                hop_deltas.append(pkt_now - prev)
+
+        if counter_reset_keys:
+            with self._lock:
+                for k, new_val in counter_reset_keys.items():
+                    self._baseline_packet_counts[k] = new_val
+            err_reason = "COUNTER_RESET_DETECTED"
+            self._record_log(
+                op_type="FORWARDING_CHECK",
+                xid=0,
+                dpid=compiled_plan.source_edge_rule.dpid,
+                switch_id=compiled_plan.source_edge_rule.switch_id,
+                phase=SwitchPhaseTag.VERIFICATION,
+                flow_group_id=compiled_plan.flow_group_id,
+                path_id=compiled_plan.path_id,
+                hop_stage=None,
+                out_port=compiled_plan.source_edge_rule.out_port,
+                success=False,
+                error_reason=err_reason,
+            )
+            return ForwardingCheckResult(
+                flow_group_id=compiled_plan.flow_group_id,
+                checked_path_id=compiled_plan.path_id,
+                actual_forwarded_path_id=None,
+                counter_or_probe_ok=False,
+                probe_id=probe_id,
+                packet_delta=0,
+                error_reason=err_reason,
+            )
 
         min_delta = min(hop_deltas) if hop_deltas else 0
         ok = min_delta >= self._config.min_counter_packet_delta
+        if ok:
+            with self._lock:
+                for k, pkt_val in observed_counts.items():
+                    self._baseline_packet_counts[k] = pkt_val
+
         err_reason = None if ok else "NO_REAL_COUNTER_DELTA_OR_ACTIVE_PROBE"
         self._record_log(
             op_type="FORWARDING_CHECK",
@@ -884,8 +1145,17 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
             return tuple(self._op_log)
 
     # -------------------------------------------------------------------------
-    # Ryu / OS-Ken Event Callbacks (Non-Blocking)
+    # Ryu / OS-Ken Event Callbacks (Non-Blocking & Connection-Epoch Safe)
     # -------------------------------------------------------------------------
+
+    def _is_stale_datapath_locked(self, dpid: int, dp: Any) -> bool:
+        """Return True if `dp` is from an outdated/replaced connection for `dpid`."""
+        if dp is None:
+            return False
+        active_dp = self._datapaths.get(dpid)
+        if active_dp is not None and active_dp is not dp:
+            return True
+        return False
 
     def handle_barrier_reply(self, ev: Any) -> None:
         msg = getattr(ev, "msg", ev)
@@ -893,10 +1163,24 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         dpid = int(getattr(dp, "id", getattr(ev, "dpid", 0)))
         xid = int(getattr(msg, "xid", 0))
         with self._lock:
+            if self._is_stale_datapath_locked(dpid, dp):
+                self._ignored_stale_events.append(
+                    (dpid, f"STALE_BARRIER_REPLY_XID_{xid}")
+                )
+                return
             waiter = self._pending_barriers.get((dpid, xid))
-            if waiter is not None:
-                waiter.confirmed = True
-                waiter.event.set()
+            if waiter is None:
+                self._ignored_stale_events.append(
+                    (dpid, f"LATE_OR_UNKNOWN_BARRIER_REPLY_XID_{xid}")
+                )
+                return
+            if waiter.conn_epoch != self._connection_epochs.get(dpid, 0):
+                self._ignored_stale_events.append(
+                    (dpid, f"EPOCH_MISMATCH_BARRIER_REPLY_XID_{xid}")
+                )
+                return
+            waiter.confirmed = True
+            waiter.event.set()
 
     def handle_flow_stats_reply(self, ev: Any) -> None:
         msg = getattr(ev, "msg", ev)
@@ -909,10 +1193,54 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         body = getattr(msg, "body", None) or ()
 
         with self._lock:
+            if self._is_stale_datapath_locked(dpid, dp):
+                self._ignored_stale_events.append(
+                    (dpid, f"STALE_FLOW_STATS_REPLY_XID_{xid}")
+                )
+                return
             waiter = self._pending_flow_stats.get((dpid, xid))
             if waiter is None:
+                self._ignored_stale_events.append(
+                    (dpid, f"LATE_OR_UNKNOWN_FLOW_STATS_REPLY_XID_{xid}")
+                )
+                return
+            if waiter.conn_epoch != self._connection_epochs.get(dpid, 0):
+                self._ignored_stale_events.append(
+                    (dpid, f"EPOCH_MISMATCH_FLOW_STATS_REPLY_XID_{xid}")
+                )
                 return
             waiter.raw_stats.extend(body)
+            if (flags & more_flag) == 0:
+                waiter.event.set()
+
+    def handle_port_desc_reply(self, ev: Any) -> None:
+        msg = getattr(ev, "msg", ev)
+        dp = getattr(msg, "datapath", None)
+        dpid = int(getattr(dp, "id", getattr(ev, "dpid", 0)))
+        xid = int(getattr(msg, "xid", 0))
+        ofproto = getattr(dp, "ofproto", None) if dp is not None else None
+        more_flag = getattr(ofproto, "OFPMPF_REPLY_MORE", 0x0001)
+        flags = int(getattr(msg, "flags", 0))
+        body = getattr(msg, "body", None) or ()
+
+        with self._lock:
+            if self._is_stale_datapath_locked(dpid, dp):
+                self._ignored_stale_events.append(
+                    (dpid, f"STALE_PORT_DESC_REPLY_XID_{xid}")
+                )
+                return
+            waiter = self._pending_port_desc.get((dpid, xid))
+            if waiter is None:
+                self._ignored_stale_events.append(
+                    (dpid, f"LATE_OR_UNKNOWN_PORT_DESC_REPLY_XID_{xid}")
+                )
+                return
+            if waiter.conn_epoch != self._connection_epochs.get(dpid, 0):
+                self._ignored_stale_events.append(
+                    (dpid, f"EPOCH_MISMATCH_PORT_DESC_REPLY_XID_{xid}")
+                )
+                return
+            waiter.raw_ports.extend(body)
             if (flags & more_flag) == 0:
                 waiter.event.set()
 
@@ -926,17 +1254,39 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         err_str = f"OFP_ERROR(dpid={dpid},xid={xid},type={err_type},code={err_code})"
 
         with self._lock:
+            if self._is_stale_datapath_locked(dpid, dp):
+                self._ignored_stale_events.append(
+                    (dpid, f"STALE_OFP_ERROR_XID_{xid}")
+                )
+                return
+            curr_epoch = self._connection_epochs.get(dpid, 0)
             b_waiter = self._pending_barriers.get((dpid, xid))
-            if b_waiter is not None:
+            if b_waiter is not None and b_waiter.conn_epoch == curr_epoch:
                 b_waiter.confirmed = False
                 b_waiter.error_reason = err_str
                 b_waiter.event.set()
                 return
 
             fs_waiter = self._pending_flow_stats.get((dpid, xid))
-            if fs_waiter is not None:
+            if fs_waiter is not None and fs_waiter.conn_epoch == curr_epoch:
                 fs_waiter.error_reason = err_str
                 fs_waiter.event.set()
                 return
 
-            self._recent_flowmod_errors[(dpid, xid)] = err_str
+            pd_waiter = self._pending_port_desc.get((dpid, xid))
+            if pd_waiter is not None and pd_waiter.conn_epoch == curr_epoch:
+                pd_waiter.error_reason = err_str
+                pd_waiter.event.set()
+                return
+
+            tracked_xids = {
+                txid
+                for epoch, txid in self._flowmod_xids_by_dpid.get(dpid, [])
+                if epoch == curr_epoch
+            }
+            if xid in tracked_xids:
+                self._recent_flowmod_errors[(dpid, curr_epoch, xid)] = err_str
+            else:
+                self._ignored_stale_events.append(
+                    (dpid, f"LATE_OR_UNTRACKED_OFP_ERROR_XID_{xid}")
+                )

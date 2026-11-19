@@ -41,11 +41,15 @@ sdn/
 │   ├── topology_registry.py            # Canonical Network catalog loader & validator (IF01, REQ-01)
 │   ├── state_manager.py                # Authoritative live routing_state, state_version, routing_history & hold-down (IF08)
 │   └── decision_handler.py             # Pre-write validation, idempotency, crash-safe apply orchestration (IF09, IF10)
+├── apps/
+│   ├── __init__.py
+│   └── ryu_s0_app.py                   # S0 Ryu / OS-Ken app & pure-Python S0ControllerOrchestrator
 ├── flow_management/
 │   ├── __init__.py
 │   ├── flow_matcher.py                 # Configurable L2/L3/L4 OpenFlow 1.3 match builder
 │   ├── route_compiler.py               # Compiles path_id -> 3-hop OpenFlowRuleSpec (e_src, core, e_dst)
 │   ├── switch_driver.py                # SwitchDriverProtocol & InMemorySwitchDriver (with fault injection F09-F12)
+│   ├── ryu_openflow_driver.py          # Live OpenFlow 1.3 Ryu / OS-Ken driver (connection epochs, PortDesc, multipart FlowStats)
 │   └── rule_installer.py               # Downstream-first 2-phase installer, bootstrap, rollback & rule_count tracking
 ├── route_verification/
 │   ├── __init__.py
@@ -57,11 +61,15 @@ sdn/
 │   ├── test_topology_registry.py                   # Phase 1: 33 tests (catalog, canonical IDs, negative fixtures)
 │   ├── test_state_manager.py                       # Phase 2: 16 tests (bootstrap, state_version, hold-down, invariants)
 │   ├── test_flow_management_and_verification.py    # Phase 3: 19 tests (OF1.3 semantics, 2-phase install, rollback, restart)
-│   ├── test_phase4_decision_and_snapshot.py        # Phase 4: 22 tests (ApplyRequest/Response, idempotency, causal Snapshot)
-│   └── test_phase5_e2e_integration_and_handoff.py  # Phase 5:  6 comprehensive suites (public APIs, adapter hot-swap, 12-step E2E, 13 faults, JSON serialization, crash recovery)
+│   ├── test_phase4_decision_and_snapshot.py        # Phase 4: 24 tests (ApplyRequest/Response, fail-closed snapshot, idempotency, causal Snapshot)
+│   ├── test_phase5_e2e_integration_and_handoff.py  # Phase 5:  6 comprehensive suites (public APIs, adapter hot-swap, 12-step E2E, 13 faults, JSON serialization, crash recovery)
+│   └── test_ryu_openflow_driver_and_s0.py          # Phase 6-7: 11 adapter/S0 suites (PASS_MOCK_ADAPTER: OF1.3 encoding, bootstrap fault injection, incremental 20+28 verification, epoch safety, PortDesc)
+├── requirements-ubuntu.txt             # Ubuntu Ryu / OS-Ken OpenFlow 1.3 runtime dependencies
 ├── README_SDN.md                       # This file
 ├── INTEGRATION_HANDOFF.md              # Cross-role integration contracts, schemas, and MUST-LOCK handoff guide
-└── UBUNTU_READINESS.md                 # Ubuntu/OVS/Mininet/Ryu live deployment & PASS_LIVE_OVS verification plan
+├── UBUNTU_READINESS.md                 # Ubuntu/OVS/Mininet/Ryu live deployment & 15-step PASS_LIVE_OVS runbook
+├── PRE_UBUNTU_VALIDATION_REPORT.md     # Phase 7 pre-Ubuntu code hardening & cross-role validation report
+└── LIVE_TEST_CHECKLIST.md              # Ubuntu/Mininet/OVS live verification checklist (PENDING_UBUNTU_VALIDATION)
 ```
 
 ---

@@ -18,7 +18,7 @@ Important `pingall` & Traffic Scope Note:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 import os
@@ -62,7 +62,7 @@ HELPER_RULE_PRIORITY = 50
 
 
 def _utc_now_rfc3339() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 class S0ReadinessState(str, Enum):
@@ -111,6 +111,14 @@ class S0AppConfig:
     driver_config: RyuDriverConfig = RyuDriverConfig()
     matcher_config: FlowMatcherConfig = FlowMatcherConfig()
     verifier_config: RuleVerifierConfig = RuleVerifierConfig()
+    northbound_enable: bool = False
+    northbound_host: str = "127.0.0.1"
+    northbound_port: int = 18080
+    northbound_auth_token: Optional[str] = None
+    northbound_sync_wait_ms: int = 300
+    idempotency_db_path: Optional[Path] = None
+    data_endpoint_url: Optional[str] = None
+    data_outbox_dir: Optional[Path] = None
 
     @classmethod
     def from_env(cls) -> "S0AppConfig":
@@ -121,6 +129,15 @@ class S0AppConfig:
                 return default
             return raw.strip().lower() in ("1", "true", "yes", "on")
 
+        def _env_opt_str(name: str) -> Optional[str]:
+            raw = os.environ.get(name)
+            if raw is None or not raw.strip():
+                return None
+            return raw.strip()
+
+        idem_raw = _env_opt_str("SDN_IDEMPOTENCY_DB_PATH")
+        outbox_raw = _env_opt_str("SDN_DATA_OUTBOX_DIR")
+
         return cls(
             run_id=os.environ.get("SDN_RUN_ID", "s0_live_run").strip() or "s0_live_run",
             preinstall_both_downstream_branches=_env_bool("SDN_PREINSTALL_BOTH_DOWNSTREAM", True),
@@ -130,6 +147,22 @@ class S0AppConfig:
             reconcile_poll_interval_s=float(os.environ.get("SDN_RECONCILE_POLL_INTERVAL_S", "2.0")),
             max_reconcile_attempts=int(os.environ.get("SDN_MAX_RECONCILE_ATTEMPTS", "150")),
             max_evidence_age_s=float(os.environ.get("SDN_MAX_EVIDENCE_AGE_S", "300.0")),
+            driver_config=RyuDriverConfig(
+                counter_verify_timeout_s=float(
+                    os.environ.get("SDN_COUNTER_VERIFY_TIMEOUT_S", "1.0")
+                ),
+                counter_verify_poll_interval_s=float(
+                    os.environ.get("SDN_COUNTER_VERIFY_POLL_INTERVAL_S", "0.04")
+                ),
+            ),
+            northbound_enable=_env_bool("SDN_NORTHBOUND_ENABLE", False),
+            northbound_host=os.environ.get("SDN_NORTHBOUND_HOST", "127.0.0.1").strip() or "127.0.0.1",
+            northbound_port=int(os.environ.get("SDN_NORTHBOUND_PORT", "18080")),
+            northbound_auth_token=_env_opt_str("SDN_NORTHBOUND_TOKEN"),
+            northbound_sync_wait_ms=int(os.environ.get("SDN_NORTHBOUND_SYNC_WAIT_MS", "300")),
+            idempotency_db_path=Path(idem_raw) if idem_raw else None,
+            data_endpoint_url=_env_opt_str("SDN_DATA_ENDPOINT_URL"),
+            data_outbox_dir=Path(outbox_raw) if outbox_raw else None,
         )
 
 
@@ -204,12 +237,57 @@ class S0ControllerOrchestrator:
         )
         self._installer = RuleInstaller(self._compiler, self._driver, self._verifier)
         self._state_manager = StateManager(self._topology)
+        self._idempotency_store = None
+        if self._config.idempotency_db_path is not None:
+            from sdn.adapters.sqlite_idempotency_store import SQLiteBatchIdempotencyStore
+
+            self._idempotency_store = SQLiteBatchIdempotencyStore(
+                self._config.idempotency_db_path
+            )
         self._decision_handler = DecisionHandler(
             self._topology,
             self._state_manager,
             self._installer,
             config=DecisionHandlerConfig.for_integration(),
+            idempotency_store=self._idempotency_store,
         )
+        self._demand_provider = None
+        self._snapshot_creator = None
+        self._data_publisher = None
+        if (
+            self._config.northbound_enable
+            or self._config.data_endpoint_url is not None
+            or self._config.data_outbox_dir is not None
+        ):
+            from sdn.adapters.data_event_publisher import (
+                DataEventPublisher,
+                DataPublisherConfig,
+            )
+            from sdn.adapters.http_control_api import HTTPDemandReleaseProvider
+            from sdn.monitoring.snapshot_creator import SnapshotCreator
+
+            self._demand_provider = HTTPDemandReleaseProvider()
+            self._snapshot_creator = SnapshotCreator(
+                self._topology,
+                self._state_manager,
+                self._demand_provider,
+            )
+            self._demand_provider._origin_refs_lookup = (
+                lambda rid: self._snapshot_creator.get_run_origin_refs(rid)
+                if self._snapshot_creator is not None
+                else None
+            )
+            if (
+                self._config.data_endpoint_url is not None
+                or self._config.data_outbox_dir is not None
+            ):
+                self._data_publisher = DataEventPublisher(
+                    DataPublisherConfig(
+                        endpoint_base_url=self._config.data_endpoint_url,
+                        outbox_dir=self._config.data_outbox_dir,
+                        auth_token=self._config.northbound_auth_token,
+                    )
+                )
 
         self._lock = threading.RLock()
         self._worker_lock = threading.Lock()
@@ -239,6 +317,68 @@ class S0ControllerOrchestrator:
     @property
     def installer(self) -> RuleInstaller:
         return self._installer
+
+    @property
+    def data_publisher(self) -> Any:
+        return self._data_publisher
+
+    def build_northbound_http_app(self) -> Any:
+        """Build the `SDNNorthboundHTTPApp` WSGI callable wired to this orchestrator."""
+        from sdn.adapters.http_control_api import (
+            HTTPDemandReleaseProvider,
+            NorthboundAPIConfig,
+            SDNNorthboundHTTPApp,
+        )
+        from sdn.monitoring.snapshot_creator import SnapshotCreator
+
+        if self._demand_provider is None:
+            self._demand_provider = HTTPDemandReleaseProvider()
+        if self._snapshot_creator is None:
+            self._snapshot_creator = SnapshotCreator(
+                self._topology, self._state_manager, self._demand_provider
+            )
+            self._demand_provider._origin_refs_lookup = (
+                lambda rid: self._snapshot_creator.get_run_origin_refs(rid)
+                if self._snapshot_creator is not None
+                else None
+            )
+
+        def _health_extra() -> dict[str, Any]:
+            rid = self._config.run_id
+            sv = None
+            rec_req = None
+            in_flight = None
+            try:
+                snap = self._state_manager.get_routing_state(rid)
+                sv = snap.state_version
+                rec_req = snap.reconcile_required
+                in_flight = snap.in_flight_batch_id
+            except Exception:
+                pass
+            return {
+                "connected_dpids": list(self._driver.connected_dpids),
+                "readiness_state": self._readiness_state.value,
+                "verified_cached": len(self._cached_flow_evidences),
+                "state_version": sv,
+                "reconcile_required": rec_req,
+                "in_flight_batch_id": in_flight,
+            }
+
+        return SDNNorthboundHTTPApp(
+            state_manager=self._state_manager,
+            decision_handler=self._decision_handler,
+            snapshot_creator=self._snapshot_creator,
+            demand_provider=self._demand_provider,
+            data_publisher=self._data_publisher,
+            config=NorthboundAPIConfig(
+                bind_host=self._config.northbound_host,
+                bind_port=self._config.northbound_port,
+                auth_token=self._config.northbound_auth_token,
+                default_sync_wait_ms=self._config.northbound_sync_wait_ms,
+                default_run_id=self._config.run_id,
+            ),
+            health_provider=_health_extra,
+        )
 
     @property
     def compiler(self) -> RouteCompiler:
@@ -311,22 +451,25 @@ class S0ControllerOrchestrator:
 
     def on_switch_disconnected(
         self,
-        dpid: int,
+        dpid: Optional[int],
         reason: str = "DEAD_DISPATCHER",
         *,
         datapath: Optional[Any] = None,
     ) -> bool:
         """
         Handle switch disconnect: fail waiters and require reconciliation if active.
-        Returns `False` if the disconnect came from a stale/already-replaced datapath (`Phase 7.3`).
+        Returns `False` if the disconnect came from an unhandshaked socket (`dpid is None`)
+        or a stale/already-replaced datapath (`Phase 7.3`, `Phase 9.1`).
         """
+        eff_dpid = dpid if dpid is not None else getattr(datapath, "id", None)
         unregistered = self._driver.unregister_datapath(
-            dpid, reason=reason, datapath=datapath
+            eff_dpid, reason=reason, datapath=datapath
         )
-        if not unregistered:
+        if not unregistered or eff_dpid is None:
             return False
+        dpid_int = int(eff_dpid)
         with self._lock:
-            self.invalidate_flow_evidence(dpid=dpid)
+            self.invalidate_flow_evidence(dpid=dpid_int)
             if self._run_initialized:
                 self._readiness_state = S0ReadinessState.RECONCILIATION_REQUIRED
                 if not self._state_manager.is_reconcile_required(self._config.run_id):
@@ -336,6 +479,28 @@ class S0ControllerOrchestrator:
             else:
                 self._readiness_state = S0ReadinessState.WAITING_FOR_SWITCHES
         return True
+
+    def handle_state_change_event(
+        self,
+        ev: Any,
+        *,
+        dead_dispatcher_state: Any = None,
+    ) -> bool:
+        """
+        Safely process a Ryu / OS-Ken `EventOFPStateChange` event (`Phase 9.1`):
+        - Ignores non-`DEAD_DISPATCHER` transitions.
+        - Ignores `ev.datapath is None` or pre-handshake `ev.datapath.id is None` without raising `TypeError`.
+        - Ignores stale disconnects from an already-replaced datapath connection while preserving `connection_epoch`.
+        - Unregisters and marks reconciliation required when an active connected datapath disconnects.
+        """
+        state = getattr(ev, "state", None)
+        if dead_dispatcher_state is not None and state != dead_dispatcher_state:
+            return False
+        dp = getattr(ev, "datapath", None)
+        if dp is None:
+            return False
+        dpid = getattr(dp, "id", None)
+        return self.on_switch_disconnected(dpid, reason="DEAD_DISPATCHER", datapath=dp)
 
     def verify_connected_switches_and_ports(
         self,
@@ -663,7 +828,8 @@ class S0ControllerOrchestrator:
                 with self._driver._lock:
                     self._driver._baseline_packet_counts[key] = pkt_now
 
-        if updated_pkts:
+        if updated_pkts or cached.evidence.verified_at_utc != now_utc:
+            refreshed_ev = replace(cached.evidence, verified_at_utc=now_utc)
             with self._lock:
                 if fid in self._cached_flow_evidences:
                     self._cached_flow_evidences[fid] = CachedFlowVerificationEvidence(
@@ -672,10 +838,11 @@ class S0ControllerOrchestrator:
                         path_id=cached.path_id,
                         rule_generation_by_dpid=cached.rule_generation_by_dpid,
                         conn_epoch_by_dpid=cached.conn_epoch_by_dpid,
-                        last_packet_count_by_dpid=updated_pkts,
-                        verified_at_utc=cached.verified_at_utc,
-                        evidence=cached.evidence,
+                        last_packet_count_by_dpid=updated_pkts or cached.last_packet_count_by_dpid,
+                        verified_at_utc=now_utc,
+                        evidence=refreshed_ev,
                     )
+            return refreshed_ev
         return cached.evidence
 
     def bootstrap_and_verify(
@@ -758,13 +925,20 @@ class S0ControllerOrchestrator:
                 self._last_report = report
                 return report
 
-            install_rep: BootstrapInstallReport = (
-                self._installer.install_initial_paths_and_readback(
-                    run_id=self._config.run_id,
-                    installed_at_utc=ts,
-                    preinstall_both_downstream_branches=self._config.preinstall_both_downstream_branches,
+            # During initial S0 bootstrap (before traffic starts), do not block 48x1.0s
+            # waiting on zero counters; use immediate read-back and let the non-blocking
+            # reconcile loop verify flows incrementally once traffic arrives.
+            self._driver.set_verification_budget_deadline(0.0)
+            try:
+                install_rep: BootstrapInstallReport = (
+                    self._installer.install_initial_paths_and_readback(
+                        run_id=self._config.run_id,
+                        installed_at_utc=ts,
+                        preinstall_both_downstream_branches=self._config.preinstall_both_downstream_branches,
+                    )
                 )
-            )
+            finally:
+                self._driver.set_verification_budget_deadline(None)
 
             for fid, ev in install_rep.verified_evidences.items():
                 init_pid = self._topology.get_initial_candidate_path(fid).path_id
@@ -780,7 +954,21 @@ class S0ControllerOrchestrator:
             all_48_verified = bool(rules_installed_ok and install_rep.all_48_verified)
 
             with self._lock:
-                if not self._run_initialized:
+                if self._run_initialized:
+                    if all_48_verified:
+                        snap = self._state_manager.reconcile_run_state(
+                            run_id=self._config.run_id,
+                            verified_evidences=install_rep.verified_evidences,
+                            reconciled_at_utc=ts,
+                            reconciliation_id="bootstrap_s0",
+                        )
+                    else:
+                        if not self._state_manager.is_reconcile_required(self._config.run_id):
+                            self._decision_handler.notify_controller_restart(
+                                self._config.run_id, ts
+                            )
+                        snap = self._state_manager.get_routing_state(self._config.run_id)
+                else:
                     snap = self._state_manager.initialize_run(
                         run_id=self._config.run_id,
                         bootstrapped_at_utc=ts,
@@ -789,12 +977,6 @@ class S0ControllerOrchestrator:
                         ),
                     )
                     self._run_initialized = True
-                else:
-                    if not all_48_verified:
-                        self._decision_handler.notify_controller_restart(
-                            self._config.run_id, ts
-                        )
-                    snap = self._state_manager.get_routing_state(self._config.run_id)
                 self._bootstrapped = rules_installed_ok
 
                 if not rules_installed_ok:
@@ -876,6 +1058,18 @@ class S0ControllerOrchestrator:
             if not self._driver.all_expected_switches_connected:
                 return None
 
+            # In non-blocking background reconcile ticks, check counters immediately per poll
+            # cycle rather than blocking 48x1.0s across idle flows.
+            self._driver.set_verification_budget_deadline(0.0)
+            try:
+                return self._verify_or_reconcile_after_traffic_locked(ts)
+            finally:
+                self._driver.set_verification_budget_deadline(None)
+
+    def _verify_or_reconcile_after_traffic_locked(
+        self, ts: str
+    ) -> Optional[RoutingStateSnapshot]:
+        if True:
             evidences: dict[str, VerificationEvidence] = {}
             missing_rule_flows: dict[str, str] = {}
             missing_rule_dpids: set[int] = set()
@@ -1029,17 +1223,16 @@ class S0ControllerOrchestrator:
                 if ev is None:
                     return None
                 plan = self._compiler.compile_path(ev.verified_path_id)
-                if (
-                    self._validate_cached_flow_evidence(
-                        run_id=self._config.run_id,
-                        compiled_plan=plan,
-                        now_utc=ts,
-                    )
-                    is None
-                ):
+                refreshed_ev = self._validate_cached_flow_evidence(
+                    run_id=self._config.run_id,
+                    compiled_plan=plan,
+                    now_utc=ts,
+                )
+                if refreshed_ev is None:
                     with self._lock:
                         self._readiness_state = S0ReadinessState.VERIFICATION_PENDING
                     return None
+                evidences[fid] = refreshed_ev
 
             snap = self._state_manager.reconcile_run_state(
                 run_id=self._config.run_id,
@@ -1093,9 +1286,28 @@ def _import_ofp_framework() -> tuple[Any, Any, Any, Any, Any, Any]:
     )
 
 
+def _resolve_ofp_base_app(app_manager: Any, fw_name: str = "") -> Any:
+    """
+    Resolve the OpenFlow controller application base class across both classic Ryu
+    (`ryu.base.app_manager.RyuApp`) and OS-Ken (`os_ken.base.app_manager.OSKenApp`).
+    Raises `AttributeError` if the loaded `app_manager` module provides neither.
+    """
+    if fw_name == "os_ken":
+        candidates = ("OSKenApp", "RyuApp")
+    else:
+        candidates = ("RyuApp", "OSKenApp")
+    for attr in candidates:
+        base_cls = getattr(app_manager, attr, None)
+        if base_cls is not None:
+            return base_cls
+    raise AttributeError(
+        f"Module '{getattr(app_manager, '__name__', app_manager)}' has neither 'RyuApp' nor 'OSKenApp'."
+    )
+
+
 try:
     _app_manager, _ofp_event, _handler, _ofproto_v1_3, _hub, _FW_NAME = _import_ofp_framework()
-    _BASE_APP = _app_manager.RyuApp
+    _BASE_APP = _resolve_ofp_base_app(_app_manager, _FW_NAME)
     _set_ev_cls = _handler.set_ev_cls
     _CONFIG_DISPATCHER = _handler.CONFIG_DISPATCHER
     _MAIN_DISPATCHER = _handler.MAIN_DISPATCHER
@@ -1125,6 +1337,21 @@ if _set_ev_cls is not None and _ofp_event is not None:
             self.orchestrator = S0ControllerOrchestrator(S0AppConfig.from_env())
             self._bootstrap_started = False
             self._reconcile_loop_running = False
+            self.northbound_app = None
+            self._northbound_thread = None
+            if self.orchestrator._config.northbound_enable:
+                self.northbound_app = self.orchestrator.build_northbound_http_app()
+                self._northbound_thread = _hub.spawn(self._serve_northbound_http)
+
+        def _serve_northbound_http(self) -> None:
+            import eventlet  # type: ignore[import-not-found]
+            from eventlet import wsgi  # type: ignore[import-not-found]
+
+            host = self.orchestrator._config.northbound_host
+            port = self.orchestrator._config.northbound_port
+            self.logger.info("Starting SDN Northbound HTTP API on http://%s:%d", host, port)
+            sock = eventlet.listen((host, port))
+            wsgi.server(sock, self.northbound_app, log_output=False)
 
         @_set_ev_cls(_ofp_event.EventOFPSwitchFeatures, _CONFIG_DISPATCHER)
         def switch_features_handler(self, ev: Any) -> None:
@@ -1195,7 +1422,6 @@ if _set_ev_cls is not None and _ofp_event is not None:
 
         @_set_ev_cls(_ofp_event.EventOFPStateChange, [_MAIN_DISPATCHER, _DEAD_DISPATCHER])
         def state_change_handler(self, ev: Any) -> None:
-            if ev.state == _DEAD_DISPATCHER and ev.datapath is not None:
-                self.orchestrator.on_switch_disconnected(
-                    ev.datapath.id, datapath=ev.datapath
-                )
+            self.orchestrator.handle_state_change_event(
+                ev, dead_dispatcher_state=_DEAD_DISPATCHER
+            )

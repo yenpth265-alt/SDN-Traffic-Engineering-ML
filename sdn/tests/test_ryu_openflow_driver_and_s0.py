@@ -28,6 +28,12 @@ from sdn.apps.ryu_s0_app import (
     S0AppConfig,
     S0ControllerOrchestrator,
     S0ReadinessState,
+    _resolve_ofp_base_app,
+)
+from sdn.controller.state_manager import (
+    StateValidationError,
+    format_utc_timestamp,
+    parse_utc_timestamp,
 )
 from sdn.controller.topology_registry import TopologyRegistry
 from sdn.flow_management.flow_matcher import FlowMatcher
@@ -45,9 +51,12 @@ from sdn.monitoring.snapshot_creator import (
     SnapshotCreator,
 )
 from sdn.schemas.state_models import (
+    ContractSerializationError,
     EvidenceMode,
     FlowDecisionStatus,
     VerificationStatus,
+    normalize_iso8601_fractional_seconds,
+    validate_rfc3339_utc_timestamp,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -650,13 +659,18 @@ def test_06_non_destructive_traffic_reconcile_and_spanning_tree_arp_helpers() ->
 
 
 def test_07_phase7_1_bootstrap_fault_injection_no_false_readiness() -> None:
-    fast_cfg = RyuDriverConfig(barrier_timeout_s=0.05, flow_stats_timeout_s=0.05)
+    # Phase 12.1 flake fix: use generous 1.0s barrier timeout for non-timeout FlowMod-rejection
+    # sub-cases (orch1/orch3) and 0.15s for deliberate barrier-timeout sub-cases (orch2/orch4),
+    # preventing false DOWNSTREAM_BARRIER timeouts under heavy VirtualBox VM CPU jitter.
+    fast_timeout_cfg = RyuDriverConfig(barrier_timeout_s=0.15, flow_stats_timeout_s=0.15)
+    normal_cfg = RyuDriverConfig(barrier_timeout_s=1.0, flow_stats_timeout_s=1.0)
 
     def _make_orch(
         run_id: str,
         *,
         enable_helpers: bool = False,
         dp_customizer: Optional[Any] = None,
+        expect_timeout: bool = False,
     ) -> S0ControllerOrchestrator:
         orch = S0ControllerOrchestrator(
             S0AppConfig(
@@ -665,7 +679,7 @@ def test_07_phase7_1_bootstrap_fault_injection_no_false_readiness() -> None:
                 run_id=run_id,
                 enable_intra_edge_l3=enable_helpers,
                 enable_arp_edge_local_flood=enable_helpers,
-                driver_config=fast_cfg,
+                driver_config=fast_timeout_cfg if expect_timeout else normal_cfg,
             )
         )
         for sw in orch.topology.get_all_switches():
@@ -693,6 +707,7 @@ def test_07_phase7_1_bootstrap_fault_injection_no_false_readiness() -> None:
     orch2 = _make_orch(
         "run_p71_ds_barrier_to",
         dp_customizer=lambda sw, dp: setattr(dp, "drop_barrier", sw.dpid == 5),
+        expect_timeout=True,
     )
     rep2 = orch2.bootstrap_and_verify()
     assert rep2.readiness_state == S0ReadinessState.INSTALL_FAILED
@@ -734,7 +749,7 @@ def test_07_phase7_1_bootstrap_fault_injection_no_false_readiness() -> None:
             topology_bundle_path=TOPOLOGY_BUNDLE_PATH,
             csv_config_dir=CATALOG_DIR,
             run_id="run_p71_src_barrier_to",
-            driver_config=fast_cfg,
+            driver_config=fast_timeout_cfg,
         )
     )
     for sw in orch4.topology.get_all_switches():
@@ -1093,3 +1108,477 @@ def test_11_phase7_6_and_7_7_strict_modify_readback_and_network_event_ingestion(
     assert len(link_refs) == 2
     assert link_refs[0].link_id == "e1>c1"
     assert link_refs[0].valid is True
+
+
+# =============================================================================
+# 9. Phase 8.1: Python 3.10 RFC3339 Fractional-Second & OS-Ken Compatibility
+# =============================================================================
+
+
+def test_12_phase8_1_python310_rfc3339_fractional_seconds_and_malformed_rejection() -> None:
+    """
+    Verify RFC3339 UTC timestamp parsing and normalization across 1..6 fractional digits
+    (`.2`, `.05`, `.200`, `.123456`, and whole-second `Z` / `+00:00`) on Python 3.10+,
+    preserving exact microsecond precision and rejecting malformed timestamps.
+    """
+    cases = [
+        ("2026-11-12T09:00:10Z", 0, "2026-11-12T09:00:10Z"),
+        ("2026-11-12T09:00:10+00:00", 0, "2026-11-12T09:00:10Z"),
+        ("2026-11-12T09:00:10.2Z", 200_000, "2026-11-12T09:00:10.2Z"),
+        ("2026-04-06T00:01:00.05Z", 50_000, "2026-04-06T00:01:00.05Z"),
+        ("2026-11-12T09:00:10.200Z", 200_000, "2026-11-12T09:00:10.2Z"),
+        ("2026-11-12T09:00:10.123456Z", 123_456, "2026-11-12T09:00:10.123456Z"),
+        ("2026-11-12T09:00:10.123456+00:00", 123_456, "2026-11-12T09:00:10.123456Z"),
+    ]
+    for raw_ts, expected_us, expected_norm in cases:
+        dt = parse_utc_timestamp(raw_ts)
+        assert dt.microsecond == expected_us
+        assert format_utc_timestamp(raw_ts) == expected_norm
+        assert validate_rfc3339_utc_timestamp(raw_ts, normalize=False) == raw_ts
+        assert validate_rfc3339_utc_timestamp(raw_ts, normalize=True) == expected_norm
+        # Round-trip the normalized form back through both validators
+        dt_round = parse_utc_timestamp(expected_norm)
+        assert dt_round == dt
+        assert dt_round.microsecond == expected_us
+
+    # Direct helper check for 1..2 digit padding to 6 microsecond digits
+    assert (
+        normalize_iso8601_fractional_seconds("2026-11-12T09:00:10.2+00:00")
+        == "2026-11-12T09:00:10.200000+00:00"
+    )
+    assert (
+        normalize_iso8601_fractional_seconds("2026-04-06T00:01:00.05+00:00")
+        == "2026-04-06T00:01:00.050000+00:00"
+    )
+
+    # Malformed timestamps MUST still be rejected strictly
+    malformed = [
+        "",
+        "   ",
+        "2026-11-12T09:00:10",  # missing timezone
+        "2026-11-12T09:00:10.Z",  # trailing dot without digits
+        "2026-11-12T09:00:10.1234567Z",  # 7 digits (> microsecond precision)
+        "2026-11-12T09:00:10.12abcZ",  # non-numeric fractional part
+        "2026-13-45T99:00:00Z",  # invalid calendar date/time
+    ]
+    for bad in malformed:
+        with pytest.raises(ContractSerializationError):
+            validate_rfc3339_utc_timestamp(bad)
+        with pytest.raises(StateValidationError):
+            parse_utc_timestamp(bad)
+
+    # Non-UTC offset must be rejected by contract schema validator
+    with pytest.raises(ContractSerializationError):
+        validate_rfc3339_utc_timestamp("2026-11-12T09:00:10.2+07:00")
+
+
+def test_13_phase8_1_osken_and_ryu_base_app_resolution_and_event_dispatch() -> None:
+    """
+    Verify `_resolve_ofp_base_app` selects `RyuApp` for classic Ryu and `OSKenApp`
+    for OS-Ken, and verify `RyuS0App` event handler wiring when an OpenFlow framework
+    is present (or simulated).
+    """
+    class _DummyRyuApp:
+        pass
+
+    class _DummyOSKenApp:
+        pass
+
+    ryu_mod = SimpleNamespace(RyuApp=_DummyRyuApp)
+    osken_mod = SimpleNamespace(OSKenApp=_DummyOSKenApp)
+    both_mod = SimpleNamespace(RyuApp=_DummyRyuApp, OSKenApp=_DummyOSKenApp)
+    empty_mod = SimpleNamespace()
+
+    assert _resolve_ofp_base_app(ryu_mod, "ryu") is _DummyRyuApp
+    assert _resolve_ofp_base_app(osken_mod, "os_ken") is _DummyOSKenApp
+    assert _resolve_ofp_base_app(both_mod, "ryu") is _DummyRyuApp
+    assert _resolve_ofp_base_app(both_mod, "os_ken") is _DummyOSKenApp
+
+    with pytest.raises(AttributeError, match="neither 'RyuApp' nor 'OSKenApp'"):
+        _resolve_ofp_base_app(empty_mod, "os_ken")
+
+    # If running on Ubuntu with os_ken or ryu installed, verify RyuS0App class & handlers
+    import sdn.apps.ryu_s0_app as s0_mod
+
+    if s0_mod._FW_NAME in ("ryu", "os_ken"):
+        assert hasattr(s0_mod, "RyuS0App")
+        app_cls = s0_mod.RyuS0App
+        assert app_cls.OFP_VERSIONS == [0x04]
+        for handler_name in (
+            "switch_features_handler",
+            "barrier_reply_handler",
+            "flow_stats_reply_handler",
+            "port_desc_reply_handler",
+            "error_msg_handler",
+            "state_change_handler",
+        ):
+            assert hasattr(app_cls, handler_name), f"Missing handler {handler_name} on RyuS0App"
+            fn = getattr(app_cls, handler_name)
+            assert callable(fn)
+            assert hasattr(fn, "callers"), f"Handler {handler_name} not decorated with @_set_ev_cls"
+
+
+def test_14_phase9_1_state_change_handler_none_datapath_unhandshaked_dpid_and_stale_disconnect() -> None:
+    """
+    Verify Phase 9.1 hardening of `handle_state_change_event`, `on_switch_disconnected`,
+    and `unregister_datapath`:
+    1. `ev.datapath = None` is ignored safely without raising `TypeError`.
+    2. `ev.datapath.id = None` (pre-handshake socket closed in `DEAD_DISPATCHER`) is ignored
+       safely, recorded in `ignored_stale_events`, and never alters active switches or `connection_epoch`.
+    3. Stale `DEAD_DISPATCHER` from an already-replaced connection (`dp1_old`) is ignored
+       while preserving `dp1_new` and `connection_epoch == 2`.
+    4. Active `DEAD_DISPATCHER` on a connected switch (`dp1_new`, `dpid=1`) cleanly unregisters
+       `dpid=1`, invalidates only `dpid=1` cached evidences, and transitions readiness to
+       `RECONCILIATION_REQUIRED`.
+    """
+    pkt_counter = {"val": 10}
+    orch = S0ControllerOrchestrator(
+        S0AppConfig(
+            topology_bundle_path=TOPOLOGY_BUNDLE_PATH,
+            csv_config_dir=CATALOG_DIR,
+            run_id="run_p91_state_change",
+        )
+    )
+    dead_sentinel = "DEAD_DISPATCHER"
+    main_sentinel = "MAIN_DISPATCHER"
+
+    # Case 1: ev.datapath is None before any switch connects -> returns False, no error
+    ev_none_dp = SimpleNamespace(state=dead_sentinel, datapath=None)
+    assert (
+        orch.handle_state_change_event(ev_none_dp, dead_dispatcher_state=dead_sentinel)
+        is False
+    )
+
+    # Case 2: ev.datapath.id is None (unhandshaked socket closes before OFPT_FEATURES_REPLY)
+    unhandshaked_dp = SimpleNamespace(id=None)
+    ev_none_id = SimpleNamespace(state=dead_sentinel, datapath=unhandshaked_dp)
+    assert (
+        orch.handle_state_change_event(ev_none_id, dead_dispatcher_state=dead_sentinel)
+        is False
+    )
+    assert orch.on_switch_disconnected(None, datapath=unhandshaked_dp) is False
+    assert any(
+        "UNHANDSHAKED_DISCONNECT_IGNORED" in msg
+        for _dpid, msg in orch.driver.ignored_stale_events
+    )
+
+    # Connect all 6 switches and bootstrap to VERIFIED
+    dps = {}
+    for sw in orch.topology.get_all_switches():
+        dp = _FakeDatapath(
+            sw.dpid,
+            orch.driver,
+            auto_reply=True,
+            packet_count_provider=lambda _d, _c: pkt_counter["val"],
+        )
+        dps[sw.dpid] = dp
+        orch.on_switch_connected(dp)
+
+    rep = orch.bootstrap_and_verify(verified_at_utc="2026-11-12T09:00:00Z")
+    assert rep.verified_48_flows is True
+    assert orch.readiness_state == S0ReadinessState.VERIFIED
+    assert orch.driver.get_connection_epoch(1) == 1
+
+    # Non-DEAD_DISPATCHER state change is ignored
+    ev_main = SimpleNamespace(state=main_sentinel, datapath=dps[1])
+    assert (
+        orch.handle_state_change_event(ev_main, dead_dispatcher_state=dead_sentinel)
+        is False
+    )
+    assert orch.readiness_state == S0ReadinessState.VERIFIED
+
+    # Another unhandshaked socket disconnect while all 6 switches are VERIFIED must NOT disturb state!
+    assert (
+        orch.handle_state_change_event(ev_none_id, dead_dispatcher_state=dead_sentinel)
+        is False
+    )
+    assert orch.readiness_state == S0ReadinessState.VERIFIED
+    assert len(orch.accumulated_evidences) == 48
+    assert orch.driver.connected_dpids == (1, 2, 3, 4, 5, 6)
+
+    # Case 3: Switch 1 reconnects with a new datapath instance (dp1_new), then late DEAD_DISPATCHER
+    # arrives for dp1_old -> must be ignored without dropping dp1_new or corrupting epoch=2!
+    dp1_old = dps[1]
+    dp1_new = _FakeDatapath(
+        1,
+        orch.driver,
+        auto_reply=True,
+        packet_count_provider=lambda _d, _c: pkt_counter["val"],
+    )
+    orch.on_switch_connected(dp1_new)
+    dps[1] = dp1_new
+    assert orch.driver.get_connection_epoch(1) == 2
+    assert orch.driver.get_active_datapath_id(1) == id(dp1_new)
+
+    ev_stale_old = SimpleNamespace(state=dead_sentinel, datapath=dp1_old)
+    assert (
+        orch.handle_state_change_event(
+            ev_stale_old, dead_dispatcher_state=dead_sentinel
+        )
+        is False
+    )
+    assert 1 in orch.driver.connected_dpids
+    assert orch.driver.get_connection_epoch(1) == 2
+    assert orch.driver.get_active_datapath_id(1) == id(dp1_new)
+
+    # Re-verify after reconnect so all 48 flows are VERIFIED again at epoch=2
+    pkt_counter["val"] += 5
+    snap = orch.verify_or_reconcile_after_traffic()
+    assert snap is not None and not snap.reconcile_required
+    assert orch.readiness_state == S0ReadinessState.VERIFIED
+    assert len(orch.accumulated_evidences) == 48
+
+    # Case 4: Active datapath dp1_new disconnects via DEAD_DISPATCHER -> unregisters dpid=1
+    # and invalidates the 24 flows touching dpid=1 (keeping 24 unaffected flows cached)
+    ev_active_dead = SimpleNamespace(state=dead_sentinel, datapath=dp1_new)
+    assert (
+        orch.handle_state_change_event(
+            ev_active_dead, dead_dispatcher_state=dead_sentinel
+        )
+        is True
+    )
+    assert 1 not in orch.driver.connected_dpids
+    assert orch.readiness_state == S0ReadinessState.RECONCILIATION_REQUIRED
+    assert len(orch.accumulated_evidences) == 24
+
+
+# =============================================================================
+# 10. Phase 10.1: Bounded Forwarding Verification Polling Regression Suite
+# =============================================================================
+
+
+def test_15_phase10_1_bounded_polling_first_try_delayed_timeout_and_partial_hops(
+    topology: TopologyRegistry,
+) -> None:
+    """
+    Verify bounded forwarding verification polling in `RyuOpenFlowDriver`:
+    - Immediate pass on 1st attempt when all 3 hops have counter delta >= 1 (0 sleeps).
+    - Pass after 2-3 polling attempts when counter increments asynchronously, with zero extra FlowMods.
+    - Fail with `timed_out=True` when no traffic arrives before `counter_verify_timeout_s`.
+    - Fail when only 1 or 2 hops have packet delta > 0 (partial hops never falsely PASS).
+    - Respect `set_verification_budget_deadline()` when ApplyRequest deadline is shorter than timeout.
+    """
+    compiler = RouteCompiler(topology, FlowMatcher(topology))
+    plan_p2 = compiler.compile_path("0x103_P2")  # e1(1) -> c2(6) -> e2(2)
+
+    # 1. Immediate pass on 1st try (0 sleeps)
+    sleeps: list[float] = []
+    driver1 = RyuOpenFlowDriver(
+        topology,
+        config=RyuDriverConfig(counter_verify_timeout_s=0.5, counter_verify_poll_interval_s=0.05),
+        sleep_fn=lambda s: sleeps.append(s),
+    )
+    for dpid in (1, 6, 2):
+        dp = _FakeDatapath(dpid, driver1, packet_count_provider=lambda _d, _c: 5)
+        driver1.register_datapath(dp)
+    for hop in plan_p2.ordered_hop_rules:
+        driver1.send_flow_mod(hop, FlowModCommand.ADD, phase=SwitchPhaseTag.PRIMARY_DOWNSTREAM)
+    res_imm = driver1.verify_forwarding_counter_or_probe(plan_p2)
+    assert res_imm.counter_or_probe_ok is True
+    assert res_imm.actual_forwarded_path_id == "0x103_P2"
+    assert res_imm.packet_delta == 5
+    assert sleeps == []
+
+    # 2. Counter increments after 2 polling sleeps -> passes on 3rd attempt with 0 extra FlowMods
+    poll_state = {"calls": 0}
+    sleeps2: list[float] = []
+
+    def _delayed_sleep(sec: float) -> None:
+        sleeps2.append(sec)
+        poll_state["calls"] += 1
+
+    driver2 = RyuOpenFlowDriver(
+        topology,
+        config=RyuDriverConfig(counter_verify_timeout_s=0.5, counter_verify_poll_interval_s=0.05),
+        sleep_fn=_delayed_sleep,
+    )
+    for dpid in (1, 6, 2):
+        dp = _FakeDatapath(
+            dpid,
+            driver2,
+            packet_count_provider=lambda _d, _c: 3 if poll_state["calls"] >= 2 else 0,
+        )
+        driver2.register_datapath(dp)
+    for hop in plan_p2.ordered_hop_rules:
+        driver2.send_flow_mod(hop, FlowModCommand.ADD, phase=SwitchPhaseTag.PRIMARY_DOWNSTREAM)
+    flowmod_count_before = sum(1 for e in driver2.get_operation_log() if e.op_type == "FLOW_MOD")
+    res_delayed = driver2.verify_forwarding_counter_or_probe(plan_p2)
+    flowmod_count_after = sum(1 for e in driver2.get_operation_log() if e.op_type == "FLOW_MOD")
+    assert res_delayed.counter_or_probe_ok is True
+    assert res_delayed.packet_delta == 3
+    assert len(sleeps2) == 2
+    assert flowmod_count_after == flowmod_count_before  # Zero redundant FlowMods during polling
+
+    # 3. Partial hops only (e1=5, c2=5, e2=0) -> must NOT pass; times out cleanly
+    driver3 = RyuOpenFlowDriver(
+        topology,
+        config=RyuDriverConfig(counter_verify_timeout_s=0.08, counter_verify_poll_interval_s=0.03),
+    )
+    for dpid in (1, 6, 2):
+        dp = _FakeDatapath(
+            dpid,
+            driver3,
+            packet_count_provider=(lambda d, _c: 5 if d in (1, 6) else 0),
+        )
+        driver3.register_datapath(dp)
+    for hop in plan_p2.ordered_hop_rules:
+        driver3.send_flow_mod(hop, FlowModCommand.ADD, phase=SwitchPhaseTag.PRIMARY_DOWNSTREAM)
+    res_partial = driver3.verify_forwarding_counter_or_probe(plan_p2)
+    assert res_partial.counter_or_probe_ok is False
+    assert res_partial.actual_forwarded_path_id is None
+    assert res_partial.timed_out is True
+    assert res_partial.error_reason == "NO_REAL_COUNTER_DELTA_OR_ACTIVE_PROBE"
+
+    # 4. Deadline budget shorter than counter_verify_timeout_s -> stops promptly within budget
+    driver4 = RyuOpenFlowDriver(
+        topology,
+        config=RyuDriverConfig(counter_verify_timeout_s=5.0, counter_verify_poll_interval_s=0.02),
+    )
+    for dpid in (1, 6, 2):
+        dp = _FakeDatapath(dpid, driver4, packet_count_provider=lambda _d, _c: 0)
+        driver4.register_datapath(dp)
+    for hop in plan_p2.ordered_hop_rules:
+        driver4.send_flow_mod(hop, FlowModCommand.ADD, phase=SwitchPhaseTag.PRIMARY_DOWNSTREAM)
+    driver4.set_verification_budget_deadline(0.05)
+    try:
+        res_budget = driver4.verify_forwarding_counter_or_probe(plan_p2)
+    finally:
+        driver4.set_verification_budget_deadline(None)
+    assert res_budget.counter_or_probe_ok is False
+    assert res_budget.timed_out is True
+
+
+def test_16_phase10_1_bounded_polling_counter_reset_reconnect_and_rollback(
+    topology: TopologyRegistry,
+) -> None:
+    """
+    Verify bounded polling aborts immediately on:
+    - Counter reset (`pkt_now < prev`) -> `COUNTER_RESET_DETECTED`
+    - Switch reconnect (`conn_epoch` changes during polling) -> `DATAPATH_RECONNECTED_DURING_VERIFY`
+    - Rule replacement (`rule_generation` changes during polling) -> `RULE_REPLACED_DURING_VERIFY`
+    - Rollback verification succeeds with bounded polling when primary fails and rollback path receives traffic.
+    """
+    compiler = RouteCompiler(topology, FlowMatcher(topology))
+    plan_p1 = compiler.compile_path("0x103_P1")
+    plan_p2 = compiler.compile_path("0x103_P2")
+
+    # 1. Counter reset detected immediately during verification
+    pkt_box = {"val": 10}
+    driver = RyuOpenFlowDriver(
+        topology,
+        config=RyuDriverConfig(counter_verify_timeout_s=0.5, counter_verify_poll_interval_s=0.02),
+    )
+    for dpid in (1, 5, 6, 2):
+        dp = _FakeDatapath(dpid, driver, packet_count_provider=lambda _d, _c: pkt_box["val"])
+        driver.register_datapath(dp)
+    for hop in plan_p1.ordered_hop_rules:
+        driver.send_flow_mod(hop, FlowModCommand.ADD, phase=SwitchPhaseTag.BOOTSTRAP)
+    assert driver.verify_forwarding_counter_or_probe(plan_p1).counter_or_probe_ok is True
+    # Counter drops from 10 -> 2 (switch reset)
+    pkt_box["val"] = 2
+    res_reset = driver.verify_forwarding_counter_or_probe(plan_p1)
+    assert res_reset.counter_or_probe_ok is False
+    assert res_reset.error_reason == "COUNTER_RESET_DETECTED"
+
+    # 2. Datapath reconnect during polling aborts verification immediately
+    reconn_box = {"done": False}
+    dps2: dict[int, _FakeDatapath] = {}
+
+    def _sleep_and_reconnect(_sec: float) -> None:
+        if not reconn_box["done"]:
+            reconn_box["done"] = True
+            new_dp6 = _FakeDatapath(6, driver2, packet_count_provider=lambda _d, _c: 5)
+            driver2.register_datapath(new_dp6)
+            dps2[6] = new_dp6
+
+    driver2 = RyuOpenFlowDriver(
+        topology,
+        config=RyuDriverConfig(counter_verify_timeout_s=0.5, counter_verify_poll_interval_s=0.02),
+        sleep_fn=_sleep_and_reconnect,
+    )
+    for dpid in (1, 6, 2):
+        dp = _FakeDatapath(dpid, driver2, packet_count_provider=lambda _d, _c: 0)
+        dps2[dpid] = dp
+        driver2.register_datapath(dp)
+    for hop in plan_p2.ordered_hop_rules:
+        driver2.send_flow_mod(hop, FlowModCommand.ADD, phase=SwitchPhaseTag.PRIMARY_DOWNSTREAM)
+    res_reconn = driver2.verify_forwarding_counter_or_probe(plan_p2)
+    assert res_reconn.counter_or_probe_ok is False
+    assert res_reconn.error_reason == "DATAPATH_RECONNECTED_DURING_VERIFY_DPID_6"
+
+    # 3. Rollback verification with bounded polling:
+    #    Primary P2 has 0 packets -> times out -> RuleInstaller rolls back to P1 ->
+    #    P1 receives packets on 2nd poll -> Rollback returns ROLLED_BACK with actual_path_id=0x103_P1!
+    rb_polls = {"p1_sleep_count": 0, "in_rollback": False}
+
+    def _rb_sleep(_sec: float) -> None:
+        if rb_polls["in_rollback"]:
+            rb_polls["p1_sleep_count"] += 1
+
+    orch = S0ControllerOrchestrator(
+        S0AppConfig(
+            topology_bundle_path=TOPOLOGY_BUNDLE_PATH,
+            csv_config_dir=CATALOG_DIR,
+            run_id="run_p101_rb_poll",
+            driver_config=RyuDriverConfig(
+                counter_verify_timeout_s=0.06,
+                counter_verify_poll_interval_s=0.02,
+            ),
+        )
+    )
+    orch.driver._sleep_fn = _rb_sleep
+    for sw in orch.topology.get_all_switches():
+        # c2 (dpid=6) always stays at 0 packets -> P2 fails verification;
+        # c1 (dpid=5) and e1/e2 get packets once rollback starts!
+        def _mk_provider(d_id: int):
+            def _prov(_dpid: int, _cookie: int) -> int:
+                if d_id == 6:
+                    return 0
+                if not rb_polls["in_rollback"]:
+                    return 10
+                return 20 if rb_polls["p1_sleep_count"] >= 1 else 0
+            return _prov
+
+        dp = _FakeDatapath(sw.dpid, orch.driver, auto_reply=True, packet_count_provider=_mk_provider(sw.dpid))
+        orch.on_switch_connected(dp)
+
+    rep = orch.bootstrap_and_verify(verified_at_utc="2026-11-12T09:00:00Z")
+    assert rep.verified_48_flows is True
+    # Flip flag right as rollback starts when e1 receives ROLLBACK_SOURCE_EDGE
+    orig_send_fm = orch.driver.send_flow_mod
+
+    def _wrap_fm(rule, command, *, phase):
+        if phase == SwitchPhaseTag.ROLLBACK_SOURCE_EDGE:
+            rb_polls["in_rollback"] = True
+        return orig_send_fm(rule, command, phase=phase)
+
+    orch.driver.send_flow_mod = _wrap_fm  # type: ignore[method-assign]
+    outcome = orch.installer.install_flow_change(
+        run_id="run_p101_rb_poll",
+        flow_group_id="0x103",
+        old_path_id="0x103_P1",
+        new_path_id="0x103_P2",
+        applied_at_utc="2026-11-12T09:00:15Z",
+    )
+    assert outcome.status == FlowDecisionStatus.ROLLED_BACK
+    assert outcome.actual_path_id == "0x103_P1"
+    assert outcome.verification_status == VerificationStatus.VERIFIED
+
+
+def test_17_phase10_1_utc_now_rfc3339_preserves_microseconds_for_disconnect() -> None:
+    """
+    Phase 10.1 audit regression: `_utc_now_rfc3339()` must preserve microsecond precision
+    so an immediate switch disconnect in the same wall-clock second after a sub-second
+    `ApplyRequest` never triggers `Backward timestamp in mark_controller_restart`.
+    """
+    from sdn.apps.ryu_s0_app import _utc_now_rfc3339
+    from sdn.controller.state_manager import parse_utc_timestamp
+
+    ts1 = _utc_now_rfc3339()
+    ts2 = _utc_now_rfc3339()
+    assert "." in ts1 and ts1.endswith("Z")
+    assert parse_utc_timestamp(ts2) >= parse_utc_timestamp(ts1)
+
+
+
+

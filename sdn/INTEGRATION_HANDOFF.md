@@ -125,3 +125,31 @@ Used by `DecisionHandler`:
 | **Category B** | **Completed in Phase 5 on Windows** | 1. Switch power-cycle / wiped flow-table recovery (`recover_and_reconcile_run(..., reinstall_missing_from_paths=...)`) vs. retained flow-table recovery.<br>2. Strict wire-format JSON serialization/deserialization (`to_json`/`from_json`) and SHA-256 content integrity verification across all schemas.<br>3. `TransportEnvelope` wrapper and hot-swappable `SwitchDriverProtocol` + `BatchIdempotencyStoreProtocol` verification. | `PASS_MOCK` (`test_phase5_e2e_integration_and_handoff.py`) |
 | **Category C** | **Requires Cross-Role Contract Lock (`Data` / `Runner` / `Network`)** | 1. **`MUST-LOCK #1`**: Runtime delivery channel for `released_demand_to_sdn` (`REQ-03`).<br>2. **`MUST-LOCK #2`**: Inter-process transport (`IPC` vs. `REST` vs. `Queue`) and exact millisecond budgets (`forecast_timeout_ms`, `apply_timeout_ms`, `apply_guard_ms`).<br>3. **`MUST-LOCK #3`**: Durable persistence of `BatchIdempotencyStoreProtocol` and `EventOutbox` in Data's database across OS/process crashes. | Interface ready; awaiting team config lock |
 | **Category D** | **Requires Ubuntu / Mininet / OVS / Ryu Live Execution (`UBUNTU_REQUIRED`)** | 1. Live OpenFlow 1.3 socket connection, `OFPFC_ADD`/`OFPFC_MODIFY_STRICT`/`OFPFC_DELETE_STRICT`, `OFPMP_FLOW` (`FlowStats`), and `OFPPT_BARRIER` wire timing.<br>2. Physical OVS port TX/RX counter deltas and live `ping`/`iperf3` data-plane verification (`S0`–`S7`, `F09`–`F12`).<br>3. Calibration of link overhead factor `k_e` during `S0`. | Pending Ubuntu VM execution (`UBUNTU_READINESS.md`) |
+
+
+---
+
+## 6. Implemented Integration Adapters & Cross-Role `TC-I01` Handoff (`Phase 12–12.3`)
+
+All three integration adapters are implemented in `sdn/adapters/` and wired optionally into `sdn/apps/ryu_s0_app.py` (see [README_SDN.md](README_SDN.md) for full `curl`, env vars, and Ubuntu launch commands):
+
+| Adapter | File | Transport / Storage | HTTP / Protocol Surface | Verification Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **Northbound Control API** | `sdn/adapters/http_control_api.py` | Eventlet WSGI HTTP (`127.0.0.1:18080`), optional `X-SDN-Token` | `GET /health`, `GET /routing-state`, `GET /routing-history`, `GET /apply-status`, `POST /demand-releases`, `POST /snapshots`, `POST /apply?async=1` (`202 ACCEPTED` in `< 11 ms`) | `PASS_LIVE_OVS` (Ubuntu + OVS 2.17.12 + OS-Ken 2.8.1) |
+| **Durable Idempotency Store** | `sdn/adapters/sqlite_idempotency_store.py` | SQLite WAL (`synchronous=FULL`, `BEGIN IMMEDIATE`) | `BatchIdempotencyStoreProtocol` (`is_durable=True`, `DURABLE_SQLITE_WAL`) | `PASS_LIVE_OVS` (controller restart + replay verified live) |
+| **Data Event Publisher** | `sdn/adapters/data_event_publisher.py` | Configurable HTTP POST + durable JSONL outbox | Publishes `Snapshot`, `RoutingStateSnapshot`, `RoutingHistory`, `ApplyResponse`, `VerificationEvidence` with `X-Idempotency-Key`, ACK-gated `DELIVERED` vs. `PENDING_DELIVERY` | `PASS_ADAPTER_TEST` (mock receiver + live outbox persistence; awaiting real Data receiver) |
+
+### 6.1 Documented Performance Budgets & Limitations (`Phase 12.2/12.3`)
+- **Async HTTP Apply (`POST /apply?async=1`):** Returns `202 Accepted` in `2.96–10.71 ms` (`P50 = 6.13 ms`); poll `GET /apply-status` every `40 ms` until `job_state == "FINALIZED"`.
+- **OVS Revalidator Limit:** End-to-end apply + 3-hop real counter verification achieves **P50 = `267.87 ms`**, **P95 = `683.37 ms`**, **Max = `721.09 ms`** (`100% <= 1000 ms` across 13 active live runs). Because OVS kernel datapath flushes megaflow counters on a `~500 ms` revalidator cycle, callers should configure **`<= 50 ms` HTTP accept timeout** and **`800–1000 ms` `apply_deadline_utc`**.
+- **Silent Flow Policy (`AC-S03`/`AC-S04`):** Zero-traffic flows fail-closed (`INCONSISTENT`/`UNKNOWN`, `actual_path_id=null`) rather than faking `APPLIED`, because no synthetic probe host/IP exists in `configs/network/topology_bundle.json`. Rollback verification uses its own finite bounded timeout (`SDN_COUNTER_VERIFY_TIMEOUT_S = 1.2 s`).
+
+### 6.2 Cross-Role Checklist Required to Run Live Closed-Loop `TC-I01`
+
+| Role | Current Remote Branch Status | Remaining Work to Connect to SDN for `TC-I01` |
+| :--- | :--- | :--- |
+| **Network** (`origin/main`) | Topology, `sender.py`, `receiver.py`, `telemetry_collector.py`, SHA-256 `config_hash`, `warmup_seconds=60` ready. | 1. Add static `h.setARP(...)` in `network/topology/topology.py` (or lock ARP policy).<br>2. POST released demand events from `sender.py` to SDN `POST /demand-releases` with retry/ACK.<br>3. Align `runner_manifest.json` `topology_version` with `topology_bundle.json`. |
+| **Data** (`origin/main`, `origin/data/ml-offline-dataset`) | Offline ingestion & export scripts ready; `data/database/`, `data/repositories/`, `data/schemas/`, `data/snapshot_provider/` are `.gitkeep`. | 1. Implement DB schema + HTTP ingestion endpoints (`POST /ingest/snapshots`, `/ingest/apply-results`, `/ingest/routing-state`) returning `2xx` ACK for `DataEventPublisher`.<br>2. Serve `READY` `48 × H*` 7-field `PredictionRows` to Optimization. |
+| **ML** (`origin/feat-ml`) | Offline training/validation/inference pipeline implemented; not yet merged to `main`. | 1. Merge `feat-ml` to `main`.<br>2. Add online worker reading `Snapshot` from Data and writing 7-field `PredictionRows` (`48 × H*`) to Data DB per tick. |
+| **Optimization** (`origin/main`) | Core MILP `optimization/solver/solver.py` implemented. | 1. Implement online control tick: read `48 × H*` rows from Data, compute `b_f = mean(H*)`, evaluate trigger (`TH`, `N`, `h`), call SDN `POST /apply?async=1` + poll `GET /apply-status`. |
+| **Runner / Integration** (`origin/main`) | `integration/` contains `.gitkeep` only. | 1. Orchestrate `S0` startup, per-tick `POST /snapshots`, ML → Optimization → SDN loop, and `TC-I01` evidence collection. |

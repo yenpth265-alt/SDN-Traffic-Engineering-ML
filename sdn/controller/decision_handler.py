@@ -971,13 +971,39 @@ class DecisionHandler:
         # to UNKNOWN (actual_path_id=None) and return BatchStatus.INCONSISTENT.
         try:
             t_exec_start = time.monotonic()
-            install_result = self._rule_installer.install_batch(
-                run_id=request.run_id,
-                decision_batch_id=request.decision_batch_id,
-                changes=change_specs,
-                applied_at_utc=norm_applied_ts,
-                cleanup_old_downstream=self._config.cleanup_old_downstream,
+            # Constrain driver's bounded forwarding verification polling to the remaining
+            # ApplyRequest deadline budget (`Phase 10.1`) so polling never exceeds budget.
+            budget_s = max(
+                0.0,
+                min(
+                    (apply_deadline_dt - decision_dt).total_seconds(),
+                    (forecast_end_dt - decision_dt).total_seconds(),
+                ),
             )
+            set_budget_fn = getattr(
+                self._rule_installer.switch_driver,
+                "set_verification_budget_deadline",
+                None,
+            )
+            if callable(set_budget_fn):
+                set_budget_fn(budget_s)
+            try:
+                install_result = self._rule_installer.install_batch(
+                    run_id=request.run_id,
+                    decision_batch_id=request.decision_batch_id,
+                    changes=change_specs,
+                    applied_at_utc=norm_applied_ts,
+                    cleanup_old_downstream=self._config.cleanup_old_downstream,
+                )
+                self._last_batch_timing = {
+                    "decision_batch_id": request.decision_batch_id,
+                    "openflow_install_ms": install_result.openflow_install_ms,
+                    "verification_ms": install_result.verification_ms,
+                    "flow_stats_request_count": install_result.flow_stats_request_count,
+                }
+            finally:
+                if callable(set_budget_fn):
+                    set_budget_fn(None)
             elapsed_exec_s = max(0.0, time.monotonic() - t_exec_start)
             if (
                 completed_at_utc is None

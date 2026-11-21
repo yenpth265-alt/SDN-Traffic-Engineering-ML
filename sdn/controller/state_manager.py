@@ -41,6 +41,7 @@ from sdn.schemas.state_models import (
     UncertaintyGapRecord,
     VerificationEvidence,
     VerificationStatus,
+    normalize_iso8601_fractional_seconds,
 )
 
 
@@ -76,7 +77,7 @@ def parse_utc_timestamp(ts: str | datetime) -> datetime:
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     try:
-        dt = datetime.fromisoformat(raw)
+        dt = datetime.fromisoformat(normalize_iso8601_fractional_seconds(raw))
     except ValueError as exc:
         raise StateValidationError(f"Invalid RFC3339 timestamp '{ts}': {exc}") from exc
     if dt.tzinfo is None:

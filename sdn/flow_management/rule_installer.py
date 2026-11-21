@@ -134,6 +134,9 @@ class BatchInstallResult:
     is_network_atomic: bool = False
     count_breakdown: Optional[FlowModCountBreakdown] = None
     per_flow_count_breakdowns: dict[str, FlowModCountBreakdown] = field(default_factory=dict)
+    openflow_install_ms: Optional[float] = None
+    verification_ms: Optional[float] = None
+    flow_stats_request_count: Optional[int] = None
 
 
 class RuleInstaller:
@@ -862,7 +865,11 @@ class RuleInstaller:
         )
 
         # Rollback Phase 3: Verify old_plan via RuleVerifier
+        # Clear any expired primary-apply verification budget so rollback verification
+        # gets its own bounded `counter_verify_timeout_s` instead of immediately timing out.
         if rollback_ok:
+            if hasattr(self._driver, "set_verification_budget_deadline"):
+                self._driver.set_verification_budget_deadline(None)  # type: ignore[attr-defined]
             try:
                 rb_verify = self._verifier.verify_flow_path(
                     run_id=run_id,
@@ -1287,6 +1294,23 @@ class RuleInstaller:
             raise ValueError("changes cannot be empty in install_batch.")
 
         norm_ts = format_utc_timestamp(applied_at_utc)
+        fs_before = sum(1 for o in self._driver.get_operation_log() if o.op_type == "FLOW_STATS")
+        t_batch_start = __import__("time").monotonic()
+
+        batch_verify_fn = getattr(
+            self._driver, "verify_batch_forwarding_counter_or_probe", None
+        )
+        if len(changes) > 1 and callable(batch_verify_fn):
+            return self._install_batch_batched(
+                run_id=run_id,
+                decision_batch_id=decision_batch_id,
+                changes=changes,
+                norm_ts=norm_ts,
+                cleanup_old_downstream=cleanup_old_downstream,
+                fs_before=fs_before,
+                t_batch_start=t_batch_start,
+            )
+
         outcomes: list[FlowBatchOutcome] = []
         total_rules = 0
         per_flow_breakdowns: dict[str, FlowModCountBreakdown] = {}
@@ -1305,6 +1329,9 @@ class RuleInstaller:
             fb = self.get_last_flow_count_breakdown(chg.flow_group_id)
             if fb is not None:
                 per_flow_breakdowns[chg.flow_group_id] = fb
+
+        fs_after = sum(1 for o in self._driver.get_operation_log() if o.op_type == "FLOW_STATS")
+        total_elapsed_ms = round((__import__("time").monotonic() - t_batch_start) * 1000.0, 2)
 
         batch_breakdown = FlowModCountBreakdown(
             attempted_flow_mod_count=sum(
@@ -1350,6 +1377,380 @@ class RuleInstaller:
             is_network_atomic=False,
             count_breakdown=batch_breakdown,
             per_flow_count_breakdowns=per_flow_breakdowns,
+            openflow_install_ms=None,
+            verification_ms=total_elapsed_ms,
+            flow_stats_request_count=max(0, fs_after - fs_before),
+        )
+
+    def _install_batch_batched(
+        self,
+        *,
+        run_id: str,
+        decision_batch_id: str,
+        changes: Sequence[FlowChangeSpec],
+        norm_ts: str,
+        cleanup_old_downstream: bool,
+        fs_before: int,
+        t_batch_start: float,
+    ) -> BatchInstallResult:
+        """
+        Phase 12.2: Two-phase batch installation + datapath-grouped cooperative verification
+        with a shared batch deadline.
+
+        Preserves strict two-phase OpenFlow ordering (ALL downstream FlowMods + per-switch
+        Barriers -> ALL source-edge FlowMods + per-switch Barriers -> ONE shared batched
+        FlowStats verification pass -> per-flow rollback on any unverified flow).
+        """
+        import time as _time
+
+        outcomes_by_fg: dict[str, FlowBatchOutcome] = {}
+        per_flow_breakdowns: dict[str, FlowModCountBreakdown] = {}
+
+        # Compile plans and handle no-op changes immediately
+        active_specs: list[tuple[FlowChangeSpec, CompiledPathPlan, CompiledPathPlan]] = []
+        rule_counts: dict[str, int] = {}
+        succeeded_counts: dict[str, int] = {}
+        primary_mods: dict[str, int] = {}
+        xids_by_fg: dict[str, list[int]] = {}
+
+        for chg in changes:
+            fid = chg.flow_group_id
+            if chg.old_path_id == chg.new_path_id:
+                outcomes_by_fg[fid] = self.install_flow_change(
+                    run_id=run_id,
+                    flow_group_id=fid,
+                    old_path_id=chg.old_path_id,
+                    new_path_id=chg.new_path_id,
+                    applied_at_utc=norm_ts,
+                    cleanup_old_downstream=cleanup_old_downstream,
+                )
+                fb = self.get_last_flow_count_breakdown(fid)
+                if fb is not None:
+                    per_flow_breakdowns[fid] = fb
+                continue
+            old_plan = self._compiler.compile_path(chg.old_path_id)
+            new_plan = self._compiler.compile_path(chg.new_path_id)
+            active_specs.append((chg, old_plan, new_plan))
+            rule_counts[fid] = 0
+            succeeded_counts[fid] = 0
+            primary_mods[fid] = 0
+            xids_by_fg[fid] = []
+
+        # Phase 1A: Downstream FlowMods (OFPFC_ADD) for all active flows
+        phase1_survivors: list[tuple[FlowChangeSpec, CompiledPathPlan, CompiledPathPlan]] = []
+        touched_ds_dpids: dict[int, list[str]] = {}
+        for chg, old_plan, new_plan in active_specs:
+            fid = chg.flow_group_id
+            ds_failed_reason: Optional[ReasonCode] = None
+            for ds_rule in new_plan.downstream_rules:
+                rule_counts[fid] += 1
+                primary_mods[fid] += 1
+                try:
+                    ds_rec = self._driver.send_flow_mod(
+                        ds_rule,
+                        FlowModCommand.ADD,
+                        phase=SwitchPhaseTag.PRIMARY_DOWNSTREAM,
+                    )
+                except (SwitchTimeoutError, SwitchDriverError, RuntimeError) as exc:
+                    ds_failed_reason = (
+                        ReasonCode.VERIFY_TIMEOUT
+                        if isinstance(exc, SwitchTimeoutError)
+                        else ReasonCode.FLOWMOD_ERROR
+                    )
+                    break
+                xids_by_fg[fid].append(ds_rec.xid)
+                if not ds_rec.accepted:
+                    ds_failed_reason = (
+                        ReasonCode.VERIFY_TIMEOUT
+                        if ds_rec.timed_out
+                        else ReasonCode.FLOWMOD_ERROR
+                    )
+                    break
+                succeeded_counts[fid] += 1
+                touched_ds_dpids.setdefault(ds_rule.dpid, []).append(fid)
+
+            if ds_failed_reason is not None:
+                outcomes_by_fg[fid] = self._rollback_and_verify_old_path(
+                    run_id=run_id,
+                    flow_group_id=fid,
+                    old_plan=old_plan,
+                    proposed_path_id=chg.new_path_id,
+                    applied_at_utc=norm_ts,
+                    primary_failure_reason=ds_failed_reason,
+                    rule_count_so_far=rule_counts[fid],
+                    succeeded_so_far=succeeded_counts[fid],
+                    primary_so_far=primary_mods[fid],
+                    xids_so_far=xids_by_fg[fid],
+                    had_intermediate_physical_change=False,
+                )
+                fb = self.get_last_flow_count_breakdown(fid)
+                if fb is not None:
+                    per_flow_breakdowns[fid] = fb
+            else:
+                phase1_survivors.append((chg, old_plan, new_plan))
+
+        # Phase 1B: One Barrier per unique touched downstream DPID
+        failed_ds_dpids: dict[int, ReasonCode] = {}
+        for dpid in sorted(touched_ds_dpids):
+            try:
+                b_rec = self._driver.send_barrier(dpid, phase=SwitchPhaseTag.PRIMARY_DOWNSTREAM)
+                if not b_rec.confirmed:
+                    failed_ds_dpids[dpid] = (
+                        ReasonCode.VERIFY_TIMEOUT if b_rec.timed_out else ReasonCode.FLOWMOD_ERROR
+                    )
+            except (SwitchTimeoutError, SwitchDriverError, RuntimeError) as exc:
+                failed_ds_dpids[dpid] = (
+                    ReasonCode.VERIFY_TIMEOUT
+                    if isinstance(exc, SwitchTimeoutError)
+                    else ReasonCode.FLOWMOD_ERROR
+                )
+
+        phase2_candidates: list[tuple[FlowChangeSpec, CompiledPathPlan, CompiledPathPlan]] = []
+        for chg, old_plan, new_plan in phase1_survivors:
+            fid = chg.flow_group_id
+            fail_r = None
+            for ds_rule in new_plan.downstream_rules:
+                if ds_rule.dpid in failed_ds_dpids:
+                    fail_r = failed_ds_dpids[ds_rule.dpid]
+                    break
+            if fail_r is not None:
+                outcomes_by_fg[fid] = self._rollback_and_verify_old_path(
+                    run_id=run_id,
+                    flow_group_id=fid,
+                    old_plan=old_plan,
+                    proposed_path_id=chg.new_path_id,
+                    applied_at_utc=norm_ts,
+                    primary_failure_reason=fail_r,
+                    rule_count_so_far=rule_counts[fid],
+                    succeeded_so_far=succeeded_counts[fid],
+                    primary_so_far=primary_mods[fid],
+                    xids_so_far=xids_by_fg[fid],
+                    had_intermediate_physical_change=False,
+                )
+                fb = self.get_last_flow_count_breakdown(fid)
+                if fb is not None:
+                    per_flow_breakdowns[fid] = fb
+            else:
+                phase2_candidates.append((chg, old_plan, new_plan))
+
+        # Phase 2A: Source-Edge FlowMods (OFPFC_MODIFY_STRICT) for all surviving flows
+        phase2_survivors: list[tuple[FlowChangeSpec, CompiledPathPlan, CompiledPathPlan]] = []
+        touched_src_dpids: dict[int, list[str]] = {}
+        for chg, old_plan, new_plan in phase2_candidates:
+            fid = chg.flow_group_id
+            src_rule = new_plan.source_edge_rule
+            rule_counts[fid] += 1
+            primary_mods[fid] += 1
+            src_fail: Optional[ReasonCode] = None
+            try:
+                src_rec = self._driver.send_flow_mod(
+                    src_rule,
+                    FlowModCommand.MODIFY_STRICT,
+                    phase=SwitchPhaseTag.PRIMARY_SOURCE_EDGE,
+                )
+                xids_by_fg[fid].append(src_rec.xid)
+                if not src_rec.accepted:
+                    src_fail = (
+                        ReasonCode.VERIFY_TIMEOUT
+                        if src_rec.timed_out
+                        else ReasonCode.FLOWMOD_ERROR
+                    )
+                else:
+                    succeeded_counts[fid] += 1
+                    touched_src_dpids.setdefault(src_rule.dpid, []).append(fid)
+            except (SwitchTimeoutError, SwitchDriverError, RuntimeError) as exc:
+                src_fail = (
+                    ReasonCode.VERIFY_TIMEOUT
+                    if isinstance(exc, SwitchTimeoutError)
+                    else ReasonCode.FLOWMOD_ERROR
+                )
+
+            if src_fail is not None:
+                outcomes_by_fg[fid] = self._rollback_and_verify_old_path(
+                    run_id=run_id,
+                    flow_group_id=fid,
+                    old_plan=old_plan,
+                    proposed_path_id=chg.new_path_id,
+                    applied_at_utc=norm_ts,
+                    primary_failure_reason=src_fail,
+                    rule_count_so_far=rule_counts[fid],
+                    succeeded_so_far=succeeded_counts[fid],
+                    primary_so_far=primary_mods[fid],
+                    xids_so_far=xids_by_fg[fid],
+                    had_intermediate_physical_change=True,
+                )
+                fb = self.get_last_flow_count_breakdown(fid)
+                if fb is not None:
+                    per_flow_breakdowns[fid] = fb
+            else:
+                phase2_survivors.append((chg, old_plan, new_plan))
+
+        # Phase 2B: One Barrier per unique touched source-edge DPID
+        failed_src_dpids: dict[int, ReasonCode] = {}
+        for dpid in sorted(touched_src_dpids):
+            try:
+                b_rec = self._driver.send_barrier(dpid, phase=SwitchPhaseTag.PRIMARY_SOURCE_EDGE)
+                if not b_rec.confirmed:
+                    failed_src_dpids[dpid] = (
+                        ReasonCode.VERIFY_TIMEOUT if b_rec.timed_out else ReasonCode.FLOWMOD_ERROR
+                    )
+            except (SwitchTimeoutError, SwitchDriverError, RuntimeError) as exc:
+                failed_src_dpids[dpid] = (
+                    ReasonCode.VERIFY_TIMEOUT
+                    if isinstance(exc, SwitchTimeoutError)
+                    else ReasonCode.FLOWMOD_ERROR
+                )
+
+        verify_candidates: list[tuple[FlowChangeSpec, CompiledPathPlan, CompiledPathPlan]] = []
+        for chg, old_plan, new_plan in phase2_survivors:
+            fid = chg.flow_group_id
+            src_dpid = new_plan.source_edge_rule.dpid
+            if src_dpid in failed_src_dpids:
+                outcomes_by_fg[fid] = self._rollback_and_verify_old_path(
+                    run_id=run_id,
+                    flow_group_id=fid,
+                    old_plan=old_plan,
+                    proposed_path_id=chg.new_path_id,
+                    applied_at_utc=norm_ts,
+                    primary_failure_reason=failed_src_dpids[src_dpid],
+                    rule_count_so_far=rule_counts[fid],
+                    succeeded_so_far=succeeded_counts[fid],
+                    primary_so_far=primary_mods[fid],
+                    xids_so_far=xids_by_fg[fid],
+                    had_intermediate_physical_change=True,
+                )
+                fb = self.get_last_flow_count_breakdown(fid)
+                if fb is not None:
+                    per_flow_breakdowns[fid] = fb
+            else:
+                verify_candidates.append((chg, old_plan, new_plan))
+
+        openflow_install_ms = round((_time.monotonic() - t_batch_start) * 1000.0, 2)
+
+        # Phase 3: Batched Datapath-Grouped Cooperative Forwarding Verification (Shared Deadline!)
+        t_verify_start = _time.monotonic()
+        if verify_candidates:
+            plans_to_verify = [new_plan for _, _, new_plan in verify_candidates]
+            fwd_results = self._driver.verify_batch_forwarding_counter_or_probe(  # type: ignore[attr-defined]
+                plans_to_verify
+            )
+            for chg, old_plan, new_plan in verify_candidates:
+                fid = chg.flow_group_id
+                fwd_res = fwd_results.get(fid)
+                if fwd_res is not None and fwd_res.counter_or_probe_ok:
+                    evidence = VerificationEvidence(
+                        run_id=run_id,
+                        flow_group_id=fid,
+                        verified_path_id=chg.new_path_id,
+                        evidence_mode=self._driver.evidence_mode,
+                        rule_readback_ok=True,
+                        counter_or_probe_ok=True,
+                        barrier_confirmed=True,
+                        verified_at_utc=norm_ts,
+                        xid_refs=tuple(xids_by_fg[fid]),
+                        detail=(
+                            f"Batched verified via COUNTER_OR_PROBE "
+                            f"({self._driver.evidence_mode.value}, delta={fwd_res.packet_delta})"
+                        ),
+                    )
+                    self._record_flow_breakdown(
+                        fid,
+                        attempted=rule_counts[fid],
+                        succeeded=succeeded_counts[fid],
+                        primary=primary_mods[fid],
+                        rollback=0,
+                        cleanup=0,
+                    )
+                    fb = self.get_last_flow_count_breakdown(fid)
+                    if fb is not None:
+                        per_flow_breakdowns[fid] = fb
+                    outcomes_by_fg[fid] = FlowBatchOutcome(
+                        flow_group_id=fid,
+                        old_path_id=chg.old_path_id,
+                        proposed_path_id=chg.new_path_id,
+                        actual_path_id=chg.new_path_id,
+                        status=FlowDecisionStatus.APPLIED,
+                        verification_status=VerificationStatus.VERIFIED,
+                        rule_count=rule_counts[fid],
+                        reason=None,
+                        applied_at_utc=norm_ts,
+                        evidence=evidence,
+                        had_intermediate_physical_change=True,
+                    )
+                else:
+                    fail_reason = (
+                        ReasonCode.VERIFY_TIMEOUT
+                        if (fwd_res is not None and fwd_res.timed_out)
+                        else ReasonCode.VERIFY_FAILED
+                    )
+                    outcomes_by_fg[fid] = self._rollback_and_verify_old_path(
+                        run_id=run_id,
+                        flow_group_id=fid,
+                        old_plan=old_plan,
+                        proposed_path_id=chg.new_path_id,
+                        applied_at_utc=norm_ts,
+                        primary_failure_reason=fail_reason,
+                        rule_count_so_far=rule_counts[fid],
+                        succeeded_so_far=succeeded_counts[fid],
+                        primary_so_far=primary_mods[fid],
+                        xids_so_far=xids_by_fg[fid],
+                        had_intermediate_physical_change=True,
+                    )
+                    fb = self.get_last_flow_count_breakdown(fid)
+                    if fb is not None:
+                        per_flow_breakdowns[fid] = fb
+
+        verification_ms = round((_time.monotonic() - t_verify_start) * 1000.0, 2)
+        fs_after = sum(1 for o in self._driver.get_operation_log() if o.op_type == "FLOW_STATS")
+
+        ordered_outcomes = [outcomes_by_fg[chg.flow_group_id] for chg in changes]
+        total_rules = sum(o.rule_count for o in ordered_outcomes)
+        batch_breakdown = FlowModCountBreakdown(
+            attempted_flow_mod_count=sum(
+                b.attempted_flow_mod_count for b in per_flow_breakdowns.values()
+            ),
+            succeeded_flow_mod_count=sum(
+                b.succeeded_flow_mod_count for b in per_flow_breakdowns.values()
+            ),
+            failed_flow_mod_count=sum(
+                b.failed_flow_mod_count for b in per_flow_breakdowns.values()
+            ),
+            primary_flow_mod_count=sum(
+                b.primary_flow_mod_count for b in per_flow_breakdowns.values()
+            ),
+            rollback_flow_mod_count=sum(
+                b.rollback_flow_mod_count for b in per_flow_breakdowns.values()
+            ),
+            cleanup_flow_mod_count=sum(
+                b.cleanup_flow_mod_count for b in per_flow_breakdowns.values()
+            ),
+            active_switch_rule_count=self.get_active_switch_rule_count(),
+        )
+        statuses = {o.status for o in ordered_outcomes}
+        if FlowDecisionStatus.UNKNOWN in statuses:
+            suggested_status = BatchStatus.INCONSISTENT
+        elif statuses == {FlowDecisionStatus.APPLIED}:
+            suggested_status = BatchStatus.APPLIED
+        elif statuses == {FlowDecisionStatus.ROLLED_BACK}:
+            suggested_status = BatchStatus.ROLLED_BACK
+        elif statuses <= {FlowDecisionStatus.FAILED, FlowDecisionStatus.KEPT}:
+            suggested_status = BatchStatus.FAILED
+        else:
+            suggested_status = BatchStatus.PARTIAL
+
+        return BatchInstallResult(
+            run_id=run_id,
+            decision_batch_id=decision_batch_id,
+            completed_at_utc=norm_ts,
+            outcomes=tuple(ordered_outcomes),
+            suggested_batch_status=suggested_status,
+            total_rule_count=total_rules,
+            is_network_atomic=False,
+            count_breakdown=batch_breakdown,
+            per_flow_count_breakdowns=per_flow_breakdowns,
+            openflow_install_ms=openflow_install_ms,
+            verification_ms=verification_ms,
+            flow_stats_request_count=max(0, fs_after - fs_before),
         )
 
 

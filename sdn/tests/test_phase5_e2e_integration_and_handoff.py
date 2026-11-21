@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any, Optional, Sequence
 import pytest
@@ -330,15 +331,35 @@ def test_p5_01_public_api_imports_and_no_linux_dependencies(
     for mod_name in submodules:
         mod = importlib.import_module(mod_name)
         assert mod is not None
+        # Confirm no core SDN module source file imports Linux-only or external SDN runtime modules
+        mod_file = getattr(mod, "__file__", None)
+        if mod_file:
+            src_txt = Path(mod_file).read_text(encoding="utf-8")
+            for forbidden_tok in ("import ryu", "from ryu", "import os_ken", "from os_ken", "import mininet", "from mininet", "import fcntl", "from fcntl"):
+                assert forbidden_tok not in src_txt, f"Forbidden import {forbidden_tok!r} in {mod_name}"
 
     # Confirm every symbol in sdn.__all__ resolves cleanly
     for sym in sdn.__all__:
         assert hasattr(sdn, sym), f"Missing exported symbol {sym!r} in sdn.__init__"
 
-    # Confirm no Linux-only or external SDN runtime modules were imported
-    forbidden_modules = ("ryu", "mininet", "fcntl", "os_ken")
-    for forbidden in forbidden_modules:
-        assert forbidden not in sys.modules
+    # Confirm no external SDN runtime modules (ryu, mininet, os_ken) are imported when loading
+    # all pure-Python core SDN modules in a fresh Python interpreter (unaffected by adapter tests
+    # in the same pytest session that explicitly import sdn.apps.ryu_s0_app).
+    subproc_check = (
+        "import importlib, sys; "
+        f"mods = {submodules!r}; "
+        "[importlib.import_module(m) for m in mods]; "
+        "forbidden = ('ryu', 'mininet', 'os_ken', 'fcntl'); "
+        "loaded = [f for f in forbidden if f in sys.modules]; "
+        "assert not loaded, f'Core SDN modules imported forbidden modules: {loaded}'"
+    )
+    res = subprocess.run(
+        [sys.executable, "-c", subproc_check],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"Fresh-interpreter core isolation check failed: {res.stderr}"
 
     # Confirm canonical topology invariants from Network catalog
     assert len(topology.get_all_hosts()) == 8

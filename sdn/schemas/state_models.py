@@ -24,6 +24,31 @@ _PATH_ID_RE = re.compile(r"^(0x[1-8]0[1-8])_P([12])$")
 _LINK_ID_RE = re.compile(
     r"^(h[1-8]>e[1-4]|e[1-4]>h[1-8]|e[1-4]>c[12]|c[12]>e[1-4])$"
 )
+_RFC3339_FRAC_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})\.(\d{1,6})([+-]\d{2}:\d{2})$"
+)
+_RFC3339_INVALID_DOT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\.(?:\d{7,}|)[+-]\d{2}:\d{2}$"
+)
+
+
+def normalize_iso8601_fractional_seconds(iso_str: str) -> str:
+    """
+    Pad 1..6 digit fractional seconds in an ISO-8601 / RFC3339 timestamp with a timezone
+    offset to 6 microsecond digits so Python 3.10 `datetime.fromisoformat()` accepts
+    canonical RFC3339 strings like `.2+00:00` or `.05+00:00` without losing precision.
+    Explicitly rejects empty fractional dot (`.+00:00` / `.Z`) and >6 fractional digits
+    on both Python 3.10 and Python 3.11+ so non-standard or truncated timestamps are rejected.
+    """
+    if _RFC3339_INVALID_DOT_RE.match(iso_str) is not None:
+        raise ValueError(
+            f"Invalid RFC3339 fractional seconds (must be 1..6 digits after '.'): {iso_str!r}"
+        )
+    m = _RFC3339_FRAC_RE.match(iso_str)
+    if m is not None:
+        prefix, frac, tz_part = m.groups()
+        return f"{prefix}.{frac.ljust(6, '0')}{tz_part}"
+    return iso_str
 
 
 class ContractSerializationError(ValueError):
@@ -123,7 +148,7 @@ def validate_rfc3339_utc_timestamp(
             f"Field '{field_name}' must be an explicit UTC RFC3339 timestamp ending in 'Z' or '+00:00', got {value!r}."
         )
     try:
-        dt = datetime.fromisoformat(iso_str)
+        dt = datetime.fromisoformat(normalize_iso8601_fractional_seconds(iso_str))
     except ValueError as exc:
         raise ContractSerializationError(
             f"Field '{field_name}' is not a valid RFC3339 UTC timestamp: {value!r}."

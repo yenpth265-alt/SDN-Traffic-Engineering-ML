@@ -4,8 +4,8 @@
 # Option A (Python 3.8 - 3.10):
 #   pip install "ryu==4.34" "eventlet==0.33.3" "setuptools<68"
 #
-# Option B (Python 3.10 - 3.12):
-#   pip install "os-ken>=2.8.0" "eventlet>=0.35.2"
+# Option B (Recommended for Ubuntu 22.04+ / Python 3.10 - 3.12 with osken-manager CLI):
+#   pip install "os-ken==2.8.1" "eventlet==0.35.2"
 #
 # Test & validation runner (both Windows and Ubuntu):
 pytest>=8.0.0

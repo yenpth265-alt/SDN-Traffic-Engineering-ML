@@ -47,6 +47,10 @@ class RyuDriverConfig:
     strict_dpid_validation: bool = True
     hard_timeout_s: int = 0
     idle_timeout_s: int = 0
+    # Bounded polling for live OVS forwarding counter verification (`Phase 10.1`):
+    # Default 0.0 keeps mock adapter unit tests instant; live Ubuntu sets e.g. 1.0s / 0.1s.
+    counter_verify_timeout_s: float = 0.0
+    counter_verify_poll_interval_s: float = 0.1
 
 
 @dataclass
@@ -81,6 +85,25 @@ class _PendingPortDesc:
     datapath_id: int = 0
     raw_ports: list[Any] = field(default_factory=list)
     error_reason: Optional[str] = None
+
+
+def _default_sleep(seconds: float) -> None:
+    """
+    Eventlet-safe sleep that yields cooperatively when running inside OS-Ken / Ryu
+    (never blocking the OpenFlow receive loop) and falls back to `time.sleep` otherwise.
+    """
+    if seconds <= 0.0:
+        return
+    try:
+        import eventlet  # type: ignore
+        import eventlet.patcher  # type: ignore
+
+        if eventlet.patcher.is_monkey_patched("thread") or eventlet.patcher.is_monkey_patched("time"):
+            eventlet.sleep(seconds)
+            return
+    except ImportError:
+        pass
+    time.sleep(seconds)
 
 
 def _default_event_factory() -> Any:
@@ -200,6 +223,7 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         config: Optional[RyuDriverConfig] = None,
         *,
         event_factory: Optional[Callable[[], Any]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
         active_probe_callback: Optional[
             Callable[[CompiledPathPlan, Optional[str]], ForwardingCheckResult]
         ] = None,
@@ -207,6 +231,7 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         self._topology = topology_registry
         self._config = config or RyuDriverConfig()
         self._event_factory = event_factory or _default_event_factory
+        self._sleep_fn = sleep_fn or _default_sleep
         self._active_probe_callback = active_probe_callback
 
         self._lock = threading.RLock()
@@ -227,8 +252,25 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         self._connection_epochs: dict[int, int] = {}
         self._datapath_identities: dict[int, int] = {}
         self._rule_generations: dict[tuple[int, int, int, tuple[tuple[str, Any], ...]], int] = {}
+        self._tracked_rules: dict[tuple[int, int, int, tuple[tuple[str, Any], ...]], str] = {}
         self._disconnect_events: list[tuple[int, str]] = []
         self._ignored_stale_events: list[tuple[int, str]] = []
+        self._verification_budget_deadline_monotonic: Optional[float] = None
+
+    def set_verification_budget_deadline(
+        self, budget_seconds: Optional[float]
+    ) -> None:
+        """
+        Constrain bounded forwarding verification polling to at most `budget_seconds`
+        from now (e.g. remaining `ApplyRequest` deadline budget). Pass `None` to clear.
+        """
+        with self._lock:
+            if budget_seconds is None:
+                self._verification_budget_deadline_monotonic = None
+            else:
+                self._verification_budget_deadline_monotonic = time.monotonic() + max(
+                    0.0, float(budget_seconds)
+                )
 
     @property
     def evidence_mode(self) -> EvidenceMode:
@@ -267,6 +309,27 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         """Return `id(datapath)` for the currently active datapath on `dpid`, or `None`."""
         with self._lock:
             return self._datapath_identities.get(int(dpid))
+
+    def get_installed_rule_count(
+        self,
+        *,
+        dpid: Optional[int] = None,
+        flow_group_id: Optional[str] = None,
+    ) -> int:
+        """
+        Return the locally tracked count of active flow rules installed via this driver
+        in O(1)/O(N_rules) memory without issuing extra `OFPFlowStatsRequest` round-trips
+        during post-apply breakdown reporting.
+        """
+        with self._lock:
+            count = 0
+            for (r_dpid, _tid, _prio, _mkey), fg_id in self._tracked_rules.items():
+                if dpid is not None and r_dpid != dpid:
+                    continue
+                if flow_group_id is not None and fg_id != flow_group_id:
+                    continue
+                count += 1
+            return count
 
     def get_rule_generation(self, rule: OpenFlowRuleSpec) -> int:
         """Return the current rule generation counter for `(dpid, table_id, priority, match_tuple_key)`."""
@@ -313,19 +376,27 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
 
     def unregister_datapath(
         self,
-        dpid: int,
+        dpid: Optional[int],
         reason: str = "SWITCH_DISCONNECTED",
         *,
         datapath: Optional[Any] = None,
     ) -> bool:
         """
         Unregister a disconnected switch and fail any pending barrier/stats waiters.
+        If `dpid` is `None` (and `datapath.id` is `None`, e.g. an unhandshaked socket closed
+        before `OFPT_FEATURES_REPLY`), records an ignored pre-handshake disconnect and returns `False`.
         If `datapath` is supplied and does not match the currently active datapath for `dpid`
         (e.g. a late `DEAD_DISPATCHER` from an already-replaced connection), ignores the stale
         event and returns `False`.
         """
         with self._lock:
-            dpid_int = int(dpid)
+            eff_dpid = dpid if dpid is not None else getattr(datapath, "id", None)
+            if eff_dpid is None:
+                self._ignored_stale_events.append(
+                    (0, f"UNHANDSHAKED_DISCONNECT_IGNORED:{reason}")
+                )
+                return False
+            dpid_int = int(eff_dpid)
             active_dp = self._datapaths.get(dpid_int)
             if datapath is not None and active_dp is not None and active_dp is not datapath:
                 self._ignored_stale_events.append(
@@ -347,6 +418,8 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
     def _clear_baseline_counts_for_dpid(self, dpid: int) -> None:
         for k in [k for k in self._baseline_packet_counts if k[0] == dpid]:
             self._baseline_packet_counts.pop(k, None)
+        for rk in [rk for rk in self._tracked_rules if rk[0] == dpid]:
+            self._tracked_rules.pop(rk, None)
 
     def _fail_pending_waiters_for_dpid(self, dpid: int, *, reason: str) -> None:
         for (p_dpid, xid), waiter in list(self._pending_barriers.items()):
@@ -566,6 +639,12 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
                 accepted=False,
                 error_reason=err,
             )
+
+        with self._lock:
+            if command in (FlowModCommand.ADD, FlowModCommand.MODIFY_STRICT):
+                self._tracked_rules[gen_key] = rule.flow_group_id
+            elif command == FlowModCommand.DELETE_STRICT:
+                self._tracked_rules.pop(gen_key, None)
 
         self._record_log(
             op_type="FLOW_MOD",
@@ -1012,14 +1091,19 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
         probe_id: Optional[str] = None,
     ) -> ForwardingCheckResult:
         """
-        Verify real data-plane forwarding on `compiled_plan`:
+        Verify real data-plane forwarding on `compiled_plan` (`Phase 10.1` bounded polling):
         1. If `active_probe_callback` is configured, run real active probe and require confirmation.
         2. Otherwise, read OpenFlow `FlowStats` counters across all 3 hops and verify
            a real positive `packet_count` delta (`>= min_counter_packet_delta`) compared
            to the baseline (never returning `counter_or_probe_ok=True` when counters are 0).
-        3. If any hop counter decreased (`pkt_now < prev`), detect counter reset, update
-           baseline to `pkt_now`, and return `COUNTER_RESET_DETECTED` (`counter_or_probe_ok=False`).
-        4. Only advance `_baseline_packet_counts` across all 3 hops when `ok == True`
+        3. If `counter_verify_timeout_s > 0` and counters have not yet incremented across
+           all 3 hops, poll cooperatively (`self._sleep_fn`, eventlet-safe) up to
+           `min(counter_verify_timeout_s, remaining ApplyRequest deadline budget)` without
+           issuing any `FlowMod`.
+        4. Immediately abort polling if any switch reconnects (`conn_epoch` changes),
+           any hop rule is replaced (`rule_generation` changes) or goes missing, or a
+           counter reset (`pkt_now < prev`) is detected.
+        5. Only advance `_baseline_packet_counts` across all 3 hops when `ok == True`
            so a partial/zero check never destroys pre-verification baselines.
         """
         if self._active_probe_callback is not None:
@@ -1040,27 +1124,154 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
             )
             return res
 
-        hop_deltas: list[int] = []
-        observed_counts: dict[tuple[int, str, str], int] = {}
-        counter_reset_keys: dict[tuple[int, str, str], int] = {}
+        with self._lock:
+            initial_epochs = {
+                hop.dpid: self._connection_epochs.get(hop.dpid, 0)
+                for hop in compiled_plan.ordered_hop_rules
+            }
+            initial_generations = {
+                hop.dpid: self.get_rule_generation(hop)
+                for hop in compiled_plan.ordered_hop_rules
+            }
+            budget_deadline = self._verification_budget_deadline_monotonic
 
-        for hop in compiled_plan.ordered_hop_rules:
-            stats = self.read_flow_stats(
-                hop.dpid,
-                flow_group_id=hop.flow_group_id,
-                cookie_int=hop.cookie_int,
-            )
-            matched = [
-                s
-                for s in stats
-                if s.out_port == hop.out_port
-                and (
-                    s.match is None
-                    or (s.table_id, s.priority, s.match.match_tuple_key) == hop.table_entry_key
+        timeout_s = max(0.0, float(self._config.counter_verify_timeout_s))
+        poll_interval_s = max(0.01, float(self._config.counter_verify_poll_interval_s))
+        now_mono = time.monotonic()
+        poll_deadline = now_mono + timeout_s
+        if budget_deadline is not None:
+            poll_deadline = min(poll_deadline, budget_deadline)
+
+        attempt = 0
+        min_delta = 0
+        observed_counts: dict[tuple[int, str, str], int] = {}
+
+        while True:
+            attempt += 1
+            # Detect switch reconnect or rule replacement during polling
+            with self._lock:
+                for hop in compiled_plan.ordered_hop_rules:
+                    if self._connection_epochs.get(hop.dpid, 0) != initial_epochs[hop.dpid]:
+                        err = f"DATAPATH_RECONNECTED_DURING_VERIFY_DPID_{hop.dpid}"
+                        self._record_log(
+                            op_type="FORWARDING_CHECK",
+                            xid=0,
+                            dpid=compiled_plan.source_edge_rule.dpid,
+                            switch_id=compiled_plan.source_edge_rule.switch_id,
+                            phase=SwitchPhaseTag.VERIFICATION,
+                            flow_group_id=compiled_plan.flow_group_id,
+                            path_id=compiled_plan.path_id,
+                            hop_stage=None,
+                            out_port=compiled_plan.source_edge_rule.out_port,
+                            success=False,
+                            error_reason=err,
+                        )
+                        return ForwardingCheckResult(
+                            flow_group_id=compiled_plan.flow_group_id,
+                            checked_path_id=compiled_plan.path_id,
+                            actual_forwarded_path_id=None,
+                            counter_or_probe_ok=False,
+                            probe_id=probe_id,
+                            packet_delta=0,
+                            error_reason=err,
+                        )
+                    if self.get_rule_generation(hop) != initial_generations[hop.dpid]:
+                        err = f"RULE_REPLACED_DURING_VERIFY_DPID_{hop.dpid}"
+                        self._record_log(
+                            op_type="FORWARDING_CHECK",
+                            xid=0,
+                            dpid=compiled_plan.source_edge_rule.dpid,
+                            switch_id=compiled_plan.source_edge_rule.switch_id,
+                            phase=SwitchPhaseTag.VERIFICATION,
+                            flow_group_id=compiled_plan.flow_group_id,
+                            path_id=compiled_plan.path_id,
+                            hop_stage=None,
+                            out_port=compiled_plan.source_edge_rule.out_port,
+                            success=False,
+                            error_reason=err,
+                        )
+                        return ForwardingCheckResult(
+                            flow_group_id=compiled_plan.flow_group_id,
+                            checked_path_id=compiled_plan.path_id,
+                            actual_forwarded_path_id=None,
+                            counter_or_probe_ok=False,
+                            probe_id=probe_id,
+                            packet_delta=0,
+                            error_reason=err,
+                        )
+
+            hop_deltas: list[int] = []
+            observed_counts = {}
+            counter_reset_keys: dict[tuple[int, str, str], int] = {}
+
+            for hop in compiled_plan.ordered_hop_rules:
+                stats = self.read_flow_stats(
+                    hop.dpid,
+                    flow_group_id=hop.flow_group_id,
+                    cookie_int=hop.cookie_int,
                 )
-            ]
-            if not matched:
-                err = f"MISSING_HOP_RULE_ON_{hop.switch_id}_OUTPORT_{hop.out_port}"
+                matched = [
+                    s
+                    for s in stats
+                    if s.out_port == hop.out_port
+                    and (
+                        s.match is None
+                        or (s.table_id, s.priority, s.match.match_tuple_key) == hop.table_entry_key
+                    )
+                ]
+                if not matched:
+                    err = f"MISSING_HOP_RULE_ON_{hop.switch_id}_OUTPORT_{hop.out_port}"
+                    self._record_log(
+                        op_type="FORWARDING_CHECK",
+                        xid=0,
+                        dpid=compiled_plan.source_edge_rule.dpid,
+                        switch_id=compiled_plan.source_edge_rule.switch_id,
+                        phase=SwitchPhaseTag.VERIFICATION,
+                        flow_group_id=compiled_plan.flow_group_id,
+                        path_id=compiled_plan.path_id,
+                        hop_stage=None,
+                        out_port=compiled_plan.source_edge_rule.out_port,
+                        success=False,
+                        error_reason=err,
+                    )
+                    return ForwardingCheckResult(
+                        flow_group_id=compiled_plan.flow_group_id,
+                        checked_path_id=compiled_plan.path_id,
+                        actual_forwarded_path_id=None,
+                        counter_or_probe_ok=False,
+                        probe_id=probe_id,
+                        packet_delta=0,
+                        error_reason=err,
+                    )
+                pkt_now = sum(s.packet_count for s in matched)
+                key = (hop.dpid, hop.flow_group_id, compiled_plan.path_id)
+                observed_counts[key] = pkt_now
+                with self._lock:
+                    prev = self._baseline_packet_counts.get(key, 0)
+                if pkt_now < prev:
+                    counter_reset_keys[key] = pkt_now
+                    hop_deltas.append(0)
+                else:
+                    hop_deltas.append(pkt_now - prev)
+
+            if counter_reset_keys:
+                with self._lock:
+                    for k, new_val in counter_reset_keys.items():
+                        self._baseline_packet_counts[k] = new_val
+                err_reason = "COUNTER_RESET_DETECTED"
+                self._record_log(
+                    op_type="FORWARDING_CHECK",
+                    xid=0,
+                    dpid=compiled_plan.source_edge_rule.dpid,
+                    switch_id=compiled_plan.source_edge_rule.switch_id,
+                    phase=SwitchPhaseTag.VERIFICATION,
+                    flow_group_id=compiled_plan.flow_group_id,
+                    path_id=compiled_plan.path_id,
+                    hop_stage=None,
+                    out_port=compiled_plan.source_edge_rule.out_port,
+                    success=False,
+                    error_reason=err_reason,
+                )
                 return ForwardingCheckResult(
                     flow_group_id=compiled_plan.flow_group_id,
                     checked_path_id=compiled_plan.path_id,
@@ -1068,55 +1279,43 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
                     counter_or_probe_ok=False,
                     probe_id=probe_id,
                     packet_delta=0,
-                    error_reason=err,
+                    error_reason=err_reason,
                 )
-            pkt_now = sum(s.packet_count for s in matched)
-            key = (hop.dpid, hop.flow_group_id, compiled_plan.path_id)
-            observed_counts[key] = pkt_now
-            with self._lock:
-                prev = self._baseline_packet_counts.get(key, 0)
-            if pkt_now < prev:
-                counter_reset_keys[key] = pkt_now
-                hop_deltas.append(0)
-            else:
-                hop_deltas.append(pkt_now - prev)
 
-        if counter_reset_keys:
-            with self._lock:
-                for k, new_val in counter_reset_keys.items():
-                    self._baseline_packet_counts[k] = new_val
-            err_reason = "COUNTER_RESET_DETECTED"
-            self._record_log(
-                op_type="FORWARDING_CHECK",
-                xid=0,
-                dpid=compiled_plan.source_edge_rule.dpid,
-                switch_id=compiled_plan.source_edge_rule.switch_id,
-                phase=SwitchPhaseTag.VERIFICATION,
-                flow_group_id=compiled_plan.flow_group_id,
-                path_id=compiled_plan.path_id,
-                hop_stage=None,
-                out_port=compiled_plan.source_edge_rule.out_port,
-                success=False,
-                error_reason=err_reason,
-            )
-            return ForwardingCheckResult(
-                flow_group_id=compiled_plan.flow_group_id,
-                checked_path_id=compiled_plan.path_id,
-                actual_forwarded_path_id=None,
-                counter_or_probe_ok=False,
-                probe_id=probe_id,
-                packet_delta=0,
-                error_reason=err_reason,
-            )
+            min_delta = min(hop_deltas) if hop_deltas else 0
+            if min_delta >= self._config.min_counter_packet_delta:
+                with self._lock:
+                    for k, pkt_val in observed_counts.items():
+                        self._baseline_packet_counts[k] = pkt_val
+                self._record_log(
+                    op_type="FORWARDING_CHECK",
+                    xid=0,
+                    dpid=compiled_plan.source_edge_rule.dpid,
+                    switch_id=compiled_plan.source_edge_rule.switch_id,
+                    phase=SwitchPhaseTag.VERIFICATION,
+                    flow_group_id=compiled_plan.flow_group_id,
+                    path_id=compiled_plan.path_id,
+                    hop_stage=None,
+                    out_port=compiled_plan.source_edge_rule.out_port,
+                    success=True,
+                    error_reason=None,
+                )
+                return ForwardingCheckResult(
+                    flow_group_id=compiled_plan.flow_group_id,
+                    checked_path_id=compiled_plan.path_id,
+                    actual_forwarded_path_id=compiled_plan.path_id,
+                    counter_or_probe_ok=True,
+                    probe_id=probe_id,
+                    packet_delta=min_delta,
+                    error_reason=None,
+                )
 
-        min_delta = min(hop_deltas) if hop_deltas else 0
-        ok = min_delta >= self._config.min_counter_packet_delta
-        if ok:
-            with self._lock:
-                for k, pkt_val in observed_counts.items():
-                    self._baseline_packet_counts[k] = pkt_val
+            remaining_s = poll_deadline - time.monotonic()
+            if remaining_s <= 0.0:
+                break
+            self._sleep_fn(min(poll_interval_s, remaining_s))
 
-        err_reason = None if ok else "NO_REAL_COUNTER_DELTA_OR_ACTIVE_PROBE"
+        err_reason = "NO_REAL_COUNTER_DELTA_OR_ACTIVE_PROBE"
         self._record_log(
             op_type="FORWARDING_CHECK",
             xid=0,
@@ -1127,18 +1326,316 @@ class RyuOpenFlowDriver(SwitchDriverProtocol):
             path_id=compiled_plan.path_id,
             hop_stage=None,
             out_port=compiled_plan.source_edge_rule.out_port,
-            success=ok,
+            success=False,
+            timed_out=(attempt > 1),
             error_reason=err_reason,
         )
         return ForwardingCheckResult(
             flow_group_id=compiled_plan.flow_group_id,
             checked_path_id=compiled_plan.path_id,
-            actual_forwarded_path_id=compiled_plan.path_id if ok else None,
-            counter_or_probe_ok=ok,
+            actual_forwarded_path_id=None,
+            counter_or_probe_ok=False,
             probe_id=probe_id,
             packet_delta=min_delta,
+            timed_out=(attempt > 1),
             error_reason=err_reason,
         )
+
+    def verify_batch_forwarding_counter_or_probe(
+        self,
+        compiled_plans: Sequence[CompiledPathPlan],
+        *,
+        shared_deadline_s: Optional[float] = None,
+    ) -> dict[str, ForwardingCheckResult]:
+        """
+        Phase 12.2: Batched datapath-grouped cooperative forwarding verification with a
+        single shared deadline across all flows in `compiled_plans`.
+
+        Safety guarantees (unchanged from single-flow verification):
+        - Verifies EVERY hop of EVERY plan (exact `(table_id, priority, match, out_port)`).
+        - Uses ONE `OFPFlowStatsRequest` (`cookie=0, cookie_mask=0`) per unique touched
+          datapath per poll round, reusing that response across all pending flows on that
+          switch to eliminate duplicate FlowStats traffic.
+        - Aborts any flow immediately on `conn_epoch` change, `rule_generation` change,
+          missing hop rule, or `COUNTER_RESET_DETECTED`.
+        - Never uses stale counters, never skips hops, never issues FlowMods during polling,
+          and never returns `counter_or_probe_ok=True` without real `delta >= min_delta`.
+        """
+        if not compiled_plans:
+            return {}
+        if len(compiled_plans) == 1:
+            p0 = compiled_plans[0]
+            return {p0.flow_group_id: self.verify_forwarding_counter_or_probe(p0)}
+
+        results: dict[str, ForwardingCheckResult] = {}
+        pending: dict[str, CompiledPathPlan] = {p.flow_group_id: p for p in compiled_plans}
+
+        # Record initial connection epochs and rule generations per flow/hop
+        initial_epochs: dict[str, dict[int, int]] = {}
+        initial_generations: dict[str, dict[int, int]] = {}
+        for fid, plan in pending.items():
+            initial_epochs[fid] = {
+                hop.dpid: self.get_connection_epoch(hop.dpid)
+                for hop in plan.ordered_hop_rules
+            }
+            initial_generations[fid] = {
+                hop.dpid: self.get_rule_generation(hop)
+                for hop in plan.ordered_hop_rules
+            }
+
+        # Single shared batch deadline (never additive per-flow timeouts!)
+        eff_timeout_s = max(0.0, float(self._config.counter_verify_timeout_s))
+        if shared_deadline_s is not None:
+            eff_timeout_s = min(eff_timeout_s, max(0.0, float(shared_deadline_s)))
+        with self._lock:
+            budget_deadline = self._verification_budget_deadline_monotonic
+
+        poll_interval_s = max(0.01, float(self._config.counter_verify_poll_interval_s))
+        poll_deadline = time.monotonic() + eff_timeout_s
+        if budget_deadline is not None:
+            poll_deadline = min(poll_deadline, budget_deadline)
+        last_min_delta: dict[str, int] = {fid: 0 for fid in pending}
+        attempt = 0
+
+        while pending:
+            attempt += 1
+
+            # 1. Check epoch/generation stability for all still-pending flows
+            if attempt > 1:
+                aborted: list[str] = []
+                for fid, plan in pending.items():
+                    for hop in plan.ordered_hop_rules:
+                        if self.get_connection_epoch(hop.dpid) != initial_epochs[fid][hop.dpid]:
+                            err = f"DATAPATH_RECONNECTED_DURING_VERIFY_DPID_{hop.dpid}"
+                            self._record_log(
+                                op_type="FORWARDING_CHECK",
+                                xid=0,
+                                dpid=plan.source_edge_rule.dpid,
+                                switch_id=plan.source_edge_rule.switch_id,
+                                phase=SwitchPhaseTag.VERIFICATION,
+                                flow_group_id=fid,
+                                path_id=plan.path_id,
+                                hop_stage=None,
+                                out_port=plan.source_edge_rule.out_port,
+                                success=False,
+                                error_reason=err,
+                            )
+                            results[fid] = ForwardingCheckResult(
+                                flow_group_id=fid,
+                                checked_path_id=plan.path_id,
+                                actual_forwarded_path_id=None,
+                                counter_or_probe_ok=False,
+                                probe_id=None,
+                                packet_delta=0,
+                                error_reason=err,
+                            )
+                            aborted.append(fid)
+                            break
+                        if self.get_rule_generation(hop) != initial_generations[fid][hop.dpid]:
+                            err = f"RULE_REPLACED_DURING_VERIFY_DPID_{hop.dpid}"
+                            self._record_log(
+                                op_type="FORWARDING_CHECK",
+                                xid=0,
+                                dpid=plan.source_edge_rule.dpid,
+                                switch_id=plan.source_edge_rule.switch_id,
+                                phase=SwitchPhaseTag.VERIFICATION,
+                                flow_group_id=fid,
+                                path_id=plan.path_id,
+                                hop_stage=None,
+                                out_port=plan.source_edge_rule.out_port,
+                                success=False,
+                                error_reason=err,
+                            )
+                            results[fid] = ForwardingCheckResult(
+                                flow_group_id=fid,
+                                checked_path_id=plan.path_id,
+                                actual_forwarded_path_id=None,
+                                counter_or_probe_ok=False,
+                                probe_id=None,
+                                packet_delta=0,
+                                error_reason=err,
+                            )
+                            aborted.append(fid)
+                            break
+                for fid in aborted:
+                    pending.pop(fid, None)
+                if not pending:
+                    break
+
+            # 2. Group unique DPIDs across all still-pending flows and issue ONE FlowStats per DPID!
+            needed_dpids = sorted(
+                {hop.dpid for plan in pending.values() for hop in plan.ordered_hop_rules}
+            )
+            stats_by_dpid: dict[int, tuple[SwitchFlowStatsEntry, ...]] = {}
+            dpid_errors: dict[int, str] = {}
+            for dpid in needed_dpids:
+                try:
+                    stats_by_dpid[dpid] = self.read_flow_stats(dpid)
+                except Exception as exc:
+                    dpid_errors[dpid] = f"FLOW_STATS_ERROR_DPID_{dpid}: {exc}"
+
+            # 3. Evaluate every pending flow against the shared per-switch FlowStats snapshot
+            completed_this_round: list[str] = []
+            for fid, plan in pending.items():
+                hop_deltas: list[int] = []
+                observed_counts: dict[tuple[int, str, str], int] = {}
+                counter_reset_keys: dict[tuple[int, str, str], int] = {}
+                flow_err: Optional[str] = None
+
+                for hop in plan.ordered_hop_rules:
+                    if hop.dpid in dpid_errors:
+                        flow_err = dpid_errors[hop.dpid]
+                        break
+                    sw_stats = stats_by_dpid.get(hop.dpid, ())
+                    matched = [
+                        s
+                        for s in sw_stats
+                        if s.cookie_int == hop.cookie_int
+                        and s.out_port == hop.out_port
+                        and (
+                            s.match is None
+                            or (s.table_id, s.priority, s.match.match_tuple_key) == hop.table_entry_key
+                        )
+                    ]
+                    if not matched:
+                        flow_err = f"MISSING_HOP_RULE_ON_{hop.switch_id}_OUTPORT_{hop.out_port}"
+                        break
+                    pkt_now = sum(s.packet_count for s in matched)
+                    key = (hop.dpid, hop.flow_group_id, plan.path_id)
+                    observed_counts[key] = pkt_now
+                    with self._lock:
+                        prev = self._baseline_packet_counts.get(key, 0)
+                    if pkt_now < prev:
+                        counter_reset_keys[key] = pkt_now
+                        hop_deltas.append(0)
+                    else:
+                        hop_deltas.append(pkt_now - prev)
+
+                if flow_err is not None:
+                    self._record_log(
+                        op_type="FORWARDING_CHECK",
+                        xid=0,
+                        dpid=plan.source_edge_rule.dpid,
+                        switch_id=plan.source_edge_rule.switch_id,
+                        phase=SwitchPhaseTag.VERIFICATION,
+                        flow_group_id=fid,
+                        path_id=plan.path_id,
+                        hop_stage=None,
+                        out_port=plan.source_edge_rule.out_port,
+                        success=False,
+                        error_reason=flow_err,
+                    )
+                    results[fid] = ForwardingCheckResult(
+                        flow_group_id=fid,
+                        checked_path_id=plan.path_id,
+                        actual_forwarded_path_id=None,
+                        counter_or_probe_ok=False,
+                        probe_id=None,
+                        packet_delta=0,
+                        error_reason=flow_err,
+                    )
+                    completed_this_round.append(fid)
+                    continue
+
+                if counter_reset_keys:
+                    with self._lock:
+                        for k, new_val in counter_reset_keys.items():
+                            self._baseline_packet_counts[k] = new_val
+                    err_reason = "COUNTER_RESET_DETECTED"
+                    self._record_log(
+                        op_type="FORWARDING_CHECK",
+                        xid=0,
+                        dpid=plan.source_edge_rule.dpid,
+                        switch_id=plan.source_edge_rule.switch_id,
+                        phase=SwitchPhaseTag.VERIFICATION,
+                        flow_group_id=fid,
+                        path_id=plan.path_id,
+                        hop_stage=None,
+                        out_port=plan.source_edge_rule.out_port,
+                        success=False,
+                        error_reason=err_reason,
+                    )
+                    results[fid] = ForwardingCheckResult(
+                        flow_group_id=fid,
+                        checked_path_id=plan.path_id,
+                        actual_forwarded_path_id=None,
+                        counter_or_probe_ok=False,
+                        probe_id=None,
+                        packet_delta=0,
+                        error_reason=err_reason,
+                    )
+                    completed_this_round.append(fid)
+                    continue
+
+                min_delta = min(hop_deltas) if hop_deltas else 0
+                last_min_delta[fid] = min_delta
+                if min_delta >= self._config.min_counter_packet_delta:
+                    with self._lock:
+                        for k, pkt_val in observed_counts.items():
+                            self._baseline_packet_counts[k] = pkt_val
+                    self._record_log(
+                        op_type="FORWARDING_CHECK",
+                        xid=0,
+                        dpid=plan.source_edge_rule.dpid,
+                        switch_id=plan.source_edge_rule.switch_id,
+                        phase=SwitchPhaseTag.VERIFICATION,
+                        flow_group_id=fid,
+                        path_id=plan.path_id,
+                        hop_stage=None,
+                        out_port=plan.source_edge_rule.out_port,
+                        success=True,
+                        error_reason=None,
+                    )
+                    results[fid] = ForwardingCheckResult(
+                        flow_group_id=fid,
+                        checked_path_id=plan.path_id,
+                        actual_forwarded_path_id=plan.path_id,
+                        counter_or_probe_ok=True,
+                        probe_id=None,
+                        packet_delta=min_delta,
+                        error_reason=None,
+                    )
+                    completed_this_round.append(fid)
+
+            for fid in completed_this_round:
+                pending.pop(fid, None)
+
+            if not pending:
+                break
+            remaining_s = poll_deadline - time.monotonic()
+            if remaining_s <= 0.0:
+                break
+            self._sleep_fn(min(poll_interval_s, remaining_s))
+
+        # Any flows still pending at shared batch deadline -> honest failure (never fake APPLIED!)
+        for fid, plan in pending.items():
+            err_reason = "NO_REAL_COUNTER_DELTA_OR_ACTIVE_PROBE"
+            self._record_log(
+                op_type="FORWARDING_CHECK",
+                xid=0,
+                dpid=plan.source_edge_rule.dpid,
+                switch_id=plan.source_edge_rule.switch_id,
+                phase=SwitchPhaseTag.VERIFICATION,
+                flow_group_id=fid,
+                path_id=plan.path_id,
+                hop_stage=None,
+                out_port=plan.source_edge_rule.out_port,
+                success=False,
+                timed_out=(attempt > 1),
+                error_reason=err_reason,
+            )
+            results[fid] = ForwardingCheckResult(
+                flow_group_id=fid,
+                checked_path_id=plan.path_id,
+                actual_forwarded_path_id=None,
+                counter_or_probe_ok=False,
+                probe_id=None,
+                packet_delta=last_min_delta.get(fid, 0),
+                timed_out=(attempt > 1),
+                error_reason=err_reason,
+            )
+
+        return results
 
     def get_operation_log(self) -> tuple[SwitchOperationLogEntry, ...]:
         with self._lock:

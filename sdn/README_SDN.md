@@ -78,7 +78,7 @@ sdn/
 
 All unit, contract, serialization, and end-to-end mock integration tests run in pure Python on Windows using the repository's `.venv`:
 
-### 3.1 Run the Full Test Suite (`97` Tests)
+### 3.1 Run the Full Test Suite (`130` Tests)
 ```powershell
 .\.venv\bin\python.exe -m pytest -v -p no:cacheprovider sdn/tests/
 ```
@@ -153,3 +153,137 @@ decision_handler = DecisionHandler(
     snapshot_lookup=snapshot_creator.get_closed_snapshot,
 )
 ```
+
+
+---
+
+## Integration Adapters, Northbound HTTP API & Phase 12.2/12.3 Production Config
+
+The SDN Controller ships with three opt-in production integration adapters inside `sdn/adapters/`:
+1. **`sdn/adapters/http_control_api.py`** (`SDNNorthboundHTTPApp`, `HTTPDemandReleaseProvider`): Eventlet-compatible WSGI HTTP server (`127.0.0.1:18080` default, optional `X-SDN-Token` / `Authorization: Bearer` auth, `1 MiB` max body size). Supports **non-blocking async apply (`POST /apply?async=1` / `wait_ms=0`)** returning `202 Accepted` in `< 11 ms` (live P50 `6.13 ms`, max `10.71 ms`).
+2. **`sdn/adapters/sqlite_idempotency_store.py`** (`SQLiteBatchIdempotencyStore`): Durable SQLite WAL (`PRAGMA synchronous=FULL`) implementation of `BatchIdempotencyStoreProtocol` for crash-safe `AC-S08` replay across controller restarts (not a replacement for Data's primary DB).
+3. **`sdn/adapters/data_event_publisher.py`** (`DataEventPublisher`): Non-blocking durable JSONL outbox + HTTP publisher (`X-Idempotency-Key`, bounded retry/backoff, `PENDING_DELIVERY` until explicit `2xx` ACK).
+
+### Ubuntu Startup Command (Recommended Phase 12.2/12.3 Production Settings)
+
+```bash
+cd /home/vboxuser/SDN-Traffic-Engineering-ML
+SDN_RUN_ID=s0_live_run \
+SDN_VERIFY_PORT_DESC=1 \
+SDN_ENABLE_INTRA_EDGE_L3=1 \
+SDN_ENABLE_ARP_EDGE_LOCAL_FLOOD=0 \
+SDN_PREINSTALL_BOTH_DOWNSTREAM=1 \
+SDN_COUNTER_VERIFY_TIMEOUT_S=1.2 \
+SDN_COUNTER_VERIFY_POLL_INTERVAL_S=0.04 \
+SDN_NORTHBOUND_ENABLE=1 \
+SDN_NORTHBOUND_HOST=127.0.0.1 \
+SDN_NORTHBOUND_PORT=18080 \
+SDN_NORTHBOUND_TOKEN=sdn-secret-token \
+SDN_NORTHBOUND_SYNC_WAIT_MS=0 \
+SDN_IDEMPOTENCY_DB_PATH=/var/tmp/sdn_idempotency.sqlite3 \
+SDN_DATA_OUTBOX_DIR=/var/tmp/sdn_data_outbox \
+SDN_DATA_ENDPOINT_URL=http://127.0.0.1:19090 \
+PYTHONPATH=. .venv_ubuntu/bin/osken-manager \
+  --ofp-tcp-listen-port 6633 sdn/apps/ryu_s0_app.py
+```
+*(Set `SDN_ENABLE_ARP_EDGE_LOCAL_FLOOD=1` temporarily only if running against `network/topology/topology.py` before Network adds static `h.setARP(...)` entries.)*
+
+### Environment Variables Reference
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SDN_RUN_ID` | `s0_live_run` | Active experiment run ID. |
+| `SDN_VERIFY_PORT_DESC` | `1` | Enforce OpenFlow 1.3 `OFPMP_PORT_DESC` topology port verification at bootstrap. |
+| `SDN_ENABLE_INTRA_EDGE_L3` | `1` | Install intra-edge L3 rules (`h1<->h2`, etc.). |
+| `SDN_ENABLE_ARP_EDGE_LOCAL_FLOOD` | `0` | Edge-local ARP flood (keep `0` when Network sets static ARP). |
+| `SDN_PREINSTALL_BOTH_DOWNSTREAM` | `1` | Pre-install both `P1` and `P2` downstream rules at bootstrap (`AC-S01`). |
+| `SDN_COUNTER_VERIFY_TIMEOUT_S` | `1.2` | Finite bounded timeout (seconds) for counter verification & rollback verification. |
+| `SDN_COUNTER_VERIFY_POLL_INTERVAL_S` | `0.04` | Cooperative `FlowStats` poll interval (`40 ms`, Phase 12.2 default). |
+| `SDN_NORTHBOUND_ENABLE` | `0` | Enable Northbound WSGI HTTP server (`1` to enable). |
+| `SDN_NORTHBOUND_HOST` / `PORT` | `127.0.0.1` / `18080` | Bind address and port for HTTP Control API. |
+| `SDN_NORTHBOUND_TOKEN` | *(empty)* | Optional shared bearer/header token (`X-SDN-Token` or `Authorization: Bearer`). |
+| `SDN_NORTHBOUND_SYNC_WAIT_MS` | `250` | Default sync wait window; **set `0` or pass `?async=1`** for `< 11 ms` `202 Accepted`. |
+| `SDN_IDEMPOTENCY_DB_PATH` | *(empty)* | Path to SQLite WAL file for durable `AC-S08` idempotency across restarts. |
+| `SDN_DATA_OUTBOX_DIR` / `SDN_OUTBOX_PATH` | *(empty)* | Durable JSONL outbox directory/file for `DataEventPublisher`. |
+| `SDN_DATA_ENDPOINT_URL` | *(empty)* | Base URL of Data's HTTP ingestion service (optional; buffers durably if unreachable). |
+
+### Exact `curl` & JSON Examples (Async Apply & Polling)
+
+```bash
+TOKEN="sdn-secret-token"
+BASE="http://127.0.0.1:18080"
+
+# 1. GET /health
+curl -s -H "X-SDN-Token: $TOKEN" "$BASE/health"
+
+# 2. GET /routing-state
+curl -s -H "X-SDN-Token: $TOKEN" "$BASE/routing-state?run_id=s0_live_run"
+
+# 3. GET /routing-history
+curl -s -H "X-SDN-Token: $TOKEN" "$BASE/routing-history?run_id=s0_live_run&flow_group_id=0x103"
+
+# 4. POST /demand-releases (single event or {"events": [...]}; server stamps available_at_utc)
+curl -s -X POST -H "X-SDN-Token: $TOKEN" -H "Content-Type: application/json" \
+  "$BASE/demand-releases" \
+  -d '{
+    "event_id": "network:s0_live_run:demand:0x103:0",
+    "run_id": "s0_live_run",
+    "flow_group_id": "0x103",
+    "bin_index": 0,
+    "window_start_utc": "2026-11-21T17:30:38Z",
+    "window_end_utc": "2026-11-21T17:30:39Z",
+    "requested_mbps": 2.5,
+    "released_at_utc": "2026-11-21T17:30:39Z"
+  }'
+
+# 5. POST /snapshots (explicit origin_refs; immutable causal Snapshot)
+curl -s -X POST -H "X-SDN-Token: $TOKEN" -H "Content-Type: application/json" \
+  "$BASE/snapshots" \
+  -d '{
+    "run_id": "s0_live_run",
+    "cutoff": 1,
+    "lookback_L": 1,
+    "origin_refs": {
+      "run_started_at_utc": "2026-11-21T17:29:38Z",
+      "traffic_started_at_utc": "2026-11-21T17:29:38Z",
+      "measurement_started_at_utc": "2026-11-21T17:30:38Z",
+      "delta_s": 1
+    }
+  }'
+
+# 6. POST /apply?async=1 (RECOMMENDED: returns 202 ACCEPTED in < 11 ms; never blocks caller 450 ms timeout)
+curl -i -s -X POST -H "X-SDN-Token: $TOKEN" -H "Content-Type: application/json" \
+  "$BASE/apply?async=1" \
+  -d '{
+    "run_id": "s0_live_run",
+    "decision_batch_id": "batch_001",
+    "snapshot_id": "snap:s0_live_run:t1:L1:v2",
+    "expected_state_version": 2,
+    "config_version": "1.0",
+    "forecast_start": "2026-11-21T17:30:39Z",
+    "forecast_end": "2026-11-21T17:30:41Z",
+    "apply_deadline_utc": "2026-11-21T17:30:40Z",
+    "changes": [{"flow_group_id": "0x103", "old_path_id": "0x103_P1", "new_path_id": "0x103_P2"}],
+    "topology_version": "1.0",
+    "topology_hash": "2fa43f873e8530d934661d455fad946cd28d4d77b8f0f87b0b0cb4aa4594d0dc",
+    "snapshot_as_of_utc": "2026-11-21T17:30:39.500000Z",
+    "history_cutoff_utc": "2026-11-21T17:30:39Z"
+  }'
+
+# 7. GET /apply-status (poll every 40 ms until job_state == "FINALIZED"; includes timing breakdown)
+curl -s -H "X-SDN-Token: $TOKEN" "$BASE/apply-status?run_id=s0_live_run&decision_batch_id=batch_001"
+```
+
+### Performance Budgets, Limitations & Error Handling (`Phase 12.2/12.3`)
+
+- **Measured Live Performance (Ubuntu 22.04 + OS-Ken 2.8.1 + OVS 2.17.12, `B=1, 2, 4`):**
+  - `POST /apply?async=1` HTTP acceptance: **P50 = `6.13 ms`**, **Max = `10.71 ms`** (`100%` within `450 ms` caller HTTP timeout).
+  - OpenFlow 2-phase install (`B=2..4`): **`21.9–66.6 ms`**; `B=4` `FlowStats` count: **`5`** (1 per unique switch).
+  - End-to-end apply + real 3-hop counter verification: **P50 = `267.87 ms`**, **P95 = `683.37 ms`**, **Max = `721.09 ms`** (`100% <= 1000 ms`, `61.5% <= 400 ms`).
+- **Documented Technical Limitations:**
+  1. **OVS Kernel Revalidator Floor (~500 ms):** Open vSwitch flushes kernel megaflow counters to userspace on a ~500 ms revalidator cycle. Recommended caller budgets: **`<= 50 ms` HTTP accept timeout** (`async=1`) and **`800–1000 ms` `apply_deadline_utc`** for real counter verification.
+  2. **Silent-Flow Fail-Closed Policy (`AC-S03` / `AC-S04`):** Because no synthetic probe host/IP is allocated in `configs/network/topology_bundle.json`, rerouting a flow with **zero active traffic** will NOT fake `APPLIED` and will fail-closed (`INCONSISTENT` / `UNKNOWN` + `reconcile_required=True`). Optimization should only reroute flows with active demand (`b_f > 0`).
+  3. **Finite Rollback Timeout:** Rollback verification clears any expired primary deadline and runs with its own finite bounded timeout (`SDN_COUNTER_VERIFY_TIMEOUT_S = 1.2 s`), never hanging indefinitely.
+- **Error Handling Summary:**
+  - Pre-write rejects (`rule_count=0`, `state_version` unchanged): `VERSION_MISMATCH`, `HOLD_DOWN_ACTIVE`, `BUSY`, `BATCH_ID_CONFLICT`, `DEADLINE_EXPIRED`, `RECONCILIATION_REQUIRED`, `STALE_SNAPSHOT`, `INVALID_REQUEST`.
+  - Post-write failures: `ROLLED_BACK` (verified return to `old_path_id`, `reconcile_required=False`), `PARTIAL` / `INCONSISTENT` (`reconcile_required=True` until switch reconciliation completes), `deadline_missed=True` when verification finishes after `forecast_end`/`apply_deadline_utc`.

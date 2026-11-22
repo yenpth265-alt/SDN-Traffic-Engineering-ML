@@ -69,9 +69,46 @@ class TestOptimizationSDNContract(unittest.TestCase):
             if expired
             else (now_dt + timedelta(seconds=4)).isoformat().replace("+00:00", "Z")
         )
+
+        # Chọn liên kết lõi có nhiều luồng rẽ nhánh từ P1 sang P2 (không kẹt cổ chai chung)
+        target_link = self.topology["E"][0]
+        reroutable_flows: list[str] = []
+        for e in self.topology["E"]:
+            fgs_on_e = [
+                fg
+                for fg in self.topology["F"]
+                if len(self.topology["P"][fg]) >= 2
+                and self.topology["a_fpe"][fg][self.topology["P"][fg][0]][e] == 1
+                and self.topology["a_fpe"][fg][self.topology["P"][fg][1]][e] == 0
+            ]
+            if len(fgs_on_e) > len(reroutable_flows):
+                target_link = e
+                reroutable_flows = fgs_on_e
+
+        # Chọn tối đa 2 luồng khác nguồn cùng đi qua target_link trên P1 để chia tải sang P2
+        selected_list: list[str] = []
+        used_p1_links: set[str] = {target_link}
+        for fg in reroutable_flows:
+            p1 = self.topology["P"][fg][0]
+            other_links = {
+                lk for lk in self.topology["E"] if lk != target_link and self.topology["a_fpe"][fg][p1][lk] == 1
+            }
+            if not (other_links & used_p1_links):
+                selected_list.append(fg)
+                used_p1_links |= other_links
+            if len(selected_list) == 2:
+                break
+
+        if not selected_list:
+            selected_list = reroutable_flows[:2]
+
+        selected = set(selected_list)
+        cap_target = float(self.topology.get("C", {}).get(target_link, 100.0))
+        high_mbps = (0.96 * cap_target) / max(1, len(selected))
+
         preds = {}
-        for idx, fg in enumerate(self.topology["F"]):
-            mbps = 22.0 if (congested and idx < 6) else 0.5
+        for fg in self.topology["F"]:
+            mbps = high_mbps if (congested and fg in selected) else 0.05
             preds[fg] = {"predicted_mbps_array": [mbps, mbps, mbps]}
 
         return {

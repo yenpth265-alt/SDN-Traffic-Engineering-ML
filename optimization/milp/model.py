@@ -1,5 +1,30 @@
+import inspect
 import pulp
 from .objective import set_objective
+
+
+def _create_var(prob, name, low_bound=None, up_bound=None, cat="Continuous"):
+    """Tạo biến tối ưu tương thích cả PuLP 4.x (prob.add_variable) và PuLP 2.x/3.x (LpVariable)."""
+    if hasattr(prob, "add_variable"):
+        sig = inspect.signature(prob.add_variable).parameters
+        kwargs = {}
+        if low_bound is not None:
+            if "lowBound" in sig:
+                kwargs["lowBound"] = low_bound
+            elif "low_bound" in sig:
+                kwargs["low_bound"] = low_bound
+        if up_bound is not None:
+            if "upBound" in sig:
+                kwargs["upBound"] = up_bound
+            elif "up_bound" in sig:
+                kwargs["up_bound"] = up_bound
+        if "cat" in sig:
+            kwargs["cat"] = cat
+        elif "category" in sig:
+            kwargs["category"] = cat
+        return prob.add_variable(name, **kwargs)
+
+    return pulp.LpVariable(name, lowBound=low_bound, upBound=up_bound, cat=cat)
 
 
 def build_milp(topology, b_f, locked_groups, routing_state, config):
@@ -17,10 +42,10 @@ def build_milp(topology, b_f, locked_groups, routing_state, config):
     for f in F:
         x[f] = {}
         for p in P[f]:
-            x[f][p] = pulp.LpVariable(f"x_{f}_{p}", cat="Binary")
+            x[f][p] = _create_var(prob, f"x_{f}_{p}", cat="Binary")
 
-    y = pulp.LpVariable.dicts("y", F, cat="Binary")
-    U = pulp.LpVariable("U", lowBound=0, cat="Continuous")
+    y = {f: _create_var(prob, f"y_{f}", cat="Binary") for f in F}
+    U = _create_var(prob, "U", low_bound=0, cat="Continuous")
 
     set_objective(prob, U, y, F, float(config.get("lambda_weight", 0.01)))
 

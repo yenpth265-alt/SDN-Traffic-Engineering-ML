@@ -27,11 +27,12 @@
 - [x] Live negative & fault-injection suite (replay, conflict, hold-down, stale, version mismatch, expired deadline, Barrier timeout rollback, missing rule reconcile, switch disconnect during apply reconcile) — `PASS_DYNAMIC_ROUTING_LIVE`.
 - [x] Live 3-cycle stability (`6` consecutive transitions under `ping` 20/50 pps + `iperf3` TCP `8.27/7.12 Mbps` 0 retransmits + `iperf3` UDP `5 Mbps` 0% loss, constant `1` thread, `0` exceptions, clean `mn -c` teardown) — `PASS_LIVE_OVS`.
 
-## 3. Cross-Role Integration Gate (Pending Team Sign-Off)
-- [ ] Team approves unified config conflict resolution (`topology_version="1.0"`, `topology_hash` in `RunManifest`, real SHA-256 `config_hash`, `warmup_seconds=60` in `config.yaml`, ARP mode lock).
-- [ ] Team locks `MUST-LOCK #1` (`REQ-03` `released_demand_to_sdn` channel + `available_at_utc` + retry/ack).
-- [ ] Team locks `MUST-LOCK #2` (`IF09`/`IF10` transport + `forecast/milp/apply` timeout budgets).
-- [ ] Team locks `MUST-LOCK #3` (durable `BatchIdempotencyStoreProtocol` backend).
-- [ ] Team lands `data/`, `optimization/`, `integration/` implementations on `origin` and merges `origin/feat-ml`.
-- [ ] SDN implements the 3 minimal adapters designed in [SDN_INTEGRATION_GATE_REPORT.md](SDN_INTEGRATION_GATE_REPORT.md) (Northbound API, SQLite Idempotency Store, Data Event Publisher).
+## 3. Final Hardening & Cross-Role Integration Gate
+- [x] SDN implemented all 4 production adapters (`http_control_api.py`, `sqlite_idempotency_store.py`, `sqlite_demand_ledger.py`, `data_event_publisher.py` with supervised auto-flush worker).
+- [x] Separated `/health` readiness gates (`process_liveness`, `sdn_readiness`, `data_delivery_readiness`, `sdn_integration_readiness`, and honest `full_system_readiness.ready=False` until external roles & `TC-I01` are verified).
+- [x] `136/136` regression & hardening tests PASS on Windows (`61.06s`) and Ubuntu (`73.89s`) + live OS-Ken/Mininet/OVS hardening smoke (`PASS_LIVE_OVS` / `PASS_ADAPTER_TEST` for mock Data receiver).
+- [ ] Team approves unified config conflict resolution (`topology_version="1.0"`, `topology_hash` in `RunManifest`, ARP mode lock).
+- [ ] Team locks `MUST-LOCK #1` (`sender.py` POST to `/demand-releases` + retry/ack).
+- [ ] Team locks `MUST-LOCK #2` (realistic apply deadline budget `800–1000 ms` + `async=1` caller timeout `<= 50 ms`).
+- [ ] Team lands `data/` HTTP receiver + DB, `optimization/` online tick, `integration/` runner on `origin`, and merges `origin/feat-ml`.
 - [ ] Team executes live closed-loop `TC-I01` on Ubuntu and collects raw provenance evidence.

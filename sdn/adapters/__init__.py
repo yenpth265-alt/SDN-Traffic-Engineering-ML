@@ -27,6 +27,12 @@ from sdn.adapters.http_control_api import (
     NorthboundAPIConfig,
     SDNNorthboundHTTPApp,
 )
+from sdn.adapters.sqlite_demand_ledger import (
+    DemandPersistenceError,
+    PersistedDemandEntry,
+    SQLiteDemandReleaseLedger,
+    compute_demand_payload_fingerprint,
+)
 from sdn.adapters.sqlite_idempotency_store import (
     IdempotencyConflictError,
     SQLiteBatchIdempotencyStore,
@@ -38,11 +44,15 @@ __all__ = [
     "DataEventPublisher",
     "DataPublisherConfig",
     "DeliveryStatus",
+    "DemandPersistenceError",
     "HTTPDemandReleaseProvider",
     "IdempotencyConflictError",
     "NorthboundAPIConfig",
     "OutboxEventRecord",
+    "PersistedDemandEntry",
     "PublishResult",
     "SDNNorthboundHTTPApp",
     "SQLiteBatchIdempotencyStore",
+    "SQLiteDemandReleaseLedger",
+    "compute_demand_payload_fingerprint",
 ]

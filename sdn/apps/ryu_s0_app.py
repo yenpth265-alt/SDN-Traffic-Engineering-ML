@@ -117,8 +117,14 @@ class S0AppConfig:
     northbound_auth_token: Optional[str] = None
     northbound_sync_wait_ms: int = 300
     idempotency_db_path: Optional[Path] = None
+    demand_db_path: Optional[Path] = None
+    demand_retention_bins: Optional[int] = 3600
     data_endpoint_url: Optional[str] = None
     data_outbox_dir: Optional[Path] = None
+    data_auto_flush: bool = True
+    data_flush_interval_s: float = 0.5
+    data_timeout_s: float = 0.5
+    data_max_retries: int = 3
 
     @classmethod
     def from_env(cls) -> "S0AppConfig":
@@ -136,6 +142,8 @@ class S0AppConfig:
             return raw.strip()
 
         idem_raw = _env_opt_str("SDN_IDEMPOTENCY_DB_PATH")
+        demand_db_raw = _env_opt_str("SDN_DEMAND_DB_PATH")
+        demand_ret_raw = _env_opt_str("SDN_DEMAND_RETENTION_BINS")
         outbox_raw = _env_opt_str("SDN_DATA_OUTBOX_DIR")
 
         return cls(
@@ -161,8 +169,14 @@ class S0AppConfig:
             northbound_auth_token=_env_opt_str("SDN_NORTHBOUND_TOKEN"),
             northbound_sync_wait_ms=int(os.environ.get("SDN_NORTHBOUND_SYNC_WAIT_MS", "300")),
             idempotency_db_path=Path(idem_raw) if idem_raw else None,
+            demand_db_path=Path(demand_db_raw) if demand_db_raw else None,
+            demand_retention_bins=int(demand_ret_raw) if demand_ret_raw else 3600,
             data_endpoint_url=_env_opt_str("SDN_DATA_ENDPOINT_URL"),
             data_outbox_dir=Path(outbox_raw) if outbox_raw else None,
+            data_auto_flush=_env_bool("SDN_DATA_AUTO_FLUSH", True),
+            data_flush_interval_s=float(os.environ.get("SDN_DATA_FLUSH_INTERVAL_S", "0.5")),
+            data_timeout_s=float(os.environ.get("SDN_DATA_TIMEOUT_S", "0.5")),
+            data_max_retries=int(os.environ.get("SDN_DATA_MAX_RETRIES", "3")),
         )
 
 
@@ -252,10 +266,12 @@ class S0ControllerOrchestrator:
             idempotency_store=self._idempotency_store,
         )
         self._demand_provider = None
+        self._demand_ledger = None
         self._snapshot_creator = None
         self._data_publisher = None
         if (
             self._config.northbound_enable
+            or self._config.demand_db_path is not None
             or self._config.data_endpoint_url is not None
             or self._config.data_outbox_dir is not None
         ):
@@ -264,9 +280,15 @@ class S0ControllerOrchestrator:
                 DataPublisherConfig,
             )
             from sdn.adapters.http_control_api import HTTPDemandReleaseProvider
+            from sdn.adapters.sqlite_demand_ledger import SQLiteDemandReleaseLedger
             from sdn.monitoring.snapshot_creator import SnapshotCreator
 
-            self._demand_provider = HTTPDemandReleaseProvider()
+            if self._config.demand_db_path is not None:
+                self._demand_ledger = SQLiteDemandReleaseLedger(
+                    self._config.demand_db_path,
+                    retention_bins=self._config.demand_retention_bins,
+                )
+            self._demand_provider = HTTPDemandReleaseProvider(ledger=self._demand_ledger)
             self._snapshot_creator = SnapshotCreator(
                 self._topology,
                 self._state_manager,
@@ -285,7 +307,11 @@ class S0ControllerOrchestrator:
                     DataPublisherConfig(
                         endpoint_base_url=self._config.data_endpoint_url,
                         outbox_dir=self._config.data_outbox_dir,
+                        timeout_s=self._config.data_timeout_s,
+                        max_retries=self._config.data_max_retries,
                         auth_token=self._config.northbound_auth_token,
+                        auto_flush=False,
+                        flush_interval_s=self._config.data_flush_interval_s,
                     )
                 )
 
@@ -321,6 +347,26 @@ class S0ControllerOrchestrator:
     @property
     def data_publisher(self) -> Any:
         return self._data_publisher
+
+    @property
+    def demand_provider(self) -> Any:
+        return self._demand_provider
+
+    def start_background_workers(
+        self, *, spawn_fn: Optional[Callable[[Callable[[], None]], Any]] = None
+    ) -> None:
+        """Start supervised background integration workers (e.g. Data outbox dispatcher)."""
+        if self._data_publisher is not None and self._config.data_auto_flush:
+            self._data_publisher.start_worker(spawn_fn=spawn_fn)
+
+    def stop_background_workers(self) -> None:
+        """Gracefully stop background workers and close local SQLite ledgers."""
+        if self._data_publisher is not None:
+            self._data_publisher.stop_worker()
+        if self._demand_provider is not None and hasattr(self._demand_provider, "close"):
+            self._demand_provider.close()
+        if self._idempotency_store is not None and hasattr(self._idempotency_store, "close"):
+            self._idempotency_store.close()
 
     def build_northbound_http_app(self) -> Any:
         """Build the `SDNNorthboundHTTPApp` WSGI callable wired to this orchestrator."""
@@ -1342,6 +1388,13 @@ if _set_ev_cls is not None and _ofp_event is not None:
             if self.orchestrator._config.northbound_enable:
                 self.northbound_app = self.orchestrator.build_northbound_http_app()
                 self._northbound_thread = _hub.spawn(self._serve_northbound_http)
+            self.orchestrator.start_background_workers(spawn_fn=_hub.spawn)
+
+        def close(self) -> None:
+            self.orchestrator.stop_background_workers()
+            close_super = getattr(super(), "close", None)
+            if callable(close_super):
+                close_super()
 
         def _serve_northbound_http(self) -> None:
             import eventlet  # type: ignore[import-not-found]

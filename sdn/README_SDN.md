@@ -78,7 +78,7 @@ sdn/
 
 All unit, contract, serialization, and end-to-end mock integration tests run in pure Python on Windows using the repository's `.venv`:
 
-### 3.1 Run the Full Test Suite (`130` Tests)
+### 3.1 Run the Full Test Suite (`136` Tests)
 ```powershell
 .\.venv\bin\python.exe -m pytest -v -p no:cacheprovider sdn/tests/
 ```
@@ -181,8 +181,12 @@ SDN_NORTHBOUND_PORT=18080 \
 SDN_NORTHBOUND_TOKEN=sdn-secret-token \
 SDN_NORTHBOUND_SYNC_WAIT_MS=0 \
 SDN_IDEMPOTENCY_DB_PATH=/var/tmp/sdn_idempotency.sqlite3 \
+SDN_DEMAND_DB_PATH=/var/tmp/sdn_demand_ledger.sqlite3 \
+SDN_DEMAND_RETENTION_BINS=3600 \
 SDN_DATA_OUTBOX_DIR=/var/tmp/sdn_data_outbox \
 SDN_DATA_ENDPOINT_URL=http://127.0.0.1:19090 \
+SDN_DATA_AUTO_FLUSH=1 \
+SDN_DATA_FLUSH_INTERVAL_S=0.5 \
 PYTHONPATH=. .venv_ubuntu/bin/osken-manager \
   --ofp-tcp-listen-port 6633 sdn/apps/ryu_s0_app.py
 ```
@@ -202,10 +206,23 @@ PYTHONPATH=. .venv_ubuntu/bin/osken-manager \
 | `SDN_NORTHBOUND_ENABLE` | `0` | Enable Northbound WSGI HTTP server (`1` to enable). |
 | `SDN_NORTHBOUND_HOST` / `PORT` | `127.0.0.1` / `18080` | Bind address and port for HTTP Control API. |
 | `SDN_NORTHBOUND_TOKEN` | *(empty)* | Optional shared bearer/header token (`X-SDN-Token` or `Authorization: Bearer`). |
-| `SDN_NORTHBOUND_SYNC_WAIT_MS` | `250` | Default sync wait window; **set `0` or pass `?async=1`** for `< 11 ms` `202 Accepted`. |
+| `SDN_NORTHBOUND_SYNC_WAIT_MS` | `300` | Default sync wait window; **set `0` or pass `?async=1`** for `< 11 ms` `202 Accepted`. |
 | `SDN_IDEMPOTENCY_DB_PATH` | *(empty)* | Path to SQLite WAL file for durable `AC-S08` idempotency across restarts. |
-| `SDN_DATA_OUTBOX_DIR` / `SDN_OUTBOX_PATH` | *(empty)* | Durable JSONL outbox directory/file for `DataEventPublisher`. |
+| `SDN_DEMAND_DB_PATH` | *(empty)* | Path to SQLite WAL `DemandRelease` ledger (persists before ACK; restores causal history & original `available_at_utc` across restarts; returns `503 DEMAND_PERSISTENCE_FAILED` on DB failure). |
+| `SDN_DEMAND_RETENTION_BINS` | `3600` | Retention window in bins for `SQLiteDemandReleaseLedger` (always `>= lookback_L`). |
+| `SDN_DATA_OUTBOX_DIR` | *(empty)* | Durable JSONL outbox directory for `DataEventPublisher`. |
 | `SDN_DATA_ENDPOINT_URL` | *(empty)* | Base URL of Data's HTTP ingestion service (optional; buffers durably if unreachable). |
+| `SDN_DATA_AUTO_FLUSH` | `1` | Start supervised eventlet-safe background outbox worker automatically in `RyuS0App`. |
+| `SDN_DATA_FLUSH_INTERVAL_S` | `0.5` | Background outbox flush polling interval (seconds). |
+| `SDN_DATA_TIMEOUT_S` / `MAX_RETRIES` | `0.5` / `3` | Bounded HTTP timeout & retry count per outbox event delivery attempt. |
+
+### Deployment Readiness Gates (`GET /health`)
+`GET /health` explicitly separates five independent gates:
+- **`process_liveness`**: HTTP process alive & Northbound API enabled.
+- **`sdn_readiness`**: `6/6` switches connected, `48/48` P1 flows `VERIFIED`, `reconcile_required == False`, durable DemandRelease ledger healthy (does **not** require a live Data receiver so S0/SDN Core can be tested standalone).
+- **`data_delivery_readiness`**: Data endpoint configured, supervised outbox worker running, zero delivery-error backlog, `delivered_count`, `pending_delivery_count`, `last_successful_delivery_utc`, `last_error`.
+- **`sdn_integration_readiness`**: True when `sdn_readiness`, `data_delivery_readiness`, durable SQLite idempotency, and durable SQLite DemandRelease ledger are all healthy (`blockers == []`).
+- **`full_system_readiness`**: Always `ready == False` (`tc_i01_verified == False`, blocker `EXTERNAL_ROLES_NOT_VERIFIED_BY_SDN_HEALTH`) from SDN `/health` alone, because SDN cannot observe Network sender, real Data DB, ML online worker, Optimization loop, or closed-loop `TC-I01`.
 
 ### Exact `curl` & JSON Examples (Async Apply & Polling)
 

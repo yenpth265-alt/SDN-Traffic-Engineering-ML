@@ -147,13 +147,28 @@ def _default_http_sender(
         return int(exc.code), err_body
 
 
+def _spawn_background_worker(fn: Callable[[], None]) -> Any:
+    try:
+        import eventlet  # type: ignore[import-not-found]
+        import eventlet.patcher  # type: ignore[import-not-found]
+
+        if eventlet.patcher.is_monkey_patched("socket") or eventlet.patcher.is_monkey_patched("time"):
+            return eventlet.spawn(fn)
+    except Exception:
+        pass
+    t = threading.Thread(target=fn, daemon=True)
+    t.start()
+    return t
+
+
 class DataEventPublisher:
     """
-    Durable outbox + HTTP publisher for SDN -> Data events (`Phase 12`, Task 5).
+    Durable outbox + HTTP publisher for SDN -> Data events (`Phase 12`, Task 5; hardened `Phase 12.4`).
 
     If `endpoint_base_url` is `None` or unreachable, events are durably persisted to
     `outbox_events.jsonl` with `status == DeliveryStatus.PENDING_DELIVERY` and can be
-    replayed automatically via `flush_pending()` once the Data receiver comes online.
+    replayed automatically by the supervised background outbox worker (`start_worker()` /
+    `auto_flush=True`) or manually via `flush_pending()` once the Data receiver comes online.
     """
 
     def __init__(
@@ -162,15 +177,24 @@ class DataEventPublisher:
         *,
         sender_fn: Optional[SenderFn] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
+        spawn_fn: Optional[Callable[[Callable[[], None]], Any]] = None,
     ) -> None:
         self._config = config or DataPublisherConfig()
         self._sender_fn: SenderFn = sender_fn or _default_http_sender
         self._sleep_fn: Callable[[float], None] = sleep_fn or _cooperative_sleep
+        self._spawn_fn: Callable[[Callable[[], None]], Any] = spawn_fn or _spawn_background_worker
         self._lock = threading.RLock()
         self._records: dict[str, OutboxEventRecord] = {}
         self._order: list[str] = []
+        self._in_flight_keys: set[str] = set()
         self._outbox_file: Optional[Path] = None
         self._acked_file: Optional[Path] = None
+        self._stop_event = threading.Event()
+        self._worker_running: bool = False
+        self._worker_handle: Any = None
+        self._flush_cycles: int = 0
+        self._last_successful_delivery_utc: Optional[str] = None
+        self._last_error: Optional[str] = None
 
         if self._config.outbox_dir is not None:
             out_dir = Path(self._config.outbox_dir)
@@ -178,6 +202,81 @@ class DataEventPublisher:
             self._outbox_file = out_dir / "outbox_events.jsonl"
             self._acked_file = out_dir / "outbox_acked.jsonl"
             self._load_durable_outbox()
+
+        if self._config.auto_flush:
+            self.start_worker()
+
+    @property
+    def worker_running(self) -> bool:
+        with self._lock:
+            return self._worker_running
+
+    def start_worker(
+        self,
+        *,
+        spawn_fn: Optional[Callable[[Callable[[], None]], Any]] = None,
+    ) -> bool:
+        """
+        Start the supervised, non-blocking background outbox dispatcher.
+        Idempotent: returns `False` if the worker is already running.
+        """
+        with self._lock:
+            if self._worker_running:
+                return False
+            self._stop_event.clear()
+            self._worker_running = True
+            spawner = spawn_fn or self._spawn_fn
+            self._worker_handle = spawner(self._run_worker_loop)
+            return True
+
+    def stop_worker(self, timeout_s: float = 2.0) -> None:
+        """Gracefully stop the background outbox dispatcher and wait up to `timeout_s`."""
+        with self._lock:
+            self._stop_event.set()
+            handle = self._worker_handle
+        if handle is not None:
+            join_fn = getattr(handle, "join", None)
+            if callable(join_fn):
+                try:
+                    join_fn(timeout=timeout_s)
+                except TypeError:
+                    try:
+                        join_fn()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            wait_fn = getattr(handle, "wait", None)
+            if callable(wait_fn) and not callable(join_fn):
+                try:
+                    wait_fn()
+                except Exception:
+                    pass
+        with self._lock:
+            self._worker_running = False
+            self._worker_handle = None
+
+    def _run_worker_loop(self) -> None:
+        interval_s = max(0.02, float(self._config.flush_interval_s))
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self.flush_pending()
+                except Exception as exc:
+                    with self._lock:
+                        self._last_error = f"WORKER_LOOP_ERROR: {type(exc).__name__}: {exc}"
+                with self._lock:
+                    self._flush_cycles += 1
+                # Sleep in small cooperative slices so graceful shutdown is responsive
+                slept = 0.0
+                slice_s = min(0.05, interval_s)
+                while slept < interval_s and not self._stop_event.is_set():
+                    step = min(slice_s, interval_s - slept)
+                    self._sleep_fn(step)
+                    slept += step
+        finally:
+            with self._lock:
+                self._worker_running = False
 
     @property
     def config(self) -> DataPublisherConfig:
@@ -223,6 +322,12 @@ class DataEventPublisher:
                     )
                     self._records[dk] = evt
                     self._order.append(dk)
+                    if evt.acked_at_utc is not None:
+                        if (
+                            self._last_successful_delivery_utc is None
+                            or evt.acked_at_utc > self._last_successful_delivery_utc
+                        ):
+                            self._last_successful_delivery_utc = evt.acked_at_utc
                 except Exception:
                     continue
 
@@ -389,6 +494,9 @@ class DataEventPublisher:
             rec = self._records[dedup_key]
             if rec.status == DeliveryStatus.DELIVERED:
                 return rec
+            if dedup_key in self._in_flight_keys:
+                # Another worker/caller is already delivering this logical event; never double-send.
+                return rec
             base_url = self._config.endpoint_base_url
             if not base_url:
                 updated = OutboxEventRecord(
@@ -403,7 +511,9 @@ class DataEventPublisher:
                     last_error="DATA_ENDPOINT_NOT_CONFIGURED",
                 )
                 self._records[dedup_key] = updated
+                self._last_error = "DATA_ENDPOINT_NOT_CONFIGURED"
                 return updated
+            self._in_flight_keys.add(dedup_key)
 
         url = base_url.rstrip("/") + rec.endpoint_path
         headers = {
@@ -417,60 +527,67 @@ class DataEventPublisher:
         attempts = rec.attempts
         last_err: Optional[str] = None
         max_tries = max(1, int(self._config.max_retries))
-        for try_idx in range(max_tries):
-            attempts += 1
-            try:
-                status_code, body_text = self._sender_fn(
-                    url, rec.payload, headers, self._config.timeout_s
-                )
-                if 200 <= status_code < 300:
-                    acked_at = _utc_now_rfc3339()
-                    delivered = OutboxEventRecord(
-                        dedup_key=rec.dedup_key,
-                        event_type=rec.event_type,
-                        endpoint_path=rec.endpoint_path,
-                        run_id=rec.run_id,
-                        enqueued_at_utc=rec.enqueued_at_utc,
-                        payload=rec.payload,
-                        status=DeliveryStatus.DELIVERED,
-                        attempts=attempts,
-                        last_error=None,
-                        acked_at_utc=acked_at,
-                        ack_http_status=status_code,
+        try:
+            for try_idx in range(max_tries):
+                attempts += 1
+                try:
+                    status_code, body_text = self._sender_fn(
+                        url, rec.payload, headers, self._config.timeout_s
                     )
-                    with self._lock:
-                        self._records[dedup_key] = delivered
-                        self._append_jsonl(
-                            self._acked_file,
-                            {
-                                "dedup_key": dedup_key,
-                                "acked_at_utc": acked_at,
-                                "ack_http_status": status_code,
-                                "attempts": attempts,
-                            },
+                    if 200 <= status_code < 300:
+                        acked_at = _utc_now_rfc3339()
+                        delivered = OutboxEventRecord(
+                            dedup_key=rec.dedup_key,
+                            event_type=rec.event_type,
+                            endpoint_path=rec.endpoint_path,
+                            run_id=rec.run_id,
+                            enqueued_at_utc=rec.enqueued_at_utc,
+                            payload=rec.payload,
+                            status=DeliveryStatus.DELIVERED,
+                            attempts=attempts,
+                            last_error=None,
+                            acked_at_utc=acked_at,
+                            ack_http_status=status_code,
                         )
-                    return delivered
-                last_err = f"HTTP_{status_code}: {body_text[:160]}"
-            except Exception as exc:
-                last_err = f"{type(exc).__name__}: {exc}"
+                        with self._lock:
+                            self._records[dedup_key] = delivered
+                            self._last_successful_delivery_utc = acked_at
+                            self._last_error = None
+                            self._append_jsonl(
+                                self._acked_file,
+                                {
+                                    "dedup_key": dedup_key,
+                                    "acked_at_utc": acked_at,
+                                    "ack_http_status": status_code,
+                                    "attempts": attempts,
+                                },
+                            )
+                        return delivered
+                    last_err = f"HTTP_{status_code}: {body_text[:160]}"
+                except Exception as exc:
+                    last_err = f"{type(exc).__name__}: {exc}"
 
-            if try_idx + 1 < max_tries:
-                self._sleep_fn(self._config.backoff_base_s * (2**try_idx))
+                if try_idx + 1 < max_tries and not self._stop_event.is_set():
+                    self._sleep_fn(self._config.backoff_base_s * (2**try_idx))
 
-        still_pending = OutboxEventRecord(
-            dedup_key=rec.dedup_key,
-            event_type=rec.event_type,
-            endpoint_path=rec.endpoint_path,
-            run_id=rec.run_id,
-            enqueued_at_utc=rec.enqueued_at_utc,
-            payload=rec.payload,
-            status=DeliveryStatus.PENDING_DELIVERY,
-            attempts=attempts,
-            last_error=last_err,
-        )
-        with self._lock:
-            self._records[dedup_key] = still_pending
-        return still_pending
+            still_pending = OutboxEventRecord(
+                dedup_key=rec.dedup_key,
+                event_type=rec.event_type,
+                endpoint_path=rec.endpoint_path,
+                run_id=rec.run_id,
+                enqueued_at_utc=rec.enqueued_at_utc,
+                payload=rec.payload,
+                status=DeliveryStatus.PENDING_DELIVERY,
+                attempts=attempts,
+                last_error=last_err,
+            )
+            with self._lock:
+                self._records[dedup_key] = still_pending
+                self._last_error = last_err
+            return still_pending
+        finally:
+            with self._lock:
+                self._in_flight_keys.discard(dedup_key)
 
     def flush_pending(self) -> dict[str, int]:
         """Attempt bounded delivery for all `PENDING_DELIVERY` outbox records."""
@@ -515,7 +632,14 @@ class DataEventPublisher:
             return {
                 "endpoint_base_url": self._config.endpoint_base_url,
                 "outbox_dir": str(self._config.outbox_dir) if self._config.outbox_dir else None,
+                "auto_flush": bool(self._config.auto_flush),
+                "flush_interval_s": float(self._config.flush_interval_s),
+                "worker_running": bool(self._worker_running),
+                "flush_cycles": int(self._flush_cycles),
+                "in_flight_count": len(self._in_flight_keys),
                 "total_events": len(self._records),
                 "delivered_count": delivered,
                 "pending_delivery_count": pending,
+                "last_successful_delivery_utc": self._last_successful_delivery_utc,
+                "last_error": self._last_error,
             }

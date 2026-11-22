@@ -34,6 +34,12 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, quote
 
 from sdn.adapters.data_event_publisher import DataEventPublisher
+from sdn.adapters.sqlite_demand_ledger import (
+    DemandPersistenceError,
+    PersistedDemandEntry,
+    SQLiteDemandReleaseLedger,
+    compute_demand_payload_fingerprint,
+)
 from sdn.controller.decision_handler import DecisionHandler
 from sdn.controller.state_manager import (
     StateManager,
@@ -121,38 +127,78 @@ class HTTPDemandReleaseProvider:
         }
     )
 
-    def __init__(self, *, origin_refs_lookup: Optional[Callable[[str], Optional[OriginRefs]]] = None) -> None:
+    def __init__(
+        self,
+        *,
+        origin_refs_lookup: Optional[Callable[[str], Optional[OriginRefs]]] = None,
+        ledger: Optional[SQLiteDemandReleaseLedger] = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._records_by_run: dict[str, list[DemandObservationRecord]] = {}
         self._by_event_id: dict[tuple[str, str], DemandObservationRecord] = {}
         self._by_bin_key: dict[tuple[str, str, int], DemandObservationRecord] = {}
+        self._fingerprints_by_event_id: dict[tuple[str, str], str] = {}
         self._origin_refs_lookup = origin_refs_lookup
+        self._ledger = ledger
+        if self._ledger is not None:
+            self._restore_from_ledger()
+
+    def _restore_from_ledger(self) -> None:
+        assert self._ledger is not None
+        entries = self._ledger.load_all()
+        with self._lock:
+            for entry in entries:
+                rec = entry.record
+                eid = rec.release_record_id or f"network:{rec.run_id}:demand:{rec.flow_group_id}:{rec.bin_index}"
+                if (rec.run_id, eid) in self._by_event_id:
+                    continue
+                self._records_by_run.setdefault(rec.run_id, []).append(rec)
+                self._by_event_id[(rec.run_id, eid)] = rec
+                self._by_bin_key[(rec.run_id, rec.flow_group_id, rec.bin_index)] = rec
+                self._fingerprints_by_event_id[(rec.run_id, eid)] = entry.payload_fingerprint
 
     @property
     def provider_name(self) -> str:
         return "HTTPDemandReleaseProvider"
 
     @property
+    def is_durable(self) -> bool:
+        return self._ledger is not None
+
+    @property
     def demand_channel_status(self) -> str:
+        if self._ledger is not None:
+            return "NORTHBOUND_HTTP_RELEASED_DEMAND_DURABLE_SQLITE_V1"
         return "NORTHBOUND_HTTP_RELEASED_DEMAND_V1"
+
+    def ledger_status(self) -> dict[str, Any]:
+        if self._ledger is not None:
+            return self._ledger.status_summary()
+        with self._lock:
+            total = sum(len(v) for v in self._records_by_run.values())
+        return {
+            "durable": False,
+            "healthy": True,
+            "db_path": None,
+            "retention_bins": None,
+            "persisted_count": total,
+            "last_error": None,
+        }
+
+    def close(self) -> None:
+        if self._ledger is not None:
+            self._ledger.close()
 
     def get_observations(self, run_id: str) -> tuple[DemandObservationRecord, ...]:
         with self._lock:
             return tuple(self._records_by_run.get(run_id, ()))
 
-    def ingest_release_payload(
+    def _parse_and_validate_payload(
         self,
         payload: Mapping[str, Any],
         *,
         server_receipt_utc: Optional[str] = None,
-    ) -> tuple[DemandObservationRecord, bool]:
-        """
-        Validate and store one `DemandRelease` JSON object.
-
-        Returns `(record, is_duplicate)`.
-        Raises `ContractSerializationError` / `ForbiddenDemandSourceError` on invalid input,
-        or `DemandReleaseConflictError` on conflicting duplicate delivery.
-        """
+    ) -> tuple[DemandObservationRecord, str]:
         if not isinstance(payload, Mapping):
             raise ContractSerializationError("DemandRelease payload must be a JSON object.")
 
@@ -233,42 +279,121 @@ class HTTPDemandReleaseProvider:
         else:
             event_id = f"network:{run_id}:demand:{flow_group_id}:{bin_index}"
 
-        with self._lock:
-            existing = self._by_event_id.get((run_id, event_id)) or self._by_bin_key.get(
-                (run_id, flow_group_id, bin_index)
-            )
-            if existing is not None:
-                same_val = (
-                    existing.requested_mbps is not None
-                    and abs(existing.requested_mbps - req_mbps) <= 1e-9
-                    and existing.window_start_utc == w_start
-                    and existing.window_end_utc == w_end
-                )
-                if not same_val:
-                    raise DemandReleaseConflictError(
-                        f"Conflicting duplicate DemandRelease for ({run_id}, {flow_group_id}, bin={bin_index}, "
-                        f"event_id={event_id}): existing={existing.requested_mbps} vs new={req_mbps}."
-                    )
-                return existing, True
+        rec = DemandObservationRecord(
+            run_id=run_id,
+            flow_group_id=flow_group_id,
+            bin_index=bin_index,
+            window_start_utc=w_start,
+            window_end_utc=w_end,
+            requested_mbps=req_mbps,
+            released_at_utc=rel_utc,
+            available_at_utc=avail_utc,
+            release_record_id=event_id,
+            source_kind=DemandSourceKind.RELEASED_DEMAND.value,
+            valid=True,
+            reason=None,
+        )
+        fp = compute_demand_payload_fingerprint(
+            run_id=run_id,
+            flow_group_id=flow_group_id,
+            bin_index=bin_index,
+            window_start_utc=w_start,
+            window_end_utc=w_end,
+            requested_mbps=req_mbps,
+            released_at_utc=rel_utc,
+        )
+        return rec, fp
 
-            rec = DemandObservationRecord(
-                run_id=run_id,
-                flow_group_id=flow_group_id,
-                bin_index=bin_index,
-                window_start_utc=w_start,
-                window_end_utc=w_end,
-                requested_mbps=req_mbps,
-                released_at_utc=rel_utc,
-                available_at_utc=avail_utc,
-                release_record_id=event_id,
-                source_kind=DemandSourceKind.RELEASED_DEMAND.value,
-                valid=True,
-                reason=None,
-            )
-            self._records_by_run.setdefault(run_id, []).append(rec)
-            self._by_event_id[(run_id, event_id)] = rec
-            self._by_bin_key[(run_id, flow_group_id, bin_index)] = rec
-            return rec, False
+    def _matches_existing(
+        self, existing: DemandObservationRecord, candidate: DemandObservationRecord
+    ) -> bool:
+        return (
+            existing.requested_mbps is not None
+            and candidate.requested_mbps is not None
+            and abs(existing.requested_mbps - candidate.requested_mbps) <= 1e-9
+            and existing.window_start_utc == candidate.window_start_utc
+            and existing.window_end_utc == candidate.window_end_utc
+            and existing.flow_group_id == candidate.flow_group_id
+            and existing.bin_index == candidate.bin_index
+        )
+
+    def ingest_release_batch(
+        self,
+        payloads: Sequence[Mapping[str, Any]],
+        *,
+        server_receipt_utc: Optional[str] = None,
+    ) -> list[tuple[DemandObservationRecord, bool]]:
+        """
+        Validate and durably persist a batch of `DemandRelease` JSON objects in a SINGLE
+        SQLite transaction (avoiding write amplification under 48 events/s).
+
+        Persists to SQLite BEFORE updating RAM or returning ACK; if persistence fails,
+        raises `DemandPersistenceError` and leaves RAM unchanged.
+        """
+        parsed = [
+            self._parse_and_validate_payload(item, server_receipt_utc=server_receipt_utc)
+            for item in payloads
+        ]
+        with self._lock:
+            results: list[tuple[DemandObservationRecord, bool]] = []
+            to_persist: list[PersistedDemandEntry] = []
+            staged_by_eid: dict[tuple[str, str], DemandObservationRecord] = {}
+            staged_by_bin: dict[tuple[str, str, int], DemandObservationRecord] = {}
+
+            for rec, fp in parsed:
+                eid = rec.release_record_id or f"network:{rec.run_id}:demand:{rec.flow_group_id}:{rec.bin_index}"
+                ekey = (rec.run_id, eid)
+                bkey = (rec.run_id, rec.flow_group_id, rec.bin_index)
+
+                existing = (
+                    self._by_event_id.get(ekey)
+                    or self._by_bin_key.get(bkey)
+                    or staged_by_eid.get(ekey)
+                    or staged_by_bin.get(bkey)
+                )
+                if existing is not None:
+                    if not self._matches_existing(existing, rec):
+                        raise DemandReleaseConflictError(
+                            f"Conflicting duplicate DemandRelease for ({rec.run_id}, {rec.flow_group_id}, "
+                            f"bin={rec.bin_index}, event_id={eid}): existing={existing.requested_mbps} "
+                            f"vs new={rec.requested_mbps}."
+                        )
+                    results.append((existing, True))
+                else:
+                    staged_by_eid[ekey] = rec
+                    staged_by_bin[bkey] = rec
+                    to_persist.append(PersistedDemandEntry(record=rec, payload_fingerprint=fp))
+                    results.append((rec, False))
+
+            # Durable write MUST succeed before mutating RAM or acknowledging caller!
+            if self._ledger is not None and to_persist:
+                self._ledger.persist_batch(to_persist)
+
+            for entry in to_persist:
+                rec = entry.record
+                eid = rec.release_record_id or f"network:{rec.run_id}:demand:{rec.flow_group_id}:{rec.bin_index}"
+                self._records_by_run.setdefault(rec.run_id, []).append(rec)
+                self._by_event_id[(rec.run_id, eid)] = rec
+                self._by_bin_key[(rec.run_id, rec.flow_group_id, rec.bin_index)] = rec
+                self._fingerprints_by_event_id[(rec.run_id, eid)] = entry.payload_fingerprint
+
+            return results
+
+    def ingest_release_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        server_receipt_utc: Optional[str] = None,
+    ) -> tuple[DemandObservationRecord, bool]:
+        """
+        Validate and durably store one `DemandRelease` JSON object.
+
+        Returns `(record, is_duplicate)`.
+        Raises `ContractSerializationError` / `ForbiddenDemandSourceError` on invalid input,
+        `DemandReleaseConflictError` on conflicting duplicate delivery, or
+        `DemandPersistenceError` if durable storage fails before ACK.
+        """
+        return self.ingest_release_batch([payload], server_receipt_utc=server_receipt_utc)[0]
 
 
 class ApplyJobState(str, Enum):
@@ -429,6 +554,12 @@ class SDNNorthboundHTTPApp:
                 "409 Conflict",
                 {"error": "DEMAND_RELEASE_CONFLICT", "message": str(exc)},
             )
+        except DemandPersistenceError as exc:
+            return self._json_response(
+                start_response,
+                "503 Service Unavailable",
+                {"ack": False, "error": "DEMAND_PERSISTENCE_FAILED", "message": str(exc)},
+            )
         except (StateManagerError, KeyError) as exc:
             return self._json_response(
                 start_response,
@@ -553,14 +684,26 @@ class SDNNorthboundHTTPApp:
     # ------------------------------------------------------------------
 
     def _handle_health(self, start_response: Callable[[str, list[tuple[str, str]]], Any]) -> list[bytes]:
+        dp_summary = self._data_publisher.status_summary() if self._data_publisher else None
+        demand_ledger = self._demand_provider.ledger_status()
+        idem_durable = bool(self._decision_handler.idempotency_store.is_durable)
+        topo = getattr(self._state_manager, "_topology", None)
+        topo_ver = getattr(topo, "topology_version", None) if topo is not None else None
+        topo_hash = getattr(topo, "topology_hash", None) if topo is not None else None
+        cfg_ver = getattr(self._decision_handler.config, "expected_config_version", None)
+
         base: dict[str, Any] = {
             "status": "ok",
             "run_id": self._config.default_run_id,
-            "idempotency_store_durable": self._decision_handler.idempotency_store.is_durable,
+            "idempotency_store_durable": idem_durable,
             "idempotency_store_status": self._decision_handler.idempotency_store.store_status,
             "demand_provider": self._demand_provider.provider_name,
             "demand_channel_status": self._demand_provider.demand_channel_status,
-            "data_publisher": self._data_publisher.status_summary() if self._data_publisher else None,
+            "demand_ledger": demand_ledger,
+            "data_publisher": dp_summary,
+            "topology_version": topo_ver,
+            "topology_hash": topo_hash,
+            "config_version": cfg_ver,
         }
         with self._jobs_lock:
             base["in_flight_jobs"] = dict(self._active_batch_by_run)
@@ -576,6 +719,119 @@ class SDNNorthboundHTTPApp:
                 base["state_version"] = None
                 base["reconcile_required"] = None
                 base["in_flight_batch_id"] = None
+
+        # Structured deployment readiness gates (Task C):
+        # Strictly separate process liveness, SDN readiness, Data delivery readiness, and full-system readiness.
+        connected_dpids = base.get("connected_dpids")
+        expected_sw_count = 6
+        if isinstance(connected_dpids, list):
+            switches_ok = len(connected_dpids) >= expected_sw_count
+        else:
+            switches_ok = base.get("state_version") is not None
+
+        readiness_state = base.get("readiness_state")
+        verified_cached = base.get("verified_cached")
+        reconcile_required = base.get("reconcile_required")
+        all_48_verified = (
+            (readiness_state == "VERIFIED" and (verified_cached is None or verified_cached >= 48))
+            if readiness_state is not None
+            else (base.get("state_version") is not None and reconcile_required is False)
+        )
+
+        sdn_blockers: list[str] = []
+        if not switches_ok:
+            sdn_blockers.append("SWITCHES_NOT_ALL_CONNECTED")
+        if not all_48_verified:
+            sdn_blockers.append("BOOTSTRAP_48_FLOWS_NOT_VERIFIED")
+        if reconcile_required is True:
+            sdn_blockers.append("RECONCILIATION_REQUIRED")
+        if not demand_ledger.get("healthy", True):
+            sdn_blockers.append("DEMAND_LEDGER_UNHEALTHY")
+
+        sdn_ready = len(sdn_blockers) == 0
+
+        data_configured = dp_summary is not None and bool(dp_summary.get("endpoint_base_url"))
+        data_blockers: list[str] = []
+        if not data_configured:
+            data_blockers.append("DATA_ENDPOINT_NOT_CONFIGURED")
+        else:
+            assert dp_summary is not None
+            if dp_summary.get("auto_flush") and not dp_summary.get("worker_running"):
+                data_blockers.append("DATA_OUTBOX_WORKER_NOT_RUNNING")
+            if int(dp_summary.get("pending_delivery_count") or 0) > 0 and dp_summary.get("last_error"):
+                data_blockers.append(f"DATA_DELIVERY_BACKLOG:{dp_summary['last_error']}")
+        data_ready = data_configured and len(data_blockers) == 0
+
+        sdn_integration_blockers = list(sdn_blockers) + list(data_blockers)
+        if not idem_durable:
+            sdn_integration_blockers.append("IDEMPOTENCY_STORE_NOT_DURABLE")
+        if not demand_ledger.get("durable", False):
+            sdn_integration_blockers.append("DEMAND_LEDGER_NOT_DURABLE")
+        sdn_integration_ready = len(sdn_integration_blockers) == 0
+
+        # SDN /health can only observe SDN + local durable stores + Data delivery ACK.
+        # It CANNOT verify Network sender, real Data DB, ML online worker, Optimization loop,
+        # or closed-loop TC-I01, so full_system_readiness.ready MUST NOT falsely claim True.
+        unverified_external_roles = [
+            "network_sender",
+            "data_db",
+            "ml_online",
+            "optimization_loop",
+            "runner_tc_i01",
+        ]
+        full_system_blockers = list(sdn_integration_blockers) + [
+            "EXTERNAL_ROLES_NOT_VERIFIED_BY_SDN_HEALTH"
+        ]
+
+        base["process_liveness"] = {
+            "alive": True,
+            "northbound_api_enabled": True,
+        }
+        base["sdn_readiness"] = {
+            "ready": sdn_ready,
+            "expected_switch_count": expected_sw_count,
+            "connected_switch_count": len(connected_dpids) if isinstance(connected_dpids, list) else None,
+            "all_switches_connected": switches_ok,
+            "bootstrap_readiness_state": readiness_state,
+            "verified_flow_count": verified_cached,
+            "all_48_verified": all_48_verified,
+            "reconcile_required": reconcile_required,
+            "idempotency_store_durable": idem_durable,
+            "demand_ledger_durable": bool(demand_ledger.get("durable", False)),
+            "demand_ledger_healthy": bool(demand_ledger.get("healthy", True)),
+            "topology_version": topo_ver,
+            "topology_hash": topo_hash,
+            "config_version": cfg_ver,
+            "blockers": sdn_blockers,
+        }
+        base["data_delivery_readiness"] = {
+            "configured": data_configured,
+            "ready": data_ready,
+            "worker_running": bool(dp_summary.get("worker_running")) if dp_summary else False,
+            "pending_delivery_count": int(dp_summary.get("pending_delivery_count") or 0) if dp_summary else 0,
+            "delivered_count": int(dp_summary.get("delivered_count") or 0) if dp_summary else 0,
+            "last_successful_delivery_utc": dp_summary.get("last_successful_delivery_utc") if dp_summary else None,
+            "last_error": dp_summary.get("last_error") if dp_summary else None,
+            "blockers": data_blockers,
+        }
+        base["sdn_integration_readiness"] = {
+            "ready": sdn_integration_ready,
+            "sdn_ready": sdn_ready,
+            "data_delivery_ready": data_ready,
+            "idempotency_store_durable": idem_durable,
+            "demand_ledger_durable": bool(demand_ledger.get("durable", False)),
+            "blockers": sdn_integration_blockers,
+        }
+        base["full_system_readiness"] = {
+            "ready": False,
+            "scope": "SDN_LOCAL_OBSERVABILITY_ONLY",
+            "sdn_ready": sdn_ready,
+            "data_delivery_ready": data_ready,
+            "sdn_integration_ready": sdn_integration_ready,
+            "tc_i01_verified": False,
+            "unverified_external_roles": unverified_external_roles,
+            "blockers": full_system_blockers,
+        }
         return self._json_response(start_response, "200 OK", base)
 
     def _handle_routing_state(
@@ -618,23 +874,22 @@ class SDNNorthboundHTTPApp:
             raw_events = body["events"]
             if not isinstance(raw_events, list) or not raw_events:
                 raise ContractSerializationError("Field 'events' must be a non-empty JSON array.")
-            acks = []
-            for item in raw_events:
-                rec, dup = self._demand_provider.ingest_release_payload(
-                    item, server_receipt_utc=receipt_utc
-                )
-                acks.append(
-                    {
-                        "ack": True,
-                        "event_id": rec.release_record_id,
-                        "duplicate": dup,
-                        "run_id": rec.run_id,
-                        "flow_group_id": rec.flow_group_id,
-                        "bin_index": rec.bin_index,
-                        "released_at_utc": rec.released_at_utc,
-                        "available_at_utc": rec.available_at_utc,
-                    }
-                )
+            ingested = self._demand_provider.ingest_release_batch(
+                raw_events, server_receipt_utc=receipt_utc
+            )
+            acks = [
+                {
+                    "ack": True,
+                    "event_id": rec.release_record_id,
+                    "duplicate": dup,
+                    "run_id": rec.run_id,
+                    "flow_group_id": rec.flow_group_id,
+                    "bin_index": rec.bin_index,
+                    "released_at_utc": rec.released_at_utc,
+                    "available_at_utc": rec.available_at_utc,
+                }
+                for rec, dup in ingested
+            ]
             return self._json_response(
                 start_response,
                 "200 OK",

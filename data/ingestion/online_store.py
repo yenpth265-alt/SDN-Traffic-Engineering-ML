@@ -1,0 +1,331 @@
+from contextlib import closing, contextmanager
+from datetime import timedelta
+from hashlib import sha256
+import json
+import os
+
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import RealDictCursor
+
+
+class Conflict(ValueError):
+    pass
+
+
+class MissingRun(LookupError):
+    pass
+
+
+@contextmanager
+def transaction():
+    with closing(psycopg2.connect(os.environ["SDN_DATABASE_URL"], connect_timeout=5)) as conn:
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("SET LOCAL TIME ZONE 'UTC'")
+            yield cursor
+
+
+def lock_run(cursor, run_id):
+    # Every writer takes the same run lock before assigning availability or reading state.
+    cursor.execute("SELECT * FROM public.runs WHERE run_id = %s FOR NO KEY UPDATE", (run_id,))
+    run = cursor.fetchone()
+    if run is None:
+        raise MissingRun("Unknown run_id")
+    cursor.execute("SELECT clock_timestamp() AS now")
+    run["now"] = cursor.fetchone()["now"]
+    return run
+
+
+def insert_once(cursor, table, row, key, generated=()):
+    query = sql.SQL("INSERT INTO public.{} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING")
+    cursor.execute(query.format(sql.Identifier(table), sql.SQL(", ").join(map(sql.Identifier, row)),
+                                sql.SQL(", ").join(sql.Placeholder() for _ in row),
+                                sql.SQL(", ").join(map(sql.Identifier, key))), list(row.values()))
+    if cursor.rowcount:
+        return 1
+    query = sql.SQL("SELECT * FROM public.{} WHERE {}").format(
+        sql.Identifier(table),
+        sql.SQL(" AND ").join(sql.SQL("{} = %s").format(sql.Identifier(col)) for col in key),
+    )
+    cursor.execute(query, [row[col] for col in key])
+    existing = cursor.fetchone()
+    if any(existing[col] != value for col, value in row.items() if col not in generated):
+        raise Conflict(f"Existing {table} record has different content")
+    return 0
+
+
+def traffic_bin(run, timestamp):
+    origin = run["traffic_started_at_utc"]
+    if origin is None:
+        raise Conflict("Run is missing traffic_started_at_utc")
+    offset = timestamp - origin
+    if offset < timedelta() or offset.microseconds:
+        raise ValueError("Timestamp is not aligned to the traffic origin")
+    return offset // timedelta(seconds=1)
+
+
+def check_time(run, timestamp):
+    if timestamp > run["now"]:
+        raise ValueError("Producer timestamp is ahead of the database clock")
+
+
+def ingest_demand(cursor, run, event):
+    index = traffic_bin(run, event.window_start_utc)
+    if index != event.bin_index or index >= run["warmup_s"] + run["measurement_s"]:
+        raise ValueError("Demand bin does not match the run traffic window")
+    check_time(run, event.released_at_utc)
+    return insert_once(
+        cursor, "demand_observations",
+        dict(event.model_dump(), topology_id=run["topology_id"], available_at_utc=run["now"]),
+        ("run_id", "flow_group_id", "bin_index"), ("available_at_utc",),
+    )
+
+
+def ingest_traffic(cursor, run, batch):
+    inserted = 0
+    for event in batch.rows:
+        traffic_bin(run, event.window_start_utc)
+        check_time(run, event.window_end_utc)
+        inserted += insert_once(
+            cursor, "traffic_actual",
+            dict(event.model_dump(), run_id=batch.run_id, topology_id=run["topology_id"],
+                 available_at_utc=run["now"]),
+            ("run_id", "flow_group_id", "window_start_utc"), ("available_at_utc",),
+        )
+    return inserted
+
+
+def ingest_links(cursor, run, batch):
+    check_time(run, batch.sampled_at_utc)
+    cursor.execute("SELECT * FROM public.links WHERE topology_id = %s", (run["topology_id"],))
+    links = {row["link_id"]: row for row in cursor}
+    columns = {"link_id", "measure_switch", "measure_port", "tx_bytes_total", "delta_bytes",
+               "delta_t_s", "port_tx_mbps", "counter_status"}
+    cursor.execute(
+        "SELECT link_id FROM public.link_samples WHERE run_id = %s AND batch_id = %s",
+        (batch.run_id, batch.batch_id),
+    )
+    existing_ids = {row["link_id"] for row in cursor}
+    if existing_ids and existing_ids != {row.link_id for row in batch.samples}:
+        raise Conflict("Existing link batch has different members")
+    inserted = 0
+    for event in batch.samples:
+        link = links.get(event.link_id)
+        if (link is None or (event.measure_switch, event.measure_port) != (link["from_node"], link["from_port"])
+                or event.from_node not in (None, link["from_node"])
+                or event.to_node not in (None, link["to_node"])
+                or event.is_fabric not in (None, link["is_fabric"])):
+            raise ValueError("Link sample does not match directed topology")
+        inserted += insert_once(
+            cursor, "link_samples",
+            dict(event.model_dump(include=columns), run_id=batch.run_id, topology_id=run["topology_id"],
+                 batch_id=batch.batch_id, sampled_at_utc=batch.sampled_at_utc, available_at_utc=run["now"]),
+            ("run_id", "batch_id", "link_id"), ("available_at_utc",),
+        )
+    return inserted
+
+
+def flow_ids(cursor, run):
+    cursor.execute("SELECT flow_group_id FROM public.flow_groups WHERE topology_id = %s", (run["topology_id"],))
+    return {row["flow_group_id"] for row in cursor}
+
+
+def route_rows(cursor, run_id, version):
+    cursor.execute("""
+        SELECT flow_group_id, path_id, confirmed_at_utc, verification_status
+        FROM public.routing_state WHERE run_id = %s AND state_version = %s
+    """, (run_id, version))
+    return {row["flow_group_id"]: dict(row) for row in cursor}
+
+
+def ingest_routing(cursor, run, batch):
+    check_time(run, batch.published_at_utc)
+    by_id = {row.flow_group_id: row.model_dump() for row in batch.rows}
+    if len(by_id) != len(batch.rows) or by_id.keys() != flow_ids(cursor, run):
+        raise ValueError("Routing version must cover all flow groups exactly once")
+    payload = batch.model_dump(mode="json", exclude={"rows"})
+    payload["rows"] = [row.model_dump(mode="json") for row in sorted(batch.rows, key=lambda row: row.flow_group_id)]
+    digest = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    version = dict(run_id=batch.run_id, state_version=batch.state_version,
+                   published_at_utc=batch.published_at_utc, payload_hash=digest,
+                   available_at_utc=run["now"])
+    cursor.execute("""
+        SELECT state_version, published_at_utc FROM public.routing_versions
+        WHERE run_id = %s ORDER BY state_version DESC LIMIT 1
+    """, (batch.run_id,))
+    previous = cursor.fetchone()
+    inserted = insert_once(cursor, "routing_versions", version, ("run_id", "state_version"),
+                           ("available_at_utc",))
+    if not inserted:
+        return 0
+    old = {}
+    if previous:
+        if batch.state_version != previous["state_version"] + 1 or batch.published_at_utc <= previous["published_at_utc"]:
+            raise Conflict("Expected the next routing version and a later publication time")
+        old = route_rows(cursor, batch.run_id, previous["state_version"])
+        if old == by_id:
+            raise Conflict("Routing state did not change")
+    elif batch.state_version not in (0, 1):
+        raise Conflict("Initial routing version must be 0 or 1")
+    for group, row in by_id.items():
+        if row["confirmed_at_utc"] and not run["run_started_at_utc"] <= row["confirmed_at_utc"] <= batch.published_at_utc:
+            raise ValueError("Confirmation time is outside the run or after publication")
+        insert_once(cursor, "routing_state",
+                    dict(row, run_id=batch.run_id, state_version=batch.state_version,
+                         topology_id=run["topology_id"]),
+                    ("run_id", "state_version", "flow_group_id"))
+        prior = old.get(group, {})
+        if (prior.get("path_id"), prior.get("confirmed_at_utc")) == (row["path_id"], row["confirmed_at_utc"]):
+            continue
+        boundary = row["confirmed_at_utc"] or batch.published_at_utc
+        if previous and boundary <= previous["published_at_utc"]:
+            raise Conflict("Route transition predates the previous publication")
+        cursor.execute("""
+            UPDATE public.routing_history SET valid_to_utc = %s
+            WHERE run_id = %s AND flow_group_id = %s AND valid_to_utc IS NULL
+        """, (boundary, batch.run_id, group))
+        if row["path_id"] is not None:
+            insert_once(cursor, "routing_history",
+                        dict(run_id=batch.run_id, topology_id=run["topology_id"], flow_group_id=group,
+                             path_id=row["path_id"], state_version=batch.state_version,
+                             valid_from_utc=boundary, valid_to_utc=None),
+                        ("run_id", "flow_group_id", "valid_from_utc"))
+    return 1
+
+
+def demand_history(cursor, run_id, cutoff, as_of, lookback, *, measurement_origin=None):
+    cursor.execute("""
+        SELECT flow_group_id, bin_index, requested_mbps, available_at_utc,
+               window_start_utc, window_end_utc, released_at_utc, event_id, reason
+        FROM public.demand_observations
+        WHERE run_id = %s AND window_start_utc >= %s AND window_end_utc <= %s
+          AND released_at_utc <= %s AND available_at_utc <= %s
+        ORDER BY bin_index, flow_group_id
+    """, (run_id, cutoff - timedelta(seconds=lookback), cutoff, as_of, as_of))
+    rows = []
+    for row in cursor:
+        record = {key: row[key] for key in ("flow_group_id", "bin_index", "requested_mbps", "available_at_utc")}
+        if measurement_origin is not None:
+            record.update(
+                run_id=run_id,
+                bin_index=(row["window_start_utc"] - measurement_origin) // timedelta(seconds=1),
+                window_start_utc=row["window_start_utc"],
+                window_end_utc=row["window_end_utc"],
+                released_at_utc=row["released_at_utc"],
+                release_record_id=row["event_id"],
+                source_kind="RELEASED_DEMAND",
+                valid=row["requested_mbps"] is not None,
+                reason=row["reason"],
+            )
+        rows.append(record)
+    return rows
+
+
+def ingest_snapshot(cursor, run, message, raw, digest):
+    cursor.execute("""
+        SELECT payload, payload_hash FROM public.snapshots
+        WHERE run_id = %s AND snapshot_id = %s
+    """, (message.run_id, message.snapshot_id))
+    existing = cursor.fetchone()
+    if existing:
+        if existing["payload_hash"] != digest or bytes(existing["payload"]) != raw:
+            raise Conflict("Snapshot ID is already associated with different bytes")
+        return 0
+    check_time(run, message.snapshot_as_of_utc)
+    if (message.history_cutoff_utc > message.snapshot_as_of_utc
+            or traffic_bin(run, message.history_cutoff_utc) != message.cutoff_bin
+            or message.schema_version != run["schema_version"]):
+        raise ValueError("Snapshot cutoff or schema does not match the run")
+    cursor.execute("""
+        SELECT state_version FROM public.routing_versions
+        WHERE run_id = %s AND available_at_utc <= %s
+        ORDER BY state_version DESC LIMIT 1
+    """, (message.run_id, message.snapshot_as_of_utc))
+    state = cursor.fetchone()
+    if not state or state["state_version"] != message.state_version:
+        raise Conflict("Snapshot references an incorrect routing version for its as-of time")
+    routes = {row.flow_group_id: row.model_dump() for row in message.routing_state}
+    if len(routes) != len(message.routing_state) or routes != route_rows(cursor, message.run_id, message.state_version):
+        raise Conflict("Snapshot routing state differs from the published version")
+    lookback = run["lookback_bins"]
+    if lookback is None:
+        raise Conflict("Run is missing lookback_bins")
+    observed = {(row["flow_group_id"], row["bin_index"]): row for row in demand_history(
+        cursor, message.run_id, message.history_cutoff_utc, message.snapshot_as_of_utc, lookback)}
+    supplied = {(row.flow_group_id, row.bin_index): row.model_dump() for row in message.history}
+    if len(supplied) != len(message.history) or any(observed.get(key) != row for key, row in supplied.items()):
+        raise Conflict("Snapshot contains duplicate, unavailable or modified demand")
+    if message.quality_status == "VALID":
+        bins = range(message.cutoff_bin - lookback, message.cutoff_bin)
+        if (len(supplied) != len(routes) * lookback
+                or any(group not in routes or index not in bins for group, index in supplied)
+                or any(row["requested_mbps"] is None for row in supplied.values())
+                or any(row["verification_status"] != "VERIFIED" for row in routes.values())):
+            raise ValueError("VALID snapshot requires complete demand and verified routing")
+    metadata = message.model_dump(exclude={"history", "routing_state"})
+    return insert_once(cursor, "snapshots", dict(metadata, payload=raw, payload_hash=digest,
+                                                available_at_utc=run["now"]),
+                       ("run_id", "snapshot_id"), ("available_at_utc",))
+
+def ingest_forecast(cursor, run, batch):
+    first = batch.rows[0]
+    check_time(run, first.issued_at)
+    cursor.execute("""
+        SELECT history_cutoff_utc, quality_status, available_at_utc
+        FROM public.snapshots WHERE run_id=%s AND snapshot_id=%s
+    """, (batch.run_id, batch.snapshot_id))
+    snapshot = cursor.fetchone()
+    origin = run["measurement_started_at_utc"]
+    horizon = run["horizon_bins"]
+    if (not snapshot or snapshot["quality_status"] != "VALID" or origin is None or not horizon
+            or run["method_id"] not in ("M1", "M2", "M3")):
+        raise Conflict("Forecast requires a VALID snapshot and a run with frozen measurement and horizon")
+    if first.issued_at < snapshot["available_at_utc"]:
+        raise ValueError("Forecast issued_at precedes snapshot availability")
+    offset = snapshot["history_cutoff_utc"] - origin
+    start = offset // timedelta(seconds=1)
+    if offset.microseconds or start < 0 or start + horizon > run["measurement_s"]:
+        raise ValueError("Forecast target is outside the measurement window")
+    groups = flow_ids(cursor, run)
+    if len(groups) != 48 or len(batch.rows) != len(groups) * horizon:
+        raise ValueError("Forecast must contain exactly 48 × H rows")
+    seen = set()
+    for row in batch.rows:
+        key = (row.flow_group_id, row.forecast_start)
+        if (key in seen or row.flow_group_id not in groups or not start <= row.forecast_start < start + horizon
+                or row.forecast_end != row.forecast_start + 1 or row.run_id != batch.run_id
+                or row.issued_at != first.issued_at or row.source != first.source):
+            raise ValueError("Forecast rows must cover each flow and target bin exactly once with shared metadata")
+        seen.add(key)
+    ordered = sorted(batch.rows, key=lambda row: (row.flow_group_id, row.forecast_start))
+    content = [row.model_dump(mode="json") for row in ordered]
+    digest = sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    inserted = insert_once(
+        cursor, "forecast_batches",
+        dict(run_id=batch.run_id, forecast_batch_id=batch.forecast_batch_id,
+             snapshot_id=batch.snapshot_id, issued_at=first.issued_at, source=first.source,
+             payload_hash=digest, committed_at_utc=run["now"]),
+        ("run_id", "forecast_batch_id"), ("committed_at_utc",),
+    )
+    if inserted:
+        cursor.executemany("""
+            INSERT INTO public.predictions
+                (run_id, flow_group_id, issued_at, forecast_start, forecast_end, predicted_mbps, source)
+            VALUES (%(run_id)s, %(flow_group_id)s, %(issued_at)s, %(forecast_start)s, %(forecast_end)s,
+                    %(predicted_mbps)s, %(source)s)
+        """, [row.model_dump() for row in ordered])
+    return len(ordered) if inserted else 0
+
+
+def get_ready_forecast(cursor, run, batch_id):
+    cursor.execute("""
+        SELECT * FROM public.ready_forecast_batches WHERE run_id=%s AND forecast_batch_id=%s
+    """, (run["run_id"], batch_id))
+    batch = cursor.fetchone()
+    if batch is None:
+        return None
+    cursor.execute("""
+        SELECT * FROM public.predictions WHERE run_id=%s AND issued_at=%s
+        ORDER BY flow_group_id, forecast_start
+    """, (run["run_id"], batch["issued_at"]))
+    return dict(batch, rows=[dict(row) for row in cursor])

@@ -1,15 +1,15 @@
 {
     "version": "1.0",
     "run_id": "run_001",
-    "schedule_id": "sch_01",
+    "schedule_id": "S1_seed01",
     "seed": 1,
     "split": "train",
     "method": "M1",
     "topology_version": "v1.0",
-    "config_hash": "a1b2c3d4_net_config",
+    "config_hash": "sha256:0035d57c3abea72126b95f878f4c072b4b454cb4ac76ec41a673aaf601fbbce",
     "run_start_utc": "2026-11-10T10:27:59.694275+00:00",
     "phases": {
-        "warmup_seconds": 70,
+        "warmup_seconds": 60,
         "measurement_seconds": 360,
         "drain_seconds": 10
     },
@@ -56,19 +56,19 @@
         },
         {
             "seed": 11,
-            "split": "train"
+            "split": "validation"
         },
         {
             "seed": 12,
-            "split": "train"
+            "split": "validation"
         },
         {
             "seed": 13,
-            "split": "train"
+            "split": "validation"
         },
         {
             "seed": 14,
-            "split": "train"
+            "split": "validation"
         },
         {
             "seed": 15,
@@ -76,11 +76,11 @@
         },
         {
             "seed": 16,
-            "split": "validation"
+            "split": "test"
         },
         {
             "seed": 17,
-            "split": "validation"
+            "split": "test"
         },
         {
             "seed": 18,

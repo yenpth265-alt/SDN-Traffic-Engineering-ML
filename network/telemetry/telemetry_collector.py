@@ -279,20 +279,21 @@ def main():
                     drops_delta, delta_info["counter_status"],
                 ])
 
-                batch_samples.append({
-                    "link_id": lid,
-                    "from_node": sw,
-                    "to_node": lk["to_node"],
-                    "measure_switch": sw,
-                    "measure_port": port,
-                    "is_fabric": bool(lk["is_fabric"]),
-                    "port_tx_mbps": delta_info["port_tx_mbps"],
-                    "utilization": delta_info["utilization"],
-                    "delta_bytes": delta_info["delta_bytes"],
-                    "delta_t_s": delta_info["delta_t_s"],
-                    "tx_drops_delta": drops_delta,
-                    "counter_status": delta_info["counter_status"],
-                })
+                if isinstance(port, int) and port > 0:
+                    batch_samples.append({
+                        "link_id": lid,
+                        "from_node": sw,
+                        "to_node": lk["to_node"],
+                        "measure_switch": sw,
+                        "measure_port": port,
+                        "is_fabric": bool(lk["is_fabric"]),
+                        "port_tx_mbps": delta_info["port_tx_mbps"],
+                        "utilization": delta_info["utilization"],
+                        "delta_bytes": delta_info["delta_bytes"],
+                        "delta_t_s": delta_info["delta_t_s"],
+                        "tx_drops_delta": drops_delta,
+                        "counter_status": delta_info["counter_status"],
+                    })
 
             if missing_links:
                 print(

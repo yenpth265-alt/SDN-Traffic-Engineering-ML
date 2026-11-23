@@ -148,8 +148,7 @@ class PostgreSQLContracts(unittest.TestCase):
             """, (self.schedule, self.topology_id, self.run_id))
         self.post("runs", "RUNNER", dict(body, warmup_s=59), status=422)
         self.post("runs", "RUNNER", body, {"inserted": 1})
-        self.post("runs", "RUNNER", body, {"inserted": 0})
-        self.assertEqual(self.count("runs"), 1)
+        return body
 
     def start_routing(self):
         state = dict(self.apply_capture["routing_before"], run_id=self.run_id)
@@ -460,3 +459,11 @@ class PostgreSQLContracts(unittest.TestCase):
         repeat = self.response("PATCH", self.url + "/status", "RUNNER", json={"status": "ok"})
         self.assertEqual(repeat.json(), {"updated": 0})
         self.response("PATCH", self.url + "/status", "RUNNER", status=409, json={"status": "failed"})
+
+    def test_runner_registration_replay(self):
+        body = self.register()
+        response = self.client.post("/v1/runs", headers=self.headers("RUNNER"), json=body)
+        self.check("registered run rows after identical replay", self.count("runs"), 1)
+        self.check("HTTP and ACK for identical run registration",
+                   {"http": response.status_code, "body": response.json()},
+                   {"http": 200, "body": {"inserted": 0}})

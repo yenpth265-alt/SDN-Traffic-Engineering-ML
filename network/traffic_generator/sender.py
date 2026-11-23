@@ -12,6 +12,7 @@ Outputs in results/<run_id>/:
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import json
 import os
 import signal
@@ -29,6 +30,16 @@ STOP = False
 def _stop(*_):
     global STOP
     STOP = True
+
+
+def _to_rfc3339_utc(ts_or_str: float | str) -> str:
+    if isinstance(ts_or_str, (int, float)):
+        dt = datetime.fromtimestamp(float(ts_or_str), tz=timezone.utc)
+        return dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    s = str(ts_or_str).strip()
+    if s.endswith("+00:00"):
+        return s[:-6] + "Z"
+    return s
 
 
 def load_schedule(path: str, wanted: set[str], schedule_id: str | None = None) -> dict[tuple[int, str], float]:
@@ -195,7 +206,7 @@ def main():
             file=sys.stderr,
         )
 
-    t0 = man["t0"]
+    t0 = float(man["t0"])
     if t0 > time.time():
         print(f"[*] Waiting until {iso_utc(t0)} ({t0 - time.time():.1f} s remaining)")
         while time.time() < t0 and not STOP:
@@ -253,12 +264,14 @@ def main():
             while time.time() < sec_start + 1.0 and not STOP:
                 time.sleep(min(0.05, max(0.0, sec_start + 1.0 - time.time())))
 
-            released_at = iso_utc(time.time())
-            win_start_utc = iso_utc(sec_start)
-            win_end_utc = iso_utc(sec_start + 1.0)
+            win_end_ts = sec_start + 1.0
+            release_ts = max(time.time(), win_end_ts)
+            released_at = _to_rfc3339_utc(release_ts)
+            win_start_utc = _to_rfc3339_utc(sec_start)
+            win_end_utc = _to_rfc3339_utc(win_end_ts)
 
             for fg in state:
-                req_val = round(sched.get((t, fg), 0.0), 6)
+                req_val = float(round(sched.get((t, fg), 0.0), 6))
                 wr.writerow([t, fg, f"{req_val:.6f}", released_at])
                 ws.writerow([t, fg, counts[fg], counts[fg] * args.payload_size, late[fg]])
 
@@ -267,6 +280,7 @@ def main():
                     "run_id": man["run_id"],
                     "flow_group_id": fg,
                     "bin_index": t,
+                    "source": "network",
                     "window_start_utc": win_start_utc,
                     "window_end_utc": win_end_utc,
                     "requested_mbps": req_val,

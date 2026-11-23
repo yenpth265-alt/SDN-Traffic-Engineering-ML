@@ -15,7 +15,7 @@ python -m pip install -r ml/requirements.txt
 python -m ml demo --out ml/artifacts/demo-local
 ~~~
 
-Demo tạo dữ liệu **tổng hợp**, chia 20 seed theo 14/3/3, chuẩn bị bundle, train/validation, evaluate test và dự báo online thử. Không dùng số đo demo để viết kết quả thực nghiệm mạng. Dùng thư mục đầu ra mới mỗi lần chạy.
+Demo tạo dữ liệu **tổng hợp**, chia 20 seed theo 10/5/5, chuẩn bị bundle, train/validation, evaluate test và dự báo online thử. Không dùng số đo demo để viết kết quả thực nghiệm mạng. Dùng thư mục đầu ra mới mỗi lần chạy.
 
 File dữ liệu mẫu đầy đủ nằm trong ml/artifacts/demo-local/input/. Snapshot và context do demo tạo chỉ dùng kiểm thử, sẽ hết hạn rất nhanh; không lấy làm snapshot online thật.
 
@@ -35,17 +35,19 @@ Lệnh trên thực hiện prepare → train/validation → evaluate test. Khôn
 Điều kiện dữ liệu:
 
 - Đủ 48 flow đúng catalog Network, không thiếu bin, trùng khóa, NaN/inf hoặc nhu cầu âm.
-- Chia theo seed/family **trước khi tạo window**, theo tỷ lệ 70/15/15. Với 20 seed: 14 train, 3 validation, 3 test. Replay cùng seed/family/schedule phải cùng split.
+- Chia theo seed/family **trước khi tạo window**, theo tỷ lệ 50/25/25. Với 20 seed: 10 train (1–10), 5 validation (11–15), 5 test (16–20), theo manifest Network. Replay cùng seed/family/schedule phải cùng split.
 - Bắt bản sao nguyên chuỗi bị đổi tên rồi đưa sang split khác bằng fingerprint.
 - Origin của CSV là traffic start; origin của dự báo là measurement start.
 - Target nằm trong khoảng đo; không tạo label tail ngoài measurement end.
 
-**Trạng thái dữ liệu ngày 18/11/2026:** main `ff73cdd` có `demand_plan (2).zip` với split 14/3/3, khớp manifest. ZIP trên feature vẫn dùng 10/5/5. Guide trên main đã bị revert về 10/5/5; module ML giữ hợp đồng 70/15/15 của bản v1.4 trước revert. Không tự đổi nhãn để ép dữ liệu chạy qua kiểm tra.
+**Trạng thái dữ liệu ngày 22/11/2026:** đã tích hợp nhánh `data/ml-offline-dataset`. Network `demand_plan.zip`, manifest và ML thống nhất split 10/5/5. Có 120 lịch: 60 train, 30 validation, 30 test; tổng 2.419.200 dòng cho 48 flow. ML giữ nguyên nhãn của nguồn.
 
-### Chạy offline ngay trên schedule Network của main
+Các file `ml/data/train.csv`, `validation.csv`, `test.csv` là bản xuất Data với offset từ measurement start (-60 đến 359); chúng chưa phải `history.csv`/`runs.json` cho lệnh `run`. Lệnh `from-schedule` dưới đây đọc trực tiếp ZIP Network với offset từ traffic start (0–419), kiểm manifest và tạo đầu vào đúng định dạng cho pipeline.
+
+### Chạy offline ngay trên schedule Network
 
 ~~~powershell
-python -m ml from-schedule --schedule "network/traffic_schedules/demand_plan (2).zip" --warmup-seconds 60 --measurement-seconds 360 --config configs/ml/pilot.yaml --out ml/artifacts/network-run001
+python -m ml from-schedule --schedule "network/traffic_schedules/demand_plan.zip" --warmup-seconds 60 --measurement-seconds 360 --config configs/ml/pilot.yaml --out ml/artifacts/network-run001
 ~~~
 
 Mở `ml/artifacts/network-run001/evaluation/REPORT.md` để xem kết quả. Đây là học/đánh giá trên **lịch demand được sinh**, chưa phải số đo mạng thực.

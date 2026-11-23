@@ -18,7 +18,7 @@ def create_demo_inputs(directory, catalog_path):
         w.writerow(["run_id", "flow_group_id", "time_offset_s", "requested_mbps"])
         for seed in range(1, 21):
             start = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=seed)
-            split = "train" if seed <= 14 else "validation" if seed <= 17 else "test"
+            split = "train" if seed <= 10 else "validation" if seed <= 15 else "test"
             run = {
                 "run_id": f"demo_{seed}", "schedule_id": f"demo_schedule_{seed}",
                 "parent_family_id": f"demo_family_{seed}", "scenario_id": "SYNTHETIC",

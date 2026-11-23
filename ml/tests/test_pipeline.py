@@ -83,12 +83,17 @@ def test_window_alignment_tc_d04(pipeline):
     np.testing.assert_array_equal(y[0], values[traffic_cutoff:traffic_cutoff + 5])
 
 
-def test_split_rejects_50_25_25_and_shared_family_tc_d03(pipeline):
+def test_split_accepts_10_5_5_rejects_14_3_3_and_shared_family_tc_d03(pipeline):
     runs = read_json(pipeline / "input/runs.json")["runs"]
+    seeds = split_check(runs)
+    assert {split: set(map(int, values)) for split, values in seeds.items()} == {
+        "train": set(range(1, 11)), "validation": set(range(11, 16)),
+        "test": set(range(16, 21)),
+    }
     bad = copy.deepcopy(runs)
     for r in bad:
-        r["split"] = "train" if r["seed"] <= 10 else "validation" if r["seed"] <= 15 else "test"
-    with pytest.raises(ContractError, match="70/15/15"):
+        r["split"] = "train" if r["seed"] <= 14 else "validation" if r["seed"] <= 17 else "test"
+    with pytest.raises(ContractError, match="50/25/25"):
         split_check(bad)
     runs[-1]["parent_family_id"] = runs[0]["parent_family_id"]
     with pytest.raises(ContractError, match="leakage"):

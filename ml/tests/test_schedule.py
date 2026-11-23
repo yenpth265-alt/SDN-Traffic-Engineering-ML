@@ -18,7 +18,7 @@ def schedule(tmp_path):
     rows = []
     allocations = []
     for seed in range(1, 21):
-        split = "train" if seed <= 14 else "validation" if seed <= 17 else "test"
+        split = "train" if seed <= 10 else "validation" if seed <= 15 else "test"
         allocations.append({"seed": seed, "split": split})
         for t in range(8):
             for fg in catalog(CATALOG):
@@ -106,6 +106,6 @@ def test_from_schedule_cli_completes_offline_pipeline(schedule, tmp_path):
     assert report["data_provenance"]["kind"] == "offline_network_schedule"
     assert model["data_provenance"]["online_eligible"] is False
     assert model["test_used_for_selection"] is False
-    assert len(report["by_flow"]) == 48 and len(report["by_run"]) == 3
-    assert report["test_seeds"] == ["18", "19", "20"]
+    assert len(report["by_flow"]) == 48 and len(report["by_run"]) == 5
+    assert report["test_seeds"] == ["16", "17", "18", "19", "20"]
     assert (out / "evaluation/REPORT.md").is_file()

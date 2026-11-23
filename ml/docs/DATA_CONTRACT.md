@@ -2,7 +2,7 @@
 
 Semantics theo Architecture v1.4 và Testing IF04–IF06. Chi tiết đóng gói file/hash dưới đây là adapter đề xuất; chưa xác nhận API liên role đã khóa. ML không truy cập DB, tạo snapshot sản xuất hoặc tự sửa nguồn dữ liệu.
 
-**Nguồn chuẩn split:** giữ bản v1.4 trước revert (14/3/3, giống seed allocation và CSV main ngày 18/11/2026). Guide trên main hiện ghi 10/5/5 do revert; cần đồng bộ tài liệu khi tích hợp, ML không tự đổi split.
+**Nguồn chuẩn split:** thống nhất với Network và Architecture v1.4 ngày 22/11/2026: 10/5/5 (50/25/25). Với 20 seed trong `configs/experiments/runner_manifest.json`: 1–10 train, 11–15 validation, 16–20 test. ML giữ nguyên nhãn nguồn và kiểm tra split trước khi tạo window.
 
 ## A. Export ngoại tuyến
 
@@ -40,7 +40,9 @@ Run manifest:
 }
 ~~~
 
-Ví dụ chỉ minh họa một run. Cần ít nhất 20 seed với split 14/3/3, hoặc bội số 20 theo 70/15/15. Cùng seed/schedule/family giữ cùng split; replay khác method không đổi family.
+Ví dụ chỉ minh họa một run. Cần ít nhất 20 seed với split 10/5/5, hoặc bội số 20 theo 50/25/25. Cùng seed/schedule/family giữ cùng split; replay khác method không đổi family.
+
+Các CSV trong `ml/data/` dùng offset measurement -60–359 và chưa có đủ schema của cặp history/runs ở trên. Để chạy bộ offline hiện tại, dùng `from-schedule` với `network/traffic_schedules/demand_plan.zip` (offset traffic 0–419), warm-up 60 giây và measurement 360 giây như hướng dẫn trong README.
 
 Với mốc ví dụ, CSV cần bin 0–419. Cutoff measurement t=100 ứng với traffic offset 160. L=30 lấy X ở offset traffic 130–159, H=5 lấy y ở 160–164. Các khoảng phải đúng giây theo origin.
 

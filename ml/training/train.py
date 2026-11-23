@@ -130,7 +130,7 @@ def train(bundle_path, config_path, out):
         f"- Target: requested_mbps; shared RF for 48 flows; L={L}, H={H}.\n"
         f"- Epsilon={frozen['epsilon']}; MA W={W}; baseline epsilon={baseline_epsilon}.\n"
         "- Features: past demand lags/stats/trend and canonical flow one-hot only.\n"
-        "- Split: seeds/families before windowing; 70/15/15. No test tuning or refit.\n"
+        "- Split: seeds/families before windowing; 50/25/25 (10/5/5 per 20 seeds). No test tuning or refit.\n"
         f"- Fitted {len(selected)} / {len(tx)} train windows; seed={seed}.\n"
         f"- Data source: {metadata['data_provenance']['kind']}; see metadata.json for provenance.\n"
         "- See validation.json for comparisons; RF superiority is not assumed.\n"

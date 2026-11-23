@@ -129,8 +129,8 @@ def split_check(runs):
     seeds = {s: {str(r["seed"]) for r in runs if r["split"] == s} for s in SPLITS}
     total = sum(map(len, seeds.values()))
     require(total > 0 and total % 20 == 0,
-            "70/15/15 exact seed split requires a multiple of 20 unique seeds")
-    require([len(seeds[s]) for s in SPLITS] == [total * 14 // 20, total * 3 // 20,
-                                              total * 3 // 20],
-            f"Expected 70/15/15 by seed; got {[len(seeds[s]) for s in SPLITS]}")
+            "50/25/25 exact seed split requires a multiple of 20 unique seeds")
+    require([len(seeds[s]) for s in SPLITS] == [total * 10 // 20, total * 5 // 20,
+                                              total * 5 // 20],
+            f"Expected 50/25/25 by seed (10/5/5 per 20); got {[len(seeds[s]) for s in SPLITS]}")
     return {s: sorted(seeds[s]) for s in SPLITS}

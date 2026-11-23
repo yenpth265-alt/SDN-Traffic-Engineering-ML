@@ -23,7 +23,7 @@ flowchart LR
 ```
 
 1. **Đọc và kiểm dữ liệu.** Phải có đủ 48 flow mỗi giây, demand hữu hạn và không âm. Thiếu dữ liệu thì báo lỗi; không điền 0 để giả thành đầy đủ.
-2. **Chia tập trước khi tạo cửa sổ.** Seed 1–14 để học; 15–17 để chọn cấu hình; 18–20 để đánh giá cuối. Đây là allocation trong manifest hiện tại. Cùng seed/family/schedule không được lọt sang split khác.
+2. **Chia tập trước khi tạo cửa sổ.** Seed 1–10 để học; 11–15 để chọn cấu hình; 16–20 để đánh giá cuối: 10/5/5, tương ứng 50/25/25. Đây là allocation trong manifest Network hiện tại. Cùng seed/family/schedule không được lọt sang split khác.
 3. **Tạo mẫu X/y.** X là lịch sử của một flow ở một thời điểm; y là nhu cầu thật trong các giây kế tiếp. Mẫu không nối hai run hoặc hai flow.
 4. **Học và chọn bằng validation.** RF học từ train; L/H/epsilon và W của Moving Average được chọn từ validation. Test chưa được đọc ở bước này.
 5. **Đóng băng model/config.** Lưu model đã học và các tham số đã chọn. Không học lại bằng train+validation trong pipeline hiện tại.
@@ -138,10 +138,10 @@ python -m pytest ml/tests -q
 python -m ml demo --out ml/artifacts/demo-moi
 ```
 
-Chạy trên schedule main, với giả định offline 60s warm-up + 360s measurement:
+Chạy trên schedule Network, split 10/5/5, với giả định offline 60s warm-up + 360s measurement:
 
 ```powershell
-python -m ml from-schedule --schedule "network/traffic_schedules/demand_plan (2).zip" --warmup-seconds 60 --measurement-seconds 360 --config configs/ml/pilot.yaml --out ml/artifacts/network-moi
+python -m ml from-schedule --schedule "network/traffic_schedules/demand_plan.zip" --warmup-seconds 60 --measurement-seconds 360 --config configs/ml/pilot.yaml --out ml/artifacts/network-moi
 ```
 
 Có Data export hợp lệ thì dùng:

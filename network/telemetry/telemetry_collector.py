@@ -155,6 +155,17 @@ def poll_all_switches(dry_run: bool = False) -> dict[str, dict[int, dict[str, in
     return results
 
 
+def _default_missing_sample(reason: str) -> tuple[int, dict]:
+    return 0, {
+        "delta_bytes": 0,
+        "delta_t_s": 0.0,
+        "port_tx_mbps": 0.0,
+        "utilization": 0.0,
+        "tx_drops_delta": 0,
+        "counter_status": reason,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", required=True, help="Path to run_manifest.json")
@@ -234,37 +245,38 @@ def main():
                 sw = lk["from_node"]
                 port = lk["from_port"]
 
+                pstats = sw_counters[sw].get(port) if sw in sw_counters else None
                 if sw not in sw_counters:
                     missing_links.append(f"{lid}({sw}:{port}:missing_switch)")
-                    continue
-
-                pstats = sw_counters[sw].get(port)
-                if pstats is None:
+                    tx_bytes_total, delta_info = _default_missing_sample("missing_switch")
+                elif pstats is None:
                     missing_links.append(f"{lid}({sw}:{port}:missing_port)")
-                    continue
+                    tx_bytes_total, delta_info = _default_missing_sample("missing_port")
+                else:
+                    tx_bytes_total = pstats["tx_bytes"]
+                    delta_info = compute_link_delta(
+                        prev_sample=prev_state.get(lid),
+                        curr_tx_bytes=pstats["tx_bytes"],
+                        curr_tx_packets=pstats["tx_packets"],
+                        curr_tx_drops=pstats["tx_drops"],
+                        curr_ts=sample_ts,
+                        capacity_mbps=lk["capacity_mbps"],
+                    )
+                    prev_state[lid] = {
+                        "ts": sample_ts,
+                        "tx_bytes": pstats["tx_bytes"],
+                        "tx_packets": pstats["tx_packets"],
+                        "tx_drops": pstats["tx_drops"],
+                    }
 
-                delta_info = compute_link_delta(
-                    prev_sample=prev_state.get(lid),
-                    curr_tx_bytes=pstats["tx_bytes"],
-                    curr_tx_packets=pstats["tx_packets"],
-                    curr_tx_drops=pstats["tx_drops"],
-                    curr_ts=sample_ts,
-                    capacity_mbps=lk["capacity_mbps"],
-                )
-
-                prev_state[lid] = {
-                    "ts": sample_ts,
-                    "tx_bytes": pstats["tx_bytes"],
-                    "tx_packets": pstats["tx_packets"],
-                    "tx_drops": pstats["tx_drops"],
-                }
+                drops_delta = delta_info.get("tx_drops_delta", delta_info.get("delta_drops", 0))
 
                 writer.writerow([
                     bin_idx, sampled_at_utc, lid, sw, lk["to_node"],
                     sw, port, lk["is_fabric"], lk["capacity_mbps"],
-                    pstats["tx_bytes"], delta_info["delta_bytes"], delta_info["delta_t_s"],
+                    tx_bytes_total, delta_info["delta_bytes"], delta_info["delta_t_s"],
                     delta_info["port_tx_mbps"], delta_info["utilization"],
-                    delta_info["delta_drops"], delta_info["counter_status"],
+                    drops_delta, delta_info["counter_status"],
                 ])
 
                 batch_samples.append({
@@ -278,7 +290,7 @@ def main():
                     "utilization": delta_info["utilization"],
                     "delta_bytes": delta_info["delta_bytes"],
                     "delta_t_s": delta_info["delta_t_s"],
-                    "tx_drops_delta": delta_info["delta_drops"],
+                    "tx_drops_delta": drops_delta,
                     "counter_status": delta_info["counter_status"],
                 })
 

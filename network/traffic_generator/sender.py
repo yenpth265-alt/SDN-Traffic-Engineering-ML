@@ -18,6 +18,7 @@ import signal
 import socket
 import sys
 import time
+import urllib.error
 import urllib.request
 
 from common import HEADER, iso_utc, load_flow_groups, load_manifest
@@ -47,24 +48,83 @@ def load_schedule(path: str, wanted: set[str], schedule_id: str | None = None) -
     return sched
 
 
-def emit_release_event(event: dict, release_fp=None, release_url: str | None = None):
-    """Writes online DemandRelease event to local outbox and optionally POSTs to Data/SDN endpoint."""
+def _post_with_retry(
+    url: str,
+    body_bytes: bytes,
+    *,
+    api_key: str | None = None,
+    timeout: float = 1.0,
+    max_retries: int = 3,
+    backoff_base: float = 0.15,
+) -> tuple[bool, int | None, str]:
+    """POSTs JSON payload with bounded retry on transient/network/5xx/429 errors."""
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    last_err = ""
+    for attempt in range(max_retries + 1):
+        req = urllib.request.Request(
+            url=url,
+            data=body_bytes,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status = resp.getcode()
+                resp_text = resp.read().decode("utf-8", errors="replace")
+                if 200 <= status < 300:
+                    return True, status, resp_text
+                last_err = f"HTTP {status}: {resp_text}"
+        except urllib.error.HTTPError as err:
+            status = err.code
+            err_text = err.read().decode("utf-8", errors="replace") if err.fp else ""
+            last_err = f"HTTP {status}: {err_text}"
+            if status != 429 and not (500 <= status < 600):
+                return False, status, last_err
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            last_err = f"Network/Timeout error: {err}"
+
+        if attempt < max_retries and not STOP:
+            time.sleep(backoff_base * (2 ** attempt))
+
+    return False, None, last_err
+
+
+def emit_release_event(
+    event: dict,
+    release_fp=None,
+    release_url: str | None = None,
+    *,
+    api_key: str | None = None,
+    timeout: float = 1.0,
+    max_retries: int = 3,
+    backoff_base: float = 0.15,
+):
+    """Writes online DemandRelease event to local outbox and optionally POSTs with retry."""
     payload = json.dumps(event, separators=(",", ":"))
     if release_fp is not None:
         release_fp.write(payload + "\n")
         release_fp.flush()
     if release_url:
-        try:
-            req = urllib.request.Request(
-                release_url,
-                data=payload.encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
+        ok, status_code, detail = _post_with_retry(
+            url=release_url,
+            body_bytes=payload.encode("utf-8"),
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+            backoff_base=backoff_base,
+        )
+        if not ok:
+            print(
+                f"[!] Warning: failed to POST DemandRelease {event['event_id']} "
+                f"(status={status_code}): {detail}",
+                file=sys.stderr,
             )
-            with urllib.request.urlopen(req, timeout=0.2):
-                pass
-        except Exception as e:
-            print(f"[!] Warning: failed to POST DemandRelease {event['event_id']}: {e}", file=sys.stderr)
 
 
 def main():
@@ -80,6 +140,10 @@ def main():
     ap.add_argument("--dst-override", default=None, help="Override destination IP for single-machine testing")
     ap.add_argument("--host-cap-mbps", type=float, default=10.0, help="Host send capacity cap in Mbps (default: 10.0)")
     ap.add_argument("--release-url", default=None, help="Optional HTTP endpoint to push DemandRelease events")
+    ap.add_argument("--api-key", default=None, help="Optional X-API-Key header for HTTP endpoints (fallback: DATA_API_KEY)")
+    ap.add_argument("--release-timeout", type=float, default=1.0, help="HTTP timeout in seconds per attempt (default: 1.0)")
+    ap.add_argument("--release-retries", type=int, default=3, help="Max HTTP retry attempts for DemandRelease (default: 3)")
+    ap.add_argument("--release-backoff", type=float, default=0.15, help="Base backoff in seconds between retries (default: 0.15)")
     args = ap.parse_args()
 
     if args.payload_size < HEADER.size:
@@ -87,6 +151,7 @@ def main():
 
     man = load_manifest(args.manifest)
     schedule_id = args.schedule_id or man.get("schedule_id")
+    api_key = args.api_key or os.environ.get("DATA_API_KEY")
 
     groups = [g for g in load_flow_groups(args.config_dir) if g["src_host"] == args.host]
     if args.flow_group:
@@ -207,7 +272,15 @@ def main():
                     "requested_mbps": req_val,
                     "released_at_utc": released_at,
                 }
-                emit_release_event(release_event, release_fp=frel, release_url=args.release_url)
+                emit_release_event(
+                    release_event,
+                    release_fp=frel,
+                    release_url=args.release_url,
+                    api_key=api_key,
+                    timeout=args.release_timeout,
+                    max_retries=args.release_retries,
+                    backoff_base=args.release_backoff,
+                )
 
             fr.flush()
             fs.flush()

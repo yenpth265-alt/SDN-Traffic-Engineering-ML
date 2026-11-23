@@ -17,6 +17,7 @@ import os
 import signal
 import sys
 import time
+import urllib.error
 import urllib.request
 
 from counter_parser import compute_link_delta, read_switch_ports
@@ -58,23 +59,81 @@ def load_links(config_dir: str) -> list[dict]:
     return links
 
 
-def emit_batch_event(batch_event: dict, jsonl_fp=None, telemetry_url: str | None = None):
+def _post_batch_with_retry(
+    url: str,
+    body_bytes: bytes,
+    *,
+    api_key: str | None = None,
+    timeout: float = 1.0,
+    max_retries: int = 3,
+    backoff_base: float = 0.15,
+) -> tuple[bool, int | None, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    last_err = ""
+    for attempt in range(max_retries + 1):
+        req = urllib.request.Request(
+            url=url,
+            data=body_bytes,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status = resp.getcode()
+                resp_text = resp.read().decode("utf-8", errors="replace")
+                if 200 <= status < 300:
+                    return True, status, resp_text
+                last_err = f"HTTP {status}: {resp_text}"
+        except urllib.error.HTTPError as err:
+            status = err.code
+            err_text = err.read().decode("utf-8", errors="replace") if err.fp else ""
+            last_err = f"HTTP {status}: {err_text}"
+            if status != 429 and not (500 <= status < 600):
+                return False, status, last_err
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            last_err = f"Network/Timeout error: {err}"
+
+        if attempt < max_retries and not STOP:
+            time.sleep(backoff_base * (2 ** attempt))
+
+    return False, None, last_err
+
+
+def emit_batch_event(
+    batch_event: dict,
+    jsonl_fp=None,
+    telemetry_url: str | None = None,
+    *,
+    api_key: str | None = None,
+    timeout: float = 1.0,
+    max_retries: int = 3,
+    backoff_base: float = 0.15,
+):
     payload = json.dumps(batch_event, separators=(",", ":"))
     if jsonl_fp is not None:
         jsonl_fp.write(payload + "\n")
         jsonl_fp.flush()
     if telemetry_url:
-        try:
-            req = urllib.request.Request(
-                telemetry_url,
-                data=payload.encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
+        ok, status_code, detail = _post_batch_with_retry(
+            url=telemetry_url,
+            body_bytes=payload.encode("utf-8"),
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+            backoff_base=backoff_base,
+        )
+        if not ok:
+            print(
+                f"[!] Warning: failed to POST LinkSampleBatch {batch_event['batch_id']} "
+                f"(status={status_code}): {detail}",
+                file=sys.stderr,
             )
-            with urllib.request.urlopen(req, timeout=0.25):
-                pass
-        except Exception as e:
-            print(f"[!] Warning: failed to POST LinkSampleBatch {batch_event['batch_id']}: {e}", file=sys.stderr)
 
 
 def poll_all_switches(dry_run: bool = False) -> dict[str, dict[int, dict[str, int]]]:
@@ -83,7 +142,17 @@ def poll_all_switches(dry_run: bool = False) -> dict[str, dict[int, dict[str, in
             sw: {p: {"tx_packets": 0, "tx_bytes": 0, "tx_drops": 0, "tx_errors": 0} for p in range(1, 5)}
             for sw in SWITCH_IDS
         }
-    return {sw: read_switch_ports(sw) for sw in SWITCH_IDS}
+    results = {}
+    for sw in SWITCH_IDS:
+        try:
+            ports = read_switch_ports(sw)
+            if ports is not None:
+                results[sw] = ports
+            else:
+                print(f"[!] Warning: read_switch_ports({sw}) returned None", file=sys.stderr)
+        except Exception as e:
+            print(f"[!] Warning: failed reading ports for switch {sw}: {e}", file=sys.stderr)
+    return results
 
 
 def main():
@@ -93,11 +162,16 @@ def main():
     ap.add_argument("--outdir", default=None, help="Output directory (default: results/<run_id>)")
     ap.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)")
     ap.add_argument("--telemetry-url", default=None, help="Optional HTTP endpoint to push LinkSampleBatch events")
+    ap.add_argument("--api-key", default=None, help="Optional X-API-Key header for Data HTTP endpoint (fallback: DATA_API_KEY)")
+    ap.add_argument("--telemetry-timeout", type=float, default=1.0, help="HTTP timeout per attempt in seconds (default: 1.0)")
+    ap.add_argument("--telemetry-retries", type=int, default=3, help="Max HTTP retry attempts for LinkSampleBatch (default: 3)")
+    ap.add_argument("--telemetry-backoff", type=float, default=0.15, help="Base backoff in seconds between retries (default: 0.15)")
     ap.add_argument("--dry-run", action="store_true", help="Simulate zero counters without calling ovs-ofctl")
     args = ap.parse_args()
 
     man = load_manifest(args.manifest)
     links = load_links(args.config_dir)
+    api_key = args.api_key or os.environ.get("DATA_API_KEY")
     outdir = args.outdir or os.path.join("results", man["run_id"])
     os.makedirs(outdir, exist_ok=True)
 
@@ -154,16 +228,19 @@ def main():
             sw_counters = poll_all_switches(dry_run=args.dry_run)
 
             batch_samples = []
+            missing_links = []
             for lk in links:
                 lid = lk["link_id"]
                 sw = lk["from_node"]
                 port = lk["from_port"]
 
                 if sw not in sw_counters:
+                    missing_links.append(f"{lid}({sw}:{port}:missing_switch)")
                     continue
 
                 pstats = sw_counters[sw].get(port)
                 if pstats is None:
+                    missing_links.append(f"{lid}({sw}:{port}:missing_port)")
                     continue
 
                 delta_info = compute_link_delta(
@@ -205,6 +282,13 @@ def main():
                     "counter_status": delta_info["counter_status"],
                 })
 
+            if missing_links:
+                print(
+                    f"[!] Warning: bin {bin_idx} missing {len(missing_links)}/{len(links)} links: "
+                    f"{', '.join(missing_links)}",
+                    file=sys.stderr,
+                )
+
             fcsv.flush()
 
             batch_event = {
@@ -216,7 +300,15 @@ def main():
                 "sample_count": len(batch_samples),
                 "samples": batch_samples,
             }
-            emit_batch_event(batch_event, jsonl_fp=fjson, telemetry_url=args.telemetry_url)
+            emit_batch_event(
+                batch_event,
+                jsonl_fp=fjson,
+                telemetry_url=args.telemetry_url,
+                api_key=api_key,
+                timeout=args.telemetry_timeout,
+                max_retries=args.telemetry_retries,
+                backoff_base=args.telemetry_backoff,
+            )
 
     print(f"[+] Telemetry collection finished: {csv_path}")
 

@@ -121,6 +121,8 @@ class S0AppConfig:
     demand_retention_bins: Optional[int] = 3600
     data_endpoint_url: Optional[str] = None
     data_outbox_dir: Optional[Path] = None
+    data_api_mode: str = "legacy"  # "legacy" | "data_v1"
+    data_api_key: Optional[str] = None  # Role SDN X-API-Key (never logged)
     data_auto_flush: bool = True
     data_flush_interval_s: float = 0.5
     data_timeout_s: float = 0.5
@@ -173,6 +175,8 @@ class S0AppConfig:
             demand_retention_bins=int(demand_ret_raw) if demand_ret_raw else 3600,
             data_endpoint_url=_env_opt_str("SDN_DATA_ENDPOINT_URL"),
             data_outbox_dir=Path(outbox_raw) if outbox_raw else None,
+            data_api_mode=os.environ.get("SDN_DATA_API_MODE", "legacy").strip().lower() or "legacy",
+            data_api_key=_env_opt_str("SDN_DATA_API_KEY"),
             data_auto_flush=_env_bool("SDN_DATA_AUTO_FLUSH", True),
             data_flush_interval_s=float(os.environ.get("SDN_DATA_FLUSH_INTERVAL_S", "0.5")),
             data_timeout_s=float(os.environ.get("SDN_DATA_TIMEOUT_S", "0.5")),
@@ -312,6 +316,8 @@ class S0ControllerOrchestrator:
                         auth_token=self._config.northbound_auth_token,
                         auto_flush=False,
                         flush_interval_s=self._config.data_flush_interval_s,
+                        api_mode=self._config.data_api_mode,
+                        api_key=self._config.data_api_key,
                     )
                 )
 

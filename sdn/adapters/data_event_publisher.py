@@ -33,6 +33,19 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from sdn.adapters.data_api_v1_adapter import (
+    DATA_V1_ENDPOINT_APPLY_RESULTS,
+    DATA_V1_ENDPOINT_ROUTING,
+    DATA_V1_ENDPOINT_SNAPSHOTS,
+    DataV1ContractBlockedError,
+    build_data_v1_headers,
+    compute_bytes_sha256,
+    is_valid_data_v1_ack,
+    map_apply_response_to_data_v1,
+    map_routing_state_to_data_v1,
+    map_snapshot_to_data_v1,
+    serialize_canonical_json_bytes,
+)
 from sdn.schemas.apply_models import ApplyResponse
 from sdn.schemas.snapshot_models import Snapshot
 from sdn.schemas.state_models import (
@@ -61,6 +74,13 @@ class DataPublisherConfig:
     auth_token: Optional[str] = None
     auto_flush: bool = False
     flush_interval_s: float = 0.5
+    api_mode: str = "legacy"  # "legacy" | "data_v1" (never default to data_v1 until team approval)
+    api_key: Optional[str] = None  # Role SDN X-API-Key for data_v1 mode (never logged)
+    snapshot_use_traffic_origin_bins: bool = True
+
+    def __post_init__(self) -> None:
+        if self.api_mode not in ("legacy", "data_v1"):
+            raise ValueError(f"Unsupported api_mode {self.api_mode!r}; expected 'legacy' or 'data_v1'.")
 
 
 @dataclass(frozen=True)
@@ -191,6 +211,7 @@ class DataEventPublisher:
         self._acked_file: Optional[Path] = None
         self._stop_event = threading.Event()
         self._worker_running: bool = False
+        self._worker_expected: bool = bool(self._config.auto_flush)
         self._worker_handle: Any = None
         self._flush_cycles: int = 0
         self._last_successful_delivery_utc: Optional[str] = None
@@ -224,6 +245,7 @@ class DataEventPublisher:
             if self._worker_running:
                 return False
             self._stop_event.clear()
+            self._worker_expected = True
             self._worker_running = True
             spawner = spawn_fn or self._spawn_fn
             self._worker_handle = spawner(self._run_worker_loop)
@@ -410,6 +432,29 @@ class DataEventPublisher:
         self, snapshot: Snapshot, *, deliver_now: bool = False
     ) -> PublishResult:
         snapshot.validate_contract()
+        if self._config.api_mode == "data_v1":
+            try:
+                mapped, _raw_bytes, _digest = map_snapshot_to_data_v1(
+                    snapshot,
+                    use_traffic_origin_bins=self._config.snapshot_use_traffic_origin_bins,
+                )
+                return self._enqueue(
+                    dedup_key=f"snapshot:{snapshot.snapshot_id}",
+                    event_type="Snapshot",
+                    endpoint_path=DATA_V1_ENDPOINT_SNAPSHOTS,
+                    run_id=snapshot.run_id,
+                    payload=mapped,
+                    deliver_now=deliver_now,
+                )
+            except DataV1ContractBlockedError as exc:
+                return self._enqueue(
+                    dedup_key=f"snapshot:{snapshot.snapshot_id}",
+                    event_type="Snapshot",
+                    endpoint_path=f"CONTRACT_BLOCKED:{exc}",
+                    run_id=snapshot.run_id,
+                    payload=snapshot.to_dict(),
+                    deliver_now=False,
+                )
         return self._enqueue(
             dedup_key=f"snapshot:{snapshot.snapshot_id}",
             event_type="Snapshot",
@@ -424,6 +469,16 @@ class DataEventPublisher:
     ) -> PublishResult:
         if hasattr(routing_state, "validate_contract"):
             routing_state.validate_contract()  # type: ignore[attr-defined]
+        if self._config.api_mode == "data_v1":
+            mapped = map_routing_state_to_data_v1(routing_state)
+            return self._enqueue(
+                dedup_key=f"routing_state:{routing_state.run_id}:v{routing_state.state_version}",
+                event_type="RoutingStateSnapshot",
+                endpoint_path=DATA_V1_ENDPOINT_ROUTING,
+                run_id=routing_state.run_id,
+                payload=mapped,
+                deliver_now=deliver_now,
+            )
         return self._enqueue(
             dedup_key=f"routing_state:{routing_state.run_id}:v{routing_state.state_version}",
             event_type="RoutingStateSnapshot",
@@ -442,23 +497,57 @@ class DataEventPublisher:
         deliver_now: bool = False,
     ) -> PublishResult:
         serialized = [iv.to_dict() for iv in intervals]
+        endpoint = (
+            "CONTRACT_BLOCKED:NO_DATA_V1_ROUTING_HISTORY_ENDPOINT"
+            if self._config.api_mode == "data_v1"
+            else "/v1/data/routing-history"
+        )
         return self._enqueue(
             dedup_key=f"routing_history:{run_id}:v{state_version}:n{len(serialized)}",
             event_type="RoutingHistory",
-            endpoint_path="/v1/data/routing-history",
+            endpoint_path=endpoint,
             run_id=run_id,
             payload={
                 "run_id": run_id,
                 "state_version": int(state_version),
                 "intervals": serialized,
             },
-            deliver_now=deliver_now,
+            deliver_now=False if self._config.api_mode == "data_v1" else deliver_now,
         )
 
     def publish_apply_response(
-        self, response: ApplyResponse, *, deliver_now: bool = False
+        self,
+        response: ApplyResponse,
+        *,
+        deliver_now: bool = False,
+        full_routing_state: Optional[RoutingStateSnapshot] = None,
+        expand_unchanged_as_kept: bool = False,
     ) -> PublishResult:
         response.validate_contract()
+        if self._config.api_mode == "data_v1":
+            try:
+                mapped = map_apply_response_to_data_v1(
+                    response,
+                    full_routing_state=full_routing_state,
+                    expand_unchanged_as_kept=expand_unchanged_as_kept,
+                )
+                return self._enqueue(
+                    dedup_key=f"apply_response:{response.run_id}:{response.decision_batch_id}",
+                    event_type="ApplyResponse",
+                    endpoint_path=DATA_V1_ENDPOINT_APPLY_RESULTS,
+                    run_id=response.run_id,
+                    payload=mapped,
+                    deliver_now=deliver_now,
+                )
+            except DataV1ContractBlockedError as exc:
+                return self._enqueue(
+                    dedup_key=f"apply_response:{response.run_id}:{response.decision_batch_id}",
+                    event_type="ApplyResponse",
+                    endpoint_path=f"CONTRACT_BLOCKED:{exc}",
+                    run_id=response.run_id,
+                    payload=response.to_dict(),
+                    deliver_now=False,
+                )
         return self._enqueue(
             dedup_key=f"apply_response:{response.run_id}:{response.decision_batch_id}",
             event_type="ApplyResponse",
@@ -476,13 +565,18 @@ class DataEventPublisher:
         deliver_now: bool = False,
     ) -> PublishResult:
         ev_dict = evidence.to_dict()
+        endpoint = (
+            "CONTRACT_BLOCKED:NO_DATA_V1_VERIFICATION_EVIDENCE_ENDPOINT"
+            if self._config.api_mode == "data_v1"
+            else "/v1/data/verification-evidence"
+        )
         return self._enqueue(
             dedup_key=f"verification_evidence:{run_id}:{evidence.flow_group_id}:{evidence.verified_at_utc}",
             event_type="VerificationEvidence",
-            endpoint_path="/v1/data/verification-evidence",
+            endpoint_path=endpoint,
             run_id=run_id,
             payload={"run_id": run_id, "evidence": ev_dict},
-            deliver_now=deliver_now,
+            deliver_now=False if self._config.api_mode == "data_v1" else deliver_now,
         )
 
     # ------------------------------------------------------------------
@@ -494,6 +588,20 @@ class DataEventPublisher:
             rec = self._records[dedup_key]
             if rec.status == DeliveryStatus.DELIVERED:
                 return rec
+            if rec.endpoint_path.startswith("CONTRACT_BLOCKED:"):
+                updated = OutboxEventRecord(
+                    dedup_key=rec.dedup_key,
+                    event_type=rec.event_type,
+                    endpoint_path=rec.endpoint_path,
+                    run_id=rec.run_id,
+                    enqueued_at_utc=rec.enqueued_at_utc,
+                    payload=rec.payload,
+                    status=DeliveryStatus.PENDING_DELIVERY,
+                    attempts=rec.attempts,
+                    last_error=rec.endpoint_path,
+                )
+                self._records[dedup_key] = updated
+                return updated
             if dedup_key in self._in_flight_keys:
                 # Another worker/caller is already delivering this logical event; never double-send.
                 return rec
@@ -516,13 +624,27 @@ class DataEventPublisher:
             self._in_flight_keys.add(dedup_key)
 
         url = base_url.rstrip("/") + rec.endpoint_path
-        headers = {
-            "Content-Type": "application/json",
-            "X-Idempotency-Key": rec.dedup_key,
-            "X-SDN-Event-Type": rec.event_type,
-        }
-        if self._config.auth_token:
-            headers["X-SDN-Token"] = self._config.auth_token
+        is_v1 = self._config.api_mode == "data_v1"
+        if is_v1:
+            content_sha = (
+                compute_bytes_sha256(serialize_canonical_json_bytes(rec.payload))
+                if rec.endpoint_path == DATA_V1_ENDPOINT_SNAPSHOTS
+                else None
+            )
+            headers = build_data_v1_headers(
+                api_key=self._config.api_key or self._config.auth_token,
+                dedup_key=rec.dedup_key,
+                event_type=rec.event_type,
+                content_sha256=content_sha,
+            )
+        else:
+            headers = {
+                "Content-Type": "application/json",
+                "X-Idempotency-Key": rec.dedup_key,
+                "X-SDN-Event-Type": rec.event_type,
+            }
+            if self._config.auth_token:
+                headers["X-SDN-Token"] = self._config.auth_token
 
         attempts = rec.attempts
         last_err: Optional[str] = None
@@ -534,7 +656,12 @@ class DataEventPublisher:
                     status_code, body_text = self._sender_fn(
                         url, rec.payload, headers, self._config.timeout_s
                     )
-                    if 200 <= status_code < 300:
+                    ack_ok = (
+                        is_valid_data_v1_ack(status_code, body_text)
+                        if is_v1
+                        else (200 <= status_code < 300)
+                    )
+                    if ack_ok:
                         acked_at = _utc_now_rfc3339()
                         delivered = OutboxEventRecord(
                             dedup_key=rec.dedup_key,
@@ -563,7 +690,13 @@ class DataEventPublisher:
                                 },
                             )
                         return delivered
-                    last_err = f"HTTP_{status_code}: {body_text[:160]}"
+                    if 200 <= status_code < 300:
+                        last_err = f"INVALID_ACK_BODY_HTTP_{status_code}: {body_text[:160]}"
+                    else:
+                        last_err = f"HTTP_{status_code}: {body_text[:160]}"
+                    # Do not retry deterministic client/auth/contract errors (401/403/409/422)
+                    if status_code in (401, 403, 409, 422):
+                        break
                 except Exception as exc:
                     last_err = f"{type(exc).__name__}: {exc}"
 
@@ -630,9 +763,11 @@ class DataEventPublisher:
             pending = sum(1 for r in self._records.values() if r.status == DeliveryStatus.PENDING_DELIVERY)
             delivered = sum(1 for r in self._records.values() if r.status == DeliveryStatus.DELIVERED)
             return {
+                "api_mode": self._config.api_mode,
                 "endpoint_base_url": self._config.endpoint_base_url,
                 "outbox_dir": str(self._config.outbox_dir) if self._config.outbox_dir else None,
                 "auto_flush": bool(self._config.auto_flush),
+                "worker_expected": bool(self._worker_expected),
                 "flush_interval_s": float(self._config.flush_interval_s),
                 "worker_running": bool(self._worker_running),
                 "flush_cycles": int(self._flush_cycles),

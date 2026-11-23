@@ -313,6 +313,7 @@ class HTTPDemandReleaseProvider:
             and abs(existing.requested_mbps - candidate.requested_mbps) <= 1e-9
             and existing.window_start_utc == candidate.window_start_utc
             and existing.window_end_utc == candidate.window_end_utc
+            and existing.released_at_utc == candidate.released_at_utc
             and existing.flow_group_id == candidate.flow_group_id
             and existing.bin_index == candidate.bin_index
         )
@@ -756,7 +757,7 @@ class SDNNorthboundHTTPApp:
             data_blockers.append("DATA_ENDPOINT_NOT_CONFIGURED")
         else:
             assert dp_summary is not None
-            if dp_summary.get("auto_flush") and not dp_summary.get("worker_running"):
+            if not dp_summary.get("worker_running"):
                 data_blockers.append("DATA_OUTBOX_WORKER_NOT_RUNNING")
             if int(dp_summary.get("pending_delivery_count") or 0) > 0 and dp_summary.get("last_error"):
                 data_blockers.append(f"DATA_DELIVERY_BACKLOG:{dp_summary['last_error']}")

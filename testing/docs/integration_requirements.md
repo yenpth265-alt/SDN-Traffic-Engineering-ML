@@ -9,7 +9,7 @@
 
 Tài liệu này chuyển 16 xung đột C01–C16 đã rà soát thành các yêu cầu có phương án chốt cụ thể, người chịu trách nhiệm và bằng chứng xác nhận. Nhóm có thể dùng làm agenda họp và danh sách việc cần sửa sau họp. Mục tiêu là các module đọc được dữ liệu của nhau, quyết định dựa trên đúng trạng thái mạng, và kết quả thực nghiệm có thể kiểm chứng.
 
-Căn cứ là bộ `test_plan.md`, `interfaces.md`, `acceptance_criteria.md` phiên bản `testing_v2 2026-11-10`, được tổng hợp từ tài liệu thành viên. Đây là tài liệu đề nghị ra quyết định, không thay thế hợp đồng giao diện chi tiết và không phải kết quả nghiệm thu mã nguồn.
+Căn cứ gồm [kế hoạch kiểm thử](test_plan_v2.md), [giao diện](interfaces_v2.md), [tiêu chí nghiệm thu](acceptance_criteria_v2.md) và [bằng chứng thực thi](../results/README.md). Rà soát ngày 24/11/2026 dùng mốc `main@db2dacd`. Tình trạng thực hiện được bổ sung ở mục 9.
 
 Trong mỗi yêu cầu, **“đề nghị chốt” là phương án ưu tiên để thảo luận**, chưa phải quyết định đã được thông qua. Nhóm có thể chọn phương án khác nếu sửa đồng bộ producer, consumer, cấu hình và kiểm thử liên quan. Chấp thuận yêu cầu không đồng nghĩa đã triển khai xong.
 
@@ -110,7 +110,7 @@ Nếu thiếu lịch sử: chờ trong budget hữu hạn hoặc dùng fallback 
 }
 ```
 
-Đây là ví dụ contract lõi; version/hash/envelope theo `interfaces.md` đi kèm transport hoặc audit. Response phải chứa batch status, state_version, completed_at và kết quả actual/status/reason từng nhóm. Các trạng thái cuối gồm APPLIED, REJECTED, FAILED, ROLLED_BACK, PARTIAL, INCONSISTENT; nhóm chưa biết có actual_path_id=null.
+Đây là ví dụ contract lõi; version/hash/envelope theo `interfaces_v2.md` đi kèm transport hoặc audit. Response phải chứa batch status, state_version, completed_at và kết quả actual/status/reason từng nhóm. Các trạng thái cuối gồm APPLIED, REJECTED, FAILED, ROLLED_BACK, PARTIAL, INCONSISTENT; nhóm chưa biết có actual_path_id=null.
 
 **Đầu ra cần giao:** Schema request/response, adapter và valid/invalid fixtures.
 
@@ -134,7 +134,7 @@ Mọi tick giữ tuyến vẫn có control tick record và reason; không ép `K
 
 **Đề nghị chốt:** Runner ghi đủ `run_started_at_utc`, `traffic_started_at_utc`, `measurement_started_at_utc` và mốc monotonic tương ứng. Trong phương án hiện tại: demand_plan và traffic_actual dùng traffic origin; predictions forecast offsets dùng measurement origin; API/snapshot/apply dùng UTC. Mỗi field phải có origin khai báo, kể cả adapter của nguồn cũ. Không gán `issued_at` bằng forecast_start để che latency.
 
-Ví dụ traffic bắt đầu 10:00:00Z, đo bắt đầu 10:01:10Z: forecast offset 100–105 tương ứng UTC 10:02:50Z–10:02:55Z và schedule offset 170–175. Cửa sổ dùng `[start,end)`; duration dựa trên monotonic cùng clock domain.
+Ví dụ TC-I03 với warm-up 60 s. Traffic bắt đầu `10:00:00Z`, đo bắt đầu `10:01:00Z`. Khoảng dự báo `[100,105)` theo measurement tương ứng `[160,165)` theo traffic và `[10:02:40Z,10:02:45Z)` theo UTC. Cửa sổ dùng `[start,end)`; duration dựa trên monotonic cùng clock domain.
 
 **Đầu ra cần giao:** Bảng field–unit–origin, run manifest mẫu và round-trip converter.
 
@@ -335,6 +335,21 @@ Nhân bản mẫu cho đủ REQ-01–REQ-16 khi sử dụng. Mỗi quyết đị
 - Mỗi producer/consumer đã sửa tài liệu/cấu hình và giao fixture đúng lựa chọn cuối; các bản cũ không tiếp tục đóng vai trò default.
 - Các contract cases liên quan đạt với bằng chứng, đặc biệt ID/time/epsilon/READY/actual/version; không còn P0 mở trước tích hợp tương ứng.
 - Các ngưỡng cần calibration có kết quả pilot và config khóa trước benchmark; đủ run matrix/seed/initial state/metric policy thống nhất.
-- Testing cập nhật `interfaces.md`, `test_plan.md`, `acceptance_criteria.md` theo quyết định thật. File requirement không tự làm thay đổi ba tài liệu đó.
+- Testing cập nhật `interfaces_v2.md`, `test_plan_v2.md`, `acceptance_criteria_v2.md` theo quyết định thật. File requirement không tự làm thay đổi ba tài liệu đó.
 
 Kết quả mong đợi là một bộ quyết định có thể triển khai và kiểm thử, không phải cam kết RF luôn tốt hơn đối chứng hoặc xác nhận tiến độ bằng số lượng tài liệu.
+
+## 9. Tiến độ xác minh và yêu cầu còn mở
+
+Các nhóm dưới đây bao phủ REQ-01–REQ-16. Kết quả thực thi thuộc `44acd20`. Các phương án trong cột cuối chờ xác nhận.
+
+| Yêu cầu | Bằng chứng hiện có | Điều kiện còn thiếu |
+| --- | --- | --- |
+| REQ-01, REQ-12 | Fixture kiểm được topology và ID API. SDN có báo cáo bootstrap riêng trên OVS. | Network và SDN xác nhận mapping ID, hash và initial paths dùng chung khi chạy TC-I01. |
+| REQ-03, REQ-06 | TC-I02 đạt ca dữ liệu muộn và tương lai. TC-I03 xác nhận warm-up 60 s, traffic 160 ↔ measurement 100. | Data, Network, SDN và ML chốt nguồn availability và schema khi chuyển snapshot sang Predictor. |
+| REQ-02, REQ-07, REQ-15 | PostgreSQL lưu một batch và 240 dòng khi bộ test dùng bin nguyên. Forecast gốc bị từ chối 422. | ML xuất bin nguyên. Optimization nhận batch READY và kiểm phép mean trên H bước. Xác nhận epsilon được áp một lần trên đường chạy tích hợp. |
+| REQ-04, REQ-05, REQ-13, REQ-16 | Ca fixture xác nhận version, deadline trước ghi và apply đủ nhóm với routing được ghi trước. | Data, Optimization và SDN thống nhất adapter decision/result và thứ tự ACK. Chạy ca runtime, rollback, UNKNOWN và đo latency. |
+| REQ-08, REQ-09 | Nhánh Optimization có MILP, trigger và serializer. | Optimization và QA đối chiếu mục tiêu J, điều kiện đổi đường và các ngưỡng trên solver trong pilot. |
+| REQ-10, REQ-11, REQ-14 | Có manifest và fixture telemetry. Ca CI dùng telemetry dry-run. | QA và các module chốt split, đo counter trên OVS và khóa ma trận đối chứng trước benchmark. |
+
+**Lỗi đăng ký run thuộc REQ-10/13.** Data và Runner cần xác nhận replay của manifest cùng nội dung và ý nghĩa của trạng thái run khi đăng ký lại. Điều kiện đóng gồm HTTP 200 với `inserted: 0`, còn đúng một run trong DB và 409 khi thay dữ liệu đăng ký với cùng ID. [Bằng chứng và các lỗi giao diện](../results/README.md).

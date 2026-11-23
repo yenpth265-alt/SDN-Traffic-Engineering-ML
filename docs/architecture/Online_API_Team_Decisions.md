@@ -1,6 +1,6 @@
 # API online Data — các nội dung cần team chốt
 
-Cập nhật: 23/11/2026. Các phương án dưới đây đang được dùng tạm trong code, cần các module xác nhận trước khi tích hợp.
+Cập nhật ngày 24/11/2026 theo `main@db2dacd`. Các phương án tích hợp vẫn chờ đầu mối phụ trách xác nhận.
 
 ## Luồng thống nhất tạm thời
 
@@ -67,7 +67,7 @@ Mã D tham chiếu commit của Data. Nhánh QA lấy `main` tại [6e5e3b9](htt
 
 | Giao diện | Module, commit và file | Fixture và ca kiểm | Kết quả kỳ vọng | Xác nhận |
 |---|---|---|---|---|
-| Runner → Data, đăng ký run và kết thúc | Q + D · `data/ingestion/management_api.py`, `configs/experiments/runner_manifest.json` | Run 60 s, lệch warm-up, chạy lại cùng ID · `test_runner_and_event_replay`, TC-I03 | Đăng ký `1 → 0`, warm-up sai `422`, kết thúc lại `1 → 0`, đổi trạng thái cuối `409` | `ndtchumoa`, `VanNgHong` |
+| Runner → Data, đăng ký run và kết thúc | Q + D · `data/ingestion/management_api.py`, `configs/experiments/runner_manifest.json` | Run có warm-up 60 s, chạy lại cùng ID · `test_runner_registration_replay`, `test_runner_and_event_replay`, TC-I03 | Đăng ký `1 → 0`, warm-up sai `422`, kết thúc lại `1 → 0`, đổi trạng thái cuối `409` | `ndtchumoa`, `VanNgHong` |
 | Data → các module, topology | N + D · `configs/network/topology_bundle.json`, `management_api.py` | Topology thật, fixture routing và telemetry · `test_telemetry_retry_and_topology`, TC-I01 | GET đúng topology 48 nhóm luồng, sai cổng đo `422` trong bộ kiểm thử Data | `daylauyen2006-alt`, `VanNgHong`, `PhamAn56` |
 | Network → Data, demand và traffic | N + D · `network/traffic_generator/sender.py`, `receiver.py`, `data/ingestion/online_store.py` | Demand dựa trên lịch sử fixture snapshot · TC-I02, `test_traffic_fk_rolls_back_batch` | Demand replay `1 → 0`, sửa giá trị cùng ID `409`. Traffic có FK sai `422` và rollback lô. Đầu mối ghép sender/receiver chờ chốt | `daylauyen2006-alt`, `VanNgHong` |
 | Network → Data, telemetry | N + D · `network/telemetry/telemetry_collector.py`, `data/ingestion/online_models.py` | [telemetry.json](../../testing/fixtures/online_contract/telemetry.json) · `test_telemetry_retry_and_topology` | 24 link trong dry-run, replay `24 → 0`, sai count `422`, ID cũ nội dung khác `409`. Mỗi link một dòng trong lô | `daylauyen2006-alt`, `VanNgHong` |
@@ -122,6 +122,8 @@ python -m unittest -v data.ingestion.test_management_api \
 
 Lượt xác nhận chạy trên GitHub Actions Ubuntu, Python 3.12 và PostgreSQL 17.12. Workflow kết nối qua TCP vào DB kiểm thử riêng `sdn_qa`, xác nhận `SELECT version(), current_database()` và đọc lại đủ migration `1, 2, 3`. FastAPI `TestClient` gọi các route và validator thật của Data. Driver `psycopg2-binary 2.9.13` kết nối PostgreSQL để lưu và đọc lại dữ liệu. Commit chạy suite là [44acd20](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/commit/44acd200bb4892dfd259d3e1d3523cba5d993738). Xem bước 9 và 10 của [job kiểm thử PostgreSQL](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/45223682285/job/137864381051).
 
+Đây là lượt CI gần nhất tại thời điểm rà soát. Sau PR #5, `main` có thay đổi ở telemetry collector tại `db2dacd`. Kết quả chưa được chạy lại trên mốc mã mới. [Sổ kết quả Testing](../../testing/results/README.md) ghi trạng thái đã kiểm, phần dùng fixture và điều kiện nghiệm thu còn mở.
+
 **Kết quả suite: 16/17 ca đạt, một ca lỗi đăng ký run lặp.** Các ca kiểm có payload gốc bị từ chối được ghi riêng dưới đây. Trạng thái chấp nhận của từng module vẫn chờ đầu mối xác nhận.
 
 | Ca kiểm | Kỳ vọng | Thực tế | Trạng thái | Bằng chứng trong job |
@@ -146,6 +148,9 @@ Lượt xác nhận chạy trên GitHub Actions Ubuntu, Python 3.12 và PostgreS
 
 - **Data và Runner.** Lỗi đăng ký lặp tái hiện cả khi run đang chạy. `create_run` đưa `manifest` dưới dạng `bytes`, còn `psycopg2` đọc `BYTEA` thành `memoryview`. Phép so sánh trực tiếp trong `online_store.insert_once` báo khác với cùng nội dung byte. `VanNgHong` và `ndtchumoa` xác nhận kỳ vọng ACK và quy tắc so sánh.
 - **ML và Data.** `yenpth265-alt` và `VanNgHong` xác nhận kiểu wire của hai trường bin. Fixture gốc và ca `422` được giữ để kiểm lại sau khi hai module thống nhất.
-- **SDN, Optimization và Data.** `PhamAn56`, `dangtquang0509` và `VanNgHong` xác nhận cách dùng kết quả đủ 48 nhóm và thứ tự publish routing trước apply. Trên nhánh QA, đường gửi `result_full` có đủ dữ liệu để kiểm.
+- **SDN, Optimization và Data.** `PhamAn56`, `dangtquang0509` và `VanNgHong` xác nhận cách dùng kết quả đủ 48 nhóm và thứ tự publish routing trước apply. Fixture `result_full` có đủ dữ liệu để kiểm. Đường publish runtime hiện xếp kết quả trước routing và chưa truyền tùy chọn mở rộng.
+
+- **SDN, Data và ML.** Chốt schema snapshot đọc từ Data, nguồn `available_at_utc` và phép kiểm hash. TC-I02 dùng dữ liệu history từ DB để dựng lại đầu vào trên snapshot SDN. Cần chạy trực tiếp GET snapshot từ Data vào Predictor.
+- **Data và Optimization.** Nối batch READY dạng danh sách với vector nhóm trong planner. Ca hiện tại dựng bản audit decision trong bộ test. Điều kiện đóng là đọc forecast, chạy planner và truy vết decision thực đến SDN qua cùng ID.
 
 Lượt [45222814157](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/45222814157) dừng các ca phụ thuộc ở bước đăng ký lặp. Lượt [45223263846](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/45223263846) tách ca đó và phát hiện biến thể telemetry sai counter status nhận `422`. Lượt xác nhận [45223682285](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/45223682285) kiểm riêng counter status sai và xung đột nội dung hợp lệ, rồi ghi lại kết quả ở bảng trên.

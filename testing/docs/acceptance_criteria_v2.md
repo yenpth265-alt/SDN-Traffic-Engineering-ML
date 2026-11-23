@@ -4,16 +4,17 @@
 - Đồng bộ test_plan_v2.md và interfaces_v2.md.
 - Căn cứ bổ sung: báo cáo rà soát thiết kế tích hợp và các file thành viên hiện nhận.
 - Phụ trách Testing/QA/QC.
-- Trạng thái: hoàn thiện đặc tả để owner xác nhận, chưa nghiệm thu triển khai.
+- Rà soát thực thi ngày 24/11/2026 trên `main` tại `db2dacd`.
+- Trạng thái nghiệm thu tích hợp: đang chờ xác nhận C01–C16 và chạy TC-I01.
 
-Bộ này hoàn thiện tiêu chí thiết kế, không công bố module đã chạy đạt. Các quyết định C01–C16 còn OPEN/PENDING owner; toàn bộ case NOT_RUN. Case phụ thuộc contract chưa chốt được đánh BLOCKED khi lập lịch thực thi.
+[Bằng chứng thực thi](../results/README.md) ghi ca đã chạy, kết quả và phạm vi xác minh.
 
 ## 1. Cách sử dụng và quyết định nghiệm thu
 
 - `Bắt buộc`: tính đúng đắn/chống leakage/truy vết; phải có evidence PASS trước khi mở gate liên quan.
 - `Hiệu chuẩn`: chỉ có ngưỡng sau pilot/validation và khóa trước test; chưa có trị số thì BLOCKED cho benchmark, không tự cho PASS.
 - `Nghiên cứu`: báo số đo và kết luận trung thực; không yêu cầu RF luôn thắng hoặc đạt một tỷ lệ cải thiện đặt trước.
-- Trạng thái case: NOT_RUN, PASS, FAIL, BLOCKED; trạng thái sign-off: pending, accepted, rejected. Hiện tại toàn bộ case là NOT_RUN, sign-off pending.
+- Trạng thái case: NOT_RUN, PASS, FAIL, BLOCKED; trạng thái sign-off: pending, accepted, rejected. Dùng trạng thái đang ghi tại [sổ kết quả](../results/README.md). Ghi `NOT_RUN` cho ca chưa có bằng chứng thực thi. Xác nhận của người phụ trách vẫn ở trạng thái `pending`.
 - PASS cần expected khớp actual, đúng phiên bản/hash và có raw evidence. Thiếu evidence không là PASS. Mọi thay đổi điều kiện phải ghi version/reason và retest.
 
 Severity blocker: leakage, APPLIED giả, state không phản ánh thực tế, sai metric chính không thể truy vết. Major: sai hợp đồng/đơn vị/constraints/tái lập. Minor: tài liệu hoặc hiển thị không làm sai kết quả. Gate benchmark: 100% case bắt buộc PASS, không blocker/major mở, đủ các ngưỡng hiệu chuẩn khóa; không dùng tỷ lệ pass 95% để bỏ qua lỗi trọng yếu.
@@ -105,8 +106,8 @@ Batch không được quảng cáo nguyên tử toàn mạng. Khi PARTIAL, từn
 | AC-E04 Bắt buộc | Giữ run lỗi; chỉ loại infra theo rule khóa; không loại RF chậm/fallback; paired đúng schedule, báo n/missing/CI | TC-E03 | exclusions, rerun links, paired table/CI config |
 | AC-E05 Nghiên cứu | Kết luận theo scenario dựa hiệu ứng/CI/chi phí; n=seed/lịch, không=giây; báo kết quả âm và giới hạn | Review report | run points, plots, report, uncertainty |
 | AC-I01 Bắt buộc | Liên kết schedule→run→snapshot→forecast→decision→verified state→metric đầy đủ, không sai unit/time/id | TC-I01; một fixture end-to-end và một lượt pilot thật | evidence index, interface validation, state/history |
-| AC-I02 Bắt buộc | C01–C16 có owner/xác nhận; một config hash, schema/API version và adapter Data(2).md được khóa | Review baseline và round-trip JSONL | decision log, signed confirmations, contract fixtures |
-| AC-I03 Bắt buộc | Tách traffic/run/measurement origin; round-trip UTC–offset đúng; issued_at không giả forecast_start | TC-I03; traffic10:00,measure10:01:10,bin100→10:02:50Z | run manifest/time mapping, prediction rows và ApplyRequest |
+| AC-I02 Bắt buộc | C01–C16 có owner/xác nhận; một config hash, phiên bản schema/API và adapter được khóa theo hợp đồng đã xác nhận | Review baseline và round-trip JSONL | decision log, signed confirmations, contract fixtures |
+| AC-I03 Bắt buộc | Tách traffic/run/measurement origin; round-trip UTC–offset đúng; issued_at không giả forecast_start | TC-I03 với warm-up 60 s. Traffic bin 160 = measurement bin 100 tại `10:02:40Z` | run manifest/time mapping, prediction rows và ApplyRequest |
 
 ## 8. Bộ chèn lỗi và expected chung
 
@@ -157,6 +158,6 @@ Mỗi module có producer xác nhận evidence và QA đối chiếu; Testing t�
 
 ## 11. Kết luận nghiệm thu và việc làm tiếp
 
-Hiện đủ cơ sở để lập đặc tả kiểm thử, chưa đủ cơ sở kết luận module PASS hay nhóm hoàn thành bao nhiêu phần trăm. Bản v2 đã phản ánh C01–C14 của báo cáo và bổ sung C15 (prediction PK/completeness), C16 (version/history testing cũ lệch SDN). C03 indexing, C07 epsilon, C09 N và C14 “upper bound” trong báo cáo được xử lý theo test_plan mục2, không sao chép mặc định.
+Lượt PostgreSQL ở `44acd20` có 16/17 ca đạt. Replay đăng ký run thất bại. TC-I02 đạt trong phạm vi kiểm lịch sử và đầu vào ML dựng từ fixture. TC-I03 xác minh gốc thời gian và số dòng forecast với bin nguyên do bộ test chuẩn hóa. Apply đủ 48 nhóm đạt với tùy chọn mở rộng của adapter và routing được ghi trước. Các kết quả này hỗ trợ đánh giá từng tiêu chí, còn nghiệm thu liên module cần đầu ra nguyên dạng của producer và `TC-I01` trên vòng tích hợp. [Kết quả và giới hạn](../results/README.md)
 
 Trình tự: owner xác nhận contract và sửa file mình → giao fixtures/schema/mã → QA chạy case và lập defect → pilot/S0 khóa phép đo → freeze → benchmark → tái tính metric/paired analysis → sign-off. QA có thể nghiệm thu chức năng khi RF không thắng baseline; kết quả nghiên cứu vẫn phải giữ và phân tích trung thực.

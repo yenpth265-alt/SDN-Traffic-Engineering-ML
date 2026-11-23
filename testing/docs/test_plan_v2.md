@@ -2,9 +2,10 @@
 
 - Phiên bản `testing_v2 2026-11-10`.
 - Phụ trách Testing/QA/QC.
-- Trạng thái: hoàn thiện đặc tả để owner xác nhận, chưa nghiệm thu triển khai.
+- Rà soát thực thi ngày 24/11/2026 trên `main` tại `db2dacd`.
+- Trạng thái nghiệm thu tích hợp và benchmark: đang chờ.
 
-Bộ tài liệu đồng bộ: `test_plan_v2.md`, `interfaces_v2.md`, `acceptance_criteria_v2.md`. Mọi quy ước chọn trong bộ này là đề xuất tích hợp; chưa có biên bản owner xác nhận hoặc kết quả chạy kèm theo. Không suy ra tỷ lệ hoàn thành lập trình từ số lượng file thiết kế.
+Bộ tài liệu gồm [tiêu chí nghiệm thu](acceptance_criteria_v2.md), [giao diện](interfaces_v2.md) và [yêu cầu tích hợp](integration_requirements.md). [Sổ kết quả](../results/README.md) ghi tình trạng từng ca theo phạm vi, commit và bằng chứng của lượt chạy. Các quyết định về hợp đồng đích vẫn chờ người phụ trách xác nhận.
 
 ## 1. Tổng quan đề tài và nguồn căn cứ
 
@@ -20,16 +21,18 @@ Ngoài phạm vi chính: RL, chống tấn công, phục hồi lỗi link/switch
 
 ### 2.1. Nguồn và giới hạn kết luận
 
-Rà soát là nguồn tham khảo phân tích, không phải biên bản chốt. Một số ví dụ trong báo cáo phản ánh bản trước: SDN hiện đã dùng h1_h3; ML hiện dùng hex, đã quy định H dòng và Optimization tự tính mean. Data(2).md tự ghi schema_v1, không phải “Data_v2” mà ML dẫn. Không dùng tên phiên bản được dẫn lại thay cho schema thực nhận. Không có source code, run log, model hay kết quả thực nghiệm trong bộ này; trạng thái triển khai là CHƯA XÁC MINH.
+Thiết kế ban đầu là căn cứ cho các tiêu chí dưới đây. Bảng cập nhật ghi phạm vi có bằng chứng tại mốc rà soát.
 
-| Role | Bằng chứng đã có về thiết kế | Phần cần bàn giao để xác minh tiến độ tiếp theo |
+| Module | Bằng chứng đã có | Việc còn mở |
 | --- | --- | --- |
-| Network | Topology/DPID/port, 48 nhóm/96 đường, S0–S5, seed và thời lượng | config/CSV thực, MAC/ARP/initial paths, generator/sender/receiver/runner và S0 logs |
-| Data | Schema v1, raw→clean→db→export, split, snapshot provider dự kiến | Migration H-step PK, X/y_vector, snapshot/forecast completeness, state/batch ETL và fixtures |
-| ML | RF multi-output, baselines, L/H/epsilon, 7-field prediction rows | Chuẩn ID, model/metadata, train/validation kết quả, batch predict và latency thực |
-| Optimization | MILP, trigger/hysteresis/hold/B, output JSON nháp | R4 chính xác, epsilon policy, ApplyRequest adapter, recompute U/J và solver tests |
-| SDN | Ba đặc tả khá đầy đủ; đã chuẩn hóa ID, version, verify/partial | Mã Ryu, transport/timeouts, output counter/state thật và P1↔P2 evidence |
-| Testing | Đã có kế hoạch/tiêu chí/interfaces | Bản v2 này sửa yêu cầu lỗi thời; tiếp theo là fixture, thực thi case, defect và biên bản |
+| Network | Topology, UDP sender/receiver, bộ ghép traffic và collector trên main. Fixture telemetry dry-run đã được gửi qua API Data. | Kiểm collector tại commit mới, đối chiếu counter và hiệu chuẩn với OVS. |
+| Data | API và ba migration đã chạy trên PostgreSQL. Có readback cho replay, snapshot, forecast và routing. | Sửa replay đăng ký run, xác nhận schema snapshot dùng chung với SDN và ML. |
+| ML | Có pipeline offline và các mode Persistence, Moving Average, Random Forest. TC-I02 kiểm M1–M3 với đầu vào được dựng trong bộ test. | Nối snapshot đọc từ API Data, xuất bin nguyên tại producer, xác nhận pilot theo split hiện hành. |
+| Optimization | Nhánh riêng có planner và serializer ApplyRequest dùng để tạo fixture. | Kiểm chuyển batch READY sang vector theo nhóm và lưu decision do planner sinh. |
+| SDN | Báo cáo module có chạy Mininet/OVS riêng cho bootstrap, chuyển đường, rollback và reconcile. | Kiểm publish routing/apply qua Data trong cùng một run và giữ bằng chứng trạng thái đã xác minh. |
+| Testing | Có fixture producer, log CI và truy vấn đọc lại PostgreSQL. | Chạy lại trên commit tích hợp, chạy TC-I01 rồi pilot hiệu chuẩn và benchmark. |
+
+Nguồn tiến độ và các nhánh liên quan nằm trong [sổ kết quả](../results/README.md).
 
 ### 2.2. Sổ xung đột và quyết định tích hợp đề xuất
 
@@ -203,10 +206,10 @@ Ví dụ fixture: T=1 s, yêu cầu 100 packet×1200 byte, gửi thành công 10
 | TC-D07 | AC-D09/S07 | Batch3 nhóm APPLIED/ROLLED_BACK/UNKNOWN; ingest twice | actual/status/response/state version khớp; UNKNOWN=null; history không chồng |
 | TC-M04 | AC-M08 | raw4,epsilon=.1,k=1; đưa qua ML→Data→Optimization | adjusted4.4,b_used4.4; không4.84; mean(raw vector) và mean(final) truy vết |
 | TC-I02 | AC-D05/M03 | Giữ lịch sử không đổi, sửa mạnh tương lai trong schedule ẩn; chèn late history | M1–M3 output bất biến với tương lai; M4 có thể đổi; late không vào X |
-| TC-I03 | AC-I03 | traffic10:00:00Z,measurement10:01:10Z,t=100,H=5 | DB forecast100..105→UTC10:02:50..55Z; schedule bin170..175; round-trip không lệch |
+| TC-I03 | AC-I03 | Traffic `10:00:00Z`, measurement `10:01:00Z`, warm-up 60 s, t=100, H=5 | Traffic bin 160 = measurement bin 100 tại `10:02:40Z`. DB lưu 240 dòng ở các bin 100–104, kết thúc khoảng dự báo lúc `10:02:45Z` |
 | TC-I01 | AC-I01 | Một lịch end-to-end qua tất cả interfaces | Truy vết schedule→run→snapshot→forecast→batch→verify→metric |
 
-Mỗi case có test record gồm case_id, requirement_id, owner, input/hash, expected, actual, status, evidence_uri, defect_id, git/config hash và thời điểm. Trạng thái thiết kế hiện tại là NOT_RUN; không điền PASS nếu chưa có actual/evidence. Fault dùng F01–F12 của acceptance_criteria.md mục8; không gán số lỗi từ PDF chưa được cung cấp để đối chiếu; TC-D05 và TC-O03 vẫn bắt buộc kiểm tra logic dù không thuộc 12 fault lượt ưu tiên.
+Mỗi case có test record gồm case_id, requirement_id, owner, input/hash, expected, actual, status, evidence_uri, defect_id, git/config hash và thời điểm. Trạng thái thực thi hiện hành nằm trong [sổ kết quả](../results/README.md). Các ca chưa có bằng chứng vẫn là NOT_RUN. Fault dùng F01–F12 của acceptance_criteria_v2.md mục 8; không gán số lỗi từ PDF chưa được cung cấp để đối chiếu; TC-D05 và TC-O03 vẫn bắt buộc kiểm tra logic dù không thuộc 12 fault lượt ưu tiên.
 
 ## 10. Gate, lỗi và quy tắc loại run
 
@@ -263,8 +266,8 @@ Bàn giao hiện tại: ba tài liệu thiết kế, checklist acceptance và h�
 
 ## 13. Truy vết thay đổi và điểm cần owner xác nhận
 
-Đối chiếu [sổ quyết định API online](../../docs/architecture/Online_API_Team_Decisions.md#các-mục-c01c16-liên-quan) để xem commit, fixture, ca kiểm thử PostgreSQL và đầu mối xác nhận. Đợt QA ngày 23/11/2026 dùng warm-up 60 s cho TC-I03, cho cặp mốc traffic 160 và measurement 100. Ví dụ warm-up 70 s trong bảng trên vẫn là một ca kiểm quy đổi khác.
+Đối chiếu [sổ quyết định API online](../../docs/architecture/Online_API_Team_Decisions.md#các-mục-c01c16-liên-quan) để xem commit, fixture, ca kiểm thử PostgreSQL và đầu mối xác nhận. TC-I03 dùng warm-up 60 s. Cấu hình warm-up 70 s trong phần thiết kế thực nghiệm vẫn là đề xuất cần xác nhận riêng.
 
 Bản v2 thay các giả định lỗi thời: N2→N3 đề xuất; scalar-only→vector H bước/mean;72 lượt→225 lượt đề xuất theo Network; S5 mở rộng→chính; path/link IDs theo SDN; version nhiều lần→tối đa1 lần/batch. Loại tham chiếu trang PDF chưa kiểm tra. Giữ metric/cohort/raw/paired analysis còn đúng; sửa acceptance và interfaces tương ứng.
 
-Decision log khi họp: conflict_id,chosen_contract,source_sections,owner_names,confirmed_at_utc,protocol_version,config_hash,evidence_refs,status. Hiện owner_names/confirmed_at để trống; status=OPEN. Kế tiếp cần owner sửa source docs và cung cấp fixtures trước code tích hợp. Không yêu cầu có chữ ký giả để hoàn tất thiết kế testing.
+Decision log khi họp: conflict_id,chosen_contract,source_sections,owner_names,confirmed_at_utc,protocol_version,config_hash,evidence_refs,status. Đầu mối đã được ghi trong sổ quyết định. Mốc xác nhận và quyết định cuối vẫn chờ từng module.

@@ -3,9 +3,10 @@
 - Phiên bản `testing_v2 2026-11-10`.
 - API mục tiêu `sdn_qa_api_v2`.
 - Phụ trách Testing/QA/QC.
-- Trạng thái: hoàn thiện đặc tả để owner xác nhận, chưa nghiệm thu triển khai.
+- Rà soát thực thi ngày 24/11/2026 trên `main` tại `db2dacd`.
+- Trạng thái: đặc tả đích đang chờ xác nhận. Mục 14 đối chiếu API Data v1 hiện hành và bằng chứng kiểm thử.
 
-Đây là hợp đồng đích đề xuất dựa trên file từng role và báo cáo rà soát; chưa phải xác nhận API đã hiện thực. Các owner cần xác nhận C01–C16 trong test_plan_v2.md trước freeze. Giữ nguyên ranh giới: Network tạo tải; Data lưu/cấp snapshot; ML dự báo; Optimization quyết định; SDN thực thi/xác minh; Testing đối chiếu độc lập. Không sửa file thành viên trong đợt này.
+C01–C16 được theo dõi trong [sổ quyết định](../../docs/architecture/Online_API_Team_Decisions.md). Network tạo tải, Data lưu và cấp dữ liệu, ML dự báo, Optimization lập quyết định và SDN xác minh trạng thái định tuyến.
 
 ## 1. Danh mục và quyền sở hữu
 
@@ -52,9 +53,9 @@ Baseline đề xuất:
 - `traffic_actual.window_start/end`: từ traffic_started_at_utc, giữ semantics Data §6.1.
 - `predictions.forecast_start/end`: từ measurement_started_at_utc, giữ semantics ML §6.3.
 - Snapshot/ApplyRequest UTC; mọi interval `[start,end)`. ML d[k] là giá trị trong [k,k+1) theo measurement origin; các bin warm-up âm có thể là lịch sử hợp lệ.
-- Quy đổi `utc=declared_origin+offset_s`; measurement=t0+70s và forecast bin100 thì schedule bin170. Không cộng warm-up hai lần.
+- Quy đổi `utc=declared_origin+offset_s`. Khi biên đo cách biên phát lưu lượng 60 s, forecast bin 100 tương ứng schedule bin 160. Chỉ áp độ lệch một lần khi chuyển origin.
 
-Ví dụ TC-I03: traffic10:00:00Z; measurement10:01:10Z; forecast offsets100..105 → UTC10:02:50Z..10:02:55Z. Ví dụ run origin trong báo cáo chỉ áp khi field đó thực sự khai báo run origin.
+TC-I03 dùng traffic `10:00:00Z` và measurement `10:01:00Z`. Tại `10:02:40Z`, traffic bin 160 tương ứng measurement bin 100. H=5 phủ các bin 100–104 trong khoảng UTC `[10:02:40Z,10:02:45Z)`.
 
 Ở cutoff t, X lấy [t−L,t), Y lấy [t,t+H); mẫu online chỉ dùng khi window_end≤cutoff và available_at≤snapshot_as_of≤decision time. `issued_at` là lúc forecast phát hành, không phải forecast_start và không bị backdate để khớp bin. `forecast_start` là target anchor t. Late history đến sau snapshot_as_of không được nhập lại snapshot bất biến.
 
@@ -251,6 +252,19 @@ MetricRecord: experiment/run/schedule/scenario/method,metric_name/version,value/
 | Apply/state | valid/stale/wrong path,duplicate/conflict/BUSY,partial+rollback+UNKNOWN,expiry sau write; TC-S01..S03/D07 |
 | Metrics | 100send/90unique/2duplicates,late/cohort/counter reset; TC-D05/E01 |
 
-Mỗi producer giao valid/invalid input, expected output, schema/version/hash; consumer validate và ghi actual/evidence. JSON Schema, parser và executable fixtures là đầu ra triển khai tiếp theo, chưa có trong bộ tài liệu này. QA không ghi PASS chỉ vì ví dụ JSON parse được.
+Mỗi producer giao valid/invalid input, expected output, schema/version/hash; consumer validate và ghi actual/evidence. Các [fixture API online](../fixtures/online_contract/README.md) đã có đầu ra producer và ca kiểm qua validator Data v1. Điều kiện chạy với payload nguyên dạng được ghi tại mục 14.
 
 Owner sign-off C01–C16 dùng decision log trong test_plan. Mọi mục còn OPEN ở bản này. Các field MUST_LOCK: transport/ack/retry/timeouts,origins/Δ/L/H/MA window/epsilon policy,TH/N/h/B/hold/lambda,tolerances,k_e/point/calibration,initial paths/ARP,pacing/headroom,probe/deadline/drain/coverage,rebin,seed/split/run matrix. Chỉ freeze khi đã có giá trị thực, owner/time và hashes; đổi semantics phải bump version và regression các case liên quan.
+
+## 14. API Data v1 và các điểm cần chốt
+
+| Giao diện | Quan sát tại mốc rà soát | Điều kiện kiểm lại |
+| --- | --- | --- |
+| Runner → Data, `POST /v1/runs` | Cùng ID và manifest nhận 409 dù DB chỉ có một run. Manifest được so sánh giữa `bytes` và `memoryview`. | Replay giống hệt trả 200 và `inserted: 0`. Cùng ID với dữ liệu đăng ký khác trả 409. Xác nhận riêng replay khi run đã kết thúc. |
+| Network → Data → SDN, demand history | Data lọc theo cutoff và `available_at_utc`. Nếu SDN và Data đóng dấu riêng trên hai đường nhận, timestamp có thể lệch và snapshot bị từ chối. | Chốt một nguồn `available_at_utc`. Kiểm lại snapshot với thời điểm khả dụng từ lịch sử chính thức. |
+| SDN → Data → ML, snapshot | Data v1 nhận snapshot rút gọn. Predictor yêu cầu thêm metadata, hash và thông tin lịch sử theo cửa sổ. TC-I02 dựng đầu vào Predictor trên snapshot SDN với giá trị lấy từ DB. | Chốt schema có version và phép kiểm hash. Đọc snapshot từ API Data rồi gọi Predictor qua đường tích hợp, giữ nguyên thông tin về provenance và availability. |
+| ML → Data, `POST /v1/ml/forecasts` | Data yêu cầu kiểu JSON integer cho hai trường bin. Payload producer có `100.0` bị từ chối 422. Bộ test chuẩn hóa bin cho ca dương. | POST đầu ra nguyên dạng của ML, đọc lại batch READY có đủ 48 × H dòng và kiểm replay. |
+| Data → Optimization → SDN | GET forecast trả danh sách dòng, planner đọc vector theo nhóm. Bộ test dựng bản audit 48 nhóm từ fixture. | Nối batch READY vào planner và truy vết decision được lưu cùng `decision_batch_id` dùng khi chuyển ApplyRequest. |
+| SDN → Data, routing và apply-result | Data cần routing version trước result và số nhóm trong result khớp decision. Kết quả mặc định một dòng bị từ chối 422. Đường publish hiện tại xếp result trước routing. | Kiểm đường publish runtime với ACK routing trước result và đủ nhóm đã xác minh. Bổ sung đường rollback và UNKNOWN qua DB. |
+
+[Bằng chứng PostgreSQL](../results/README.md) và [rà soát adapter Data v1](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/ca405ecf6f6f595df979656d490e96e2fdce3cb8/sdn/SDN_DATA_INTEGRATION_CONTRACT_REVIEW.md).

@@ -10,3 +10,9 @@ Chạy `python -m testing.scripts.capture_contract_fixtures testing/fixtures/onl
 | `apply.json` | Optimization serializer, SDN `DecisionHandler` với driver in-memory và adapter Data v1 | Routing version, deadline, thiếu dòng và replay kết quả |
 
 Commit nguồn và đầu mối xác nhận được ghi trong [sổ quyết định API online](../../../docs/architecture/Online_API_Team_Decisions.md).
+
+## Phạm vi sử dụng
+
+Lượt PostgreSQL đã chạy các fixture qua API và validator Data. Telemetry là đầu ra dry-run, forecast dùng mô hình Persistence với dữ liệu demo và apply dùng driver in-memory. Ca dương forecast chuẩn hóa hai offset thành JSON integer trong bộ test. Ca dương apply dùng `result_full`, được adapter sinh với tùy chọn mở rộng. Giữ nguyên mẫu forecast dạng float và apply một dòng để tái hiện các phản hồi 422.
+
+Xem [sổ kết quả](../../results/README.md) để đối chiếu phạm vi TC-I02/TC-I03 và các ca cần chạy lại với đầu ra producer nguyên dạng.

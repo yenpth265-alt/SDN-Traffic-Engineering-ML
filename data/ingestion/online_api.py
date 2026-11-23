@@ -41,7 +41,7 @@ def authorized(*roles):
 def db_call(operation, run_id, *args):
     try:
         with store.transaction() as cursor:
-            run = store.lock_run(cursor, run_id)
+            run = store.lock_run(cursor, run_id) if run_id is not None else None
             return operation(cursor, run, *args)
     except store.MissingRun as error:
         raise HTTPException(404, str(error)) from error
@@ -156,3 +156,8 @@ def history(run_id: str, cutoff: str, as_of: str, lookback: Annotated[int, Query
                                     measurement_origin=measurement_origin)
 
     return db_call(lookup, run_id)
+
+
+# Provisional management and audit endpoints; contracts are documented separately.
+from .management_api import install_management
+install_management(app, authorized, db_call)

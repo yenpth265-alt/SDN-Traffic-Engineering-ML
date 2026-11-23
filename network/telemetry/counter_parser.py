@@ -12,11 +12,12 @@ Rules enforced per v1.4 Section 3.3 & 5.1 (N4):
 
 import re
 import subprocess
+import sys
 from typing import Any
 
-PORT_HEADER_RE = re.compile(r"^\s*port\s+(\d+|LOCAL):", re.IGNORECASE)
+PORT_HEADER_RE = re.compile(r"^\s*port\s+(\d+|LOCAL)\s*:", re.IGNORECASE)
 TX_LINE_RE = re.compile(
-    r"tx\s+pkts=(\d+|\?),\s*bytes=(\d+|\?),\s*drop=(\d+|\?),\s*errs=(\d+|\?)",
+    r"tx\s+pkts\s*=\s*(\d+|\?)\s*,\s*bytes\s*=\s*(\d+|\?)\s*,\s*drop\s*=\s*(\d+|\?)\s*,\s*errs\s*=\s*(\d+|\?)",
     re.IGNORECASE,
 )
 
@@ -33,10 +34,7 @@ def parse_dump_ports_output(raw_text: str) -> dict[int, dict[str, int]]:
         m_port = PORT_HEADER_RE.match(line)
         if m_port:
             port_str = m_port.group(1).upper()
-            if port_str == "LOCAL":
-                current_port = None
-            else:
-                current_port = int(port_str)
+            current_port = None if port_str == "LOCAL" else int(port_str)
             continue
 
         if current_port is not None:
@@ -56,10 +54,33 @@ def parse_dump_ports_output(raw_text: str) -> dict[int, dict[str, int]]:
     return ports
 
 
-def read_switch_ports(switch_name: str, openflow_version: str = "OpenFlow13") -> dict[int, dict[str, int]]:
+def read_switch_ports(
+    switch_name: str,
+    openflow_version: str = "OpenFlow13",
+    timeout: float = 1.5,
+) -> dict[int, dict[str, int]]:
     """Runs `ovs-ofctl` for a single switch and returns parsed TX port counters."""
     cmd = ["ovs-ofctl", "-O", openflow_version, "dump-ports", switch_name]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        print(f"[!] Warning: ovs-ofctl failed for {switch_name}: {exc}", file=sys.stderr)
+        return {}
+
+    if res.returncode != 0:
+        err_msg = (res.stderr or "").strip()
+        print(
+            f"[!] Warning: ovs-ofctl exited with {res.returncode} for {switch_name}: {err_msg}",
+            file=sys.stderr,
+        )
+        return {}
+
     return parse_dump_ports_output(res.stdout)
 
 

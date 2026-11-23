@@ -54,6 +54,24 @@ def _positive_delta_t_or_none(val) -> float | None:
     return fval if fval > 0.0 else None
 
 
+def _optional_float(val, is_valid: bool) -> float | None:
+    if not is_valid or val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(val, is_valid: bool) -> int | None:
+    if not is_valid or val is None:
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
 def load_links(config_dir: str) -> list[dict]:
     path = os.path.join(config_dir, "links.csv")
     if not os.path.exists(path):
@@ -172,11 +190,11 @@ def poll_all_switches(dry_run: bool = False) -> dict[str, dict[int, dict[str, in
 
 def _default_missing_sample(reason: str) -> tuple[int, dict]:
     return 0, {
-        "delta_bytes": 0,
+        "delta_bytes": None,
         "delta_t_s": None,
-        "port_tx_mbps": 0.0,
-        "utilization": 0.0,
-        "tx_drops_delta": 0,
+        "port_tx_mbps": None,
+        "utilization": None,
+        "tx_drops_delta": None,
         "counter_status": reason,
     }
 
@@ -284,16 +302,29 @@ def main():
                         "tx_drops": pstats["tx_drops"],
                     }
 
-                drops_delta = int(delta_info.get("tx_drops_delta", delta_info.get("delta_drops", 0)))
+                status_str = str(delta_info.get("counter_status", "unknown"))
                 delta_t_val = _positive_delta_t_or_none(delta_info.get("delta_t_s"))
+                is_valid_measurement = (
+                    delta_t_val is not None
+                    and status_str not in ("missing_switch", "missing_port")
+                )
+
+                raw_drops = delta_info.get("tx_drops_delta", delta_info.get("delta_drops"))
+                drops_val = _optional_int(raw_drops, is_valid_measurement)
+                delta_bytes_val = _optional_int(delta_info.get("delta_bytes"), is_valid_measurement)
+                tx_mbps_val = _optional_float(delta_info.get("port_tx_mbps"), is_valid_measurement)
+                util_val = _optional_float(delta_info.get("utilization"), is_valid_measurement)
 
                 writer.writerow([
                     bin_idx, sampled_at_utc, lid, sw, lk["to_node"],
                     sw, port, lk["is_fabric"], lk["capacity_mbps"],
-                    tx_bytes_total, delta_info["delta_bytes"],
+                    tx_bytes_total,
+                    delta_bytes_val if delta_bytes_val is not None else 0,
                     delta_t_val if delta_t_val is not None else 0.0,
-                    delta_info["port_tx_mbps"], delta_info["utilization"],
-                    drops_delta, delta_info["counter_status"],
+                    tx_mbps_val if tx_mbps_val is not None else 0.0,
+                    util_val if util_val is not None else 0.0,
+                    drops_val if drops_val is not None else 0,
+                    status_str,
                 ])
 
                 if isinstance(port, int) and port > 0:
@@ -304,12 +335,12 @@ def main():
                         "measure_switch": sw,
                         "measure_port": port,
                         "is_fabric": bool(lk["is_fabric"]),
-                        "port_tx_mbps": float(delta_info["port_tx_mbps"]),
-                        "utilization": float(delta_info["utilization"]),
-                        "delta_bytes": int(delta_info["delta_bytes"]),
+                        "port_tx_mbps": tx_mbps_val,
+                        "utilization": util_val,
+                        "delta_bytes": delta_bytes_val,
                         "delta_t_s": delta_t_val,
-                        "tx_drops_delta": drops_delta,
-                        "counter_status": str(delta_info["counter_status"]),
+                        "tx_drops_delta": drops_delta if False else drops_val,
+                        "counter_status": status_str,
                     })
 
             if missing_links:

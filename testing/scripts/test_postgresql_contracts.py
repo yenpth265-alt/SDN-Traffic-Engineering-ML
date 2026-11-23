@@ -105,6 +105,9 @@ class PostgreSQLContracts(unittest.TestCase):
 
     def response(self, verb, url, role, status=200, **kwargs):
         response = self.client.request(verb, url, headers=self.headers(role), **kwargs)
+        if status >= 400:
+            print(json.dumps({"test": self._testMethodName, "request": f"{verb} {url}",
+                              "expected_http": status, "actual_http": response.status_code}), flush=True)
         self.assertEqual(response.status_code, status, response.text[:800])
         return response
 
@@ -203,6 +206,9 @@ class PostgreSQLContracts(unittest.TestCase):
             "Content-Type": "application/json", "X-Content-SHA256": "bad" if wrong_hash else digest,
         })
         response = self.client.post("/v1/sdn/snapshots", content=raw, headers=headers)
+        if status >= 400:
+            print(json.dumps({"test": self._testMethodName, "request": "POST /v1/sdn/snapshots",
+                              "expected_http": status, "actual_http": response.status_code}), flush=True)
         self.assertEqual(response.status_code, status, response.text[:800])
         if inserted is not None:
             self.assertEqual(response.json(), {"inserted": inserted})
@@ -232,9 +238,13 @@ class PostgreSQLContracts(unittest.TestCase):
         self.post("sdn/links", "NETWORK", payload, {"inserted": 0})
         self.check("link_samples after replay", self.count("link_samples"), sample_count)
         first, *rest = payload["samples"]
-        changed = dict(first, counter_status="DIFFERENT")
+        invalid = dict(first, counter_status="DIFFERENT")
+        self.post("sdn/links", "NETWORK", dict(payload, samples=[invalid, *rest]), status=422)
+        delta_bytes = first["delta_bytes"] + 100
+        changed = dict(first, delta_bytes=delta_bytes,
+                       port_tx_mbps=delta_bytes * 8 / (first["delta_t_s"] * 1_000_000))
         self.post("sdn/links", "NETWORK", dict(payload, samples=[changed, *rest]), status=409)
-        self.assertEqual(self.count("link_samples"), sample_count)
+        self.check("link_samples after invalid and conflicting payloads", self.count("link_samples"), sample_count)
 
     def test_i02_cutoff_late_missing_and_future_schedule(self):
         self.register()
@@ -270,7 +280,8 @@ class PostgreSQLContracts(unittest.TestCase):
                 RETURNING requested_mbps
             """, (self.schedule, group))
             self.assertEqual(cursor.fetchone()["requested_mbps"], 999)
-        self.assertEqual(self.history(as_of), first)
+        self.check("original as_of returns identical history after late ingest and schedule edit",
+                   self.history(as_of) == first, True)
         refreshed_as_of = self.now()
         late_row = next(row for row in self.history(refreshed_as_of)
                         if row["flow_group_id"] == group and row["bin_index"] == late["bin_index"])
@@ -329,8 +340,8 @@ class PostgreSQLContracts(unittest.TestCase):
         raw = self.forecast_payload(snapshot)
         if test_invalid:
             rejection = self.post("ml/forecasts", "ML", raw, status=422)
-            self.assertIn("forecast_start", rejection["detail"][0]["loc"])
-            self.assertEqual(self.count("forecast_batches"), 0)
+            self.check("raw ML float bin rejected by field validator",
+                       "forecast_start" in rejection["detail"][0]["loc"], True)
         payload = self.forecast_payload(snapshot, cast_offsets=True)
         if test_invalid:
             self.post("ml/forecasts", "ML", dict(payload, rows=payload["rows"][:-1]), status=422)
@@ -339,6 +350,8 @@ class PostgreSQLContracts(unittest.TestCase):
                 for row in payload["rows"]
             ]
             self.post("ml/forecasts", "ML", dict(payload, rows=traffic_offsets), status=422)
+            self.check("invalid forecast leaves no batches and no predictions",
+                       [self.count("forecast_batches"), self.count("predictions")], [0, 0])
         self.post("ml/forecasts", "ML", payload, {"inserted": 240})
         self.post("ml/forecasts", "ML", payload, {"inserted": 0})
         first, *rest = payload["rows"]
@@ -435,7 +448,11 @@ class PostgreSQLContracts(unittest.TestCase):
                    [result["response_state_version"],
                     sum(row["status"] == "APPLIED" for row in result["rows"]),
                     sum(row["status"] == "KEPT" for row in result["rows"])], [2, 1, 47])
-        self.check("routing_versions after switch and retries", self.count("routing_versions"), 2)
+        with transaction() as cursor:
+            cursor.execute("SELECT state_version FROM public.routing_versions WHERE run_id=%s ORDER BY state_version",
+                           (self.run_id,))
+            versions = [row["state_version"] for row in cursor]
+        self.check("routing_versions after switch and retries", versions, [1, 2])
         self.assertEqual(self.count("routing_history"), 49)
         self.assertEqual(self.count("control_ticks"), 1)
         self.assertEqual(self.count("decision_batches"), 1)
@@ -453,7 +470,7 @@ class PostgreSQLContracts(unittest.TestCase):
         self.post(path, "NETWORK", event, {"inserted": 1})
         self.post(path, "NETWORK", event, {"inserted": 0})
         self.post(path, "NETWORK", dict(event, detail={"suite": "other"}), status=409)
-        self.assertEqual(self.count("events"), 1)
+        self.check("network event rows after replay and same-ID conflict", self.count("events"), 1)
         reply = self.response("PATCH", self.url + "/status", "RUNNER", json={"status": "ok"})
         self.assertEqual(reply.json(), {"updated": 1})
         repeat = self.response("PATCH", self.url + "/status", "RUNNER", json={"status": "ok"})

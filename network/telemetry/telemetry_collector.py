@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import json
 import os
 import signal
@@ -37,6 +38,20 @@ SWITCH_IDS = ["e1", "e2", "e3", "e4", "c1", "c2"]
 def _stop(*_):
     global STOP
     STOP = True
+
+
+def _to_rfc3339_utc(ts: float) -> str:
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _positive_delta_t_or_none(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        fval = float(val)
+    except (TypeError, ValueError):
+        return None
+    return fval if fval > 0.0 else None
 
 
 def load_links(config_dir: str) -> list[dict]:
@@ -158,7 +173,7 @@ def poll_all_switches(dry_run: bool = False) -> dict[str, dict[int, dict[str, in
 def _default_missing_sample(reason: str) -> tuple[int, dict]:
     return 0, {
         "delta_bytes": 0,
-        "delta_t_s": 0.0,
+        "delta_t_s": None,
         "port_tx_mbps": 0.0,
         "utilization": 0.0,
         "tx_drops_delta": 0,
@@ -189,7 +204,7 @@ def main():
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    t0 = man["t0"]
+    t0 = float(man["t0"])
     total_bins = man["warmup"] + man["measurement"] + man["drain"]
     stop_at = t0 + total_bins
 
@@ -235,7 +250,7 @@ def main():
                 time.sleep(min(0.05, max(0.0, target_ts - time.time())))
 
             sample_ts = time.time()
-            sampled_at_utc = iso_utc(sample_ts)
+            sampled_at_utc = _to_rfc3339_utc(sample_ts)
             sw_counters = poll_all_switches(dry_run=args.dry_run)
 
             batch_samples = []
@@ -269,12 +284,14 @@ def main():
                         "tx_drops": pstats["tx_drops"],
                     }
 
-                drops_delta = delta_info.get("tx_drops_delta", delta_info.get("delta_drops", 0))
+                drops_delta = int(delta_info.get("tx_drops_delta", delta_info.get("delta_drops", 0)))
+                delta_t_val = _positive_delta_t_or_none(delta_info.get("delta_t_s"))
 
                 writer.writerow([
                     bin_idx, sampled_at_utc, lid, sw, lk["to_node"],
                     sw, port, lk["is_fabric"], lk["capacity_mbps"],
-                    tx_bytes_total, delta_info["delta_bytes"], delta_info["delta_t_s"],
+                    tx_bytes_total, delta_info["delta_bytes"],
+                    delta_t_val if delta_t_val is not None else 0.0,
                     delta_info["port_tx_mbps"], delta_info["utilization"],
                     drops_delta, delta_info["counter_status"],
                 ])
@@ -287,12 +304,12 @@ def main():
                         "measure_switch": sw,
                         "measure_port": port,
                         "is_fabric": bool(lk["is_fabric"]),
-                        "port_tx_mbps": delta_info["port_tx_mbps"],
-                        "utilization": delta_info["utilization"],
-                        "delta_bytes": delta_info["delta_bytes"],
-                        "delta_t_s": delta_info["delta_t_s"],
+                        "port_tx_mbps": float(delta_info["port_tx_mbps"]),
+                        "utilization": float(delta_info["utilization"]),
+                        "delta_bytes": int(delta_info["delta_bytes"]),
+                        "delta_t_s": delta_t_val,
                         "tx_drops_delta": drops_delta,
-                        "counter_status": delta_info["counter_status"],
+                        "counter_status": str(delta_info["counter_status"]),
                     })
 
             if missing_links:
@@ -309,7 +326,7 @@ def main():
                 "run_id": man["run_id"],
                 "bin_index": bin_idx,
                 "sampled_at_utc": sampled_at_utc,
-                "interval_s": args.interval,
+                "interval_s": float(args.interval),
                 "sample_count": len(batch_samples),
                 "samples": batch_samples,
             }

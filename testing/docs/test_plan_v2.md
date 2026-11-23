@@ -263,6 +263,8 @@ Bàn giao hiện tại: ba tài liệu thiết kế, checklist acceptance và h�
 
 ## 13. Truy vết thay đổi và điểm cần owner xác nhận
 
+Đối chiếu [sổ quyết định API online](../../docs/architecture/Online_API_Team_Decisions.md#các-mục-c01c16-liên-quan) để xem commit, fixture, ca kiểm thử PostgreSQL và đầu mối xác nhận. Đợt QA ngày 23/11/2026 dùng warm-up 60 s cho TC-I03, cho cặp mốc traffic 160 và measurement 100. Ví dụ warm-up 70 s trong bảng trên vẫn là một ca kiểm quy đổi khác.
+
 Bản v2 thay các giả định lỗi thời: N2→N3 đề xuất; scalar-only→vector H bước/mean;72 lượt→225 lượt đề xuất theo Network; S5 mở rộng→chính; path/link IDs theo SDN; version nhiều lần→tối đa1 lần/batch. Loại tham chiếu trang PDF chưa kiểm tra. Giữ metric/cohort/raw/paired analysis còn đúng; sửa acceptance và interfaces tương ứng.
 
 Decision log khi họp: conflict_id,chosen_contract,source_sections,owner_names,confirmed_at_utc,protocol_version,config_hash,evidence_refs,status. Hiện owner_names/confirmed_at để trống; status=OPEN. Kế tiếp cần owner sửa source docs và cung cấp fixtures trước code tích hợp. Không yêu cầu có chữ ký giả để hoàn tất thiết kế testing.

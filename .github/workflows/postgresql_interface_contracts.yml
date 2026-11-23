@@ -1,0 +1,73 @@
+name: PostgreSQL interface contracts
+
+on:
+  push:
+    branches: [qa/postgresql-interface-contracts]
+    paths:
+      - '.github/workflows/postgresql_interface_contracts.yml'
+      - 'data/ingestion/**'
+      - 'data/schemas/**'
+      - 'testing/fixtures/online_contract/**'
+      - 'testing/scripts/**'
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: sdn_qa
+          POSTGRES_PASSWORD: local_qa
+          POSTGRES_DB: sdn_qa
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U sdn_qa -d sdn_qa"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SDN_DATABASE_URL: postgresql://sdn_qa:local_qa@127.0.0.1:5432/sdn_qa
+      PYTHONPATH: ${{ github.workspace }}/producer_src/ml:${{ github.workspace }}/producer_src/optimization:${{ github.workspace }}/producer_src/sdn
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: f6195442c202539f8973328cc899eaccfd767e09
+          path: producer_src/ml
+          sparse-checkout: ml
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: f0aaa26cfb6febbf1361a3be39715764c0b097e9
+          path: producer_src/optimization
+          sparse-checkout: optimization
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ca405ecf6f6f595df979656d490e96e2fdce3cb8
+          path: producer_src/sdn
+          sparse-checkout: sdn
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Data API and producer dependencies
+        run: python -m pip install -r requirements-online.txt -r producer_src/ml/ml/requirements.txt 'httpx>=0.28,<1'
+      - name: Initialize disposable database
+        run: |
+          psql "$SDN_DATABASE_URL" -X -v ON_ERROR_STOP=1 -c 'SELECT version(), current_database()'
+          psql "$SDN_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+            -f data/schemas/schema_postgresql_dbeaver.sql \
+            -f data/schemas/002_online_routing.sql \
+            -f data/schemas/003_forecast_measurement_origin.sql
+          psql "$SDN_DATABASE_URL" -X -v ON_ERROR_STOP=1 -c 'SELECT version FROM public.schema_migrations ORDER BY version'
+      - name: Run PostgreSQL contract tests
+        run: |
+          python -m unittest -v data.ingestion.test_management_api \
+            data.ingestion.test_online_ingestion testing.scripts.test_postgresql_contracts

@@ -1,4 +1,3 @@
-
 #!/usr/bin/python3
 """
 Leaf-Spine Multipath Topology for Mininet / Open vSwitch
@@ -13,6 +12,22 @@ from mininet.node import RemoteController, OVSKernelSwitch
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 from mininet.link import TCLink
+
+
+def configure_static_arp(net):
+    """Populates static ARP entries across all hosts so no ARP broadcast is needed."""
+    host_entries = []
+    for h in net.hosts:
+        ip = h.IP()
+        mac = h.MAC()
+        if ip and mac:
+            host_entries.append((ip, mac))
+
+    for src in net.hosts:
+        for ip, mac in host_entries:
+            if ip != src.IP():
+                src.cmd(f"arp -s {ip} {mac}")
+
 
 def create_topology():
     net = Mininet(
@@ -48,7 +63,7 @@ def create_topology():
     info("*** Configuring Links: Host – Edge Switches (10Mbps, 1ms delay, queue size 50)\n")
     net.addLink(h1, e1, port1=0, port2=1, bw=10, delay='1ms', max_queue_size=50)
     net.addLink(h2, e1, port1=0, port2=2, bw=10, delay='1ms', max_queue_size=50)
-    
+
     net.addLink(h3, e2, port1=0, port2=1, bw=10, delay='1ms', max_queue_size=50)
     net.addLink(h4, e2, port1=0, port2=2, bw=10, delay='1ms', max_queue_size=50)
 
@@ -74,11 +89,15 @@ def create_topology():
     info("*** Starting Mininet Network\n")
     net.start()
 
+    info("*** Configuring Static ARP entries on all hosts\n")
+    configure_static_arp(net)
+
     info("*** Opening Mininet Command Line Interface (CLI)\n")
     CLI(net)
 
     info("*** Stopping Mininet Network\n")
     net.stop()
+
 
 if __name__ == '__main__':
     setLogLevel('info')

@@ -9,7 +9,7 @@ Usage (run on virtual destination host, e.g., h5; start BEFORE sender):
 Outputs in results/<run_id>/:
   recv_<host>.csv        : time_offset_s,flow_group_id,packets_received,bytes_received,
                            goodput_mbps,delay_ms_mean,delay_ms_p95,delay_ms_max,seq_min,seq_max
-  recv_bysend_<host>.csv : time_offset_s,flow_group_id,packets_received
+  recv_bysend_<host>.csv : time_offset_s,flow_group_id,packets_received,bytes_received
   recvpkts_<host>.csv    : flow_group_id,seq,send_bin,recv_offset_s,delay_ms (when --packet-log is set)
 """
 
@@ -134,7 +134,9 @@ def main():
                     b["delays"].append(delay)
                     b["smin"] = min(b["smin"], seq)
                     b["smax"] = max(b["smax"], seq)
-                    by_send[(send_bin, fg)] = by_send.get((send_bin, fg), 0) + 1
+                    sb = by_send.setdefault((send_bin, fg), {"packets": 0, "bytes": 0})
+                    sb["packets"] += 1
+                    sb["bytes"] += len(data)
                     if pk_w:
                         pk_w.writerow([fg, seq, send_bin, f"{now - t0:.6f}", f"{delay:.3f}"])
             flush(int(time.time() - t0) - 2)
@@ -145,9 +147,9 @@ def main():
             pk_fp.close()
         with open(os.path.join(outdir, f"recv_bysend_{args.host}.csv"), "w", encoding="utf-8", newline="") as f2:
             w2 = csv.writer(f2, lineterminator="\n")
-            w2.writerow(["time_offset_s", "flow_group_id", "packets_received"])
-            for (t, fg), n in sorted(by_send.items()):
-                w2.writerow([t, fg, n])
+            w2.writerow(["time_offset_s", "flow_group_id", "packets_received", "bytes_received"])
+            for (t, fg), sb in sorted(by_send.items()):
+                w2.writerow([t, fg, sb["packets"], sb["bytes"]])
 
     print(f"[+] Completed host {args.host}: {path}" + (f" ({bad} invalid packets dropped)" if bad else ""))
 

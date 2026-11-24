@@ -69,6 +69,32 @@ try:
                     flow["udp_port"]
                 ))
 
+            expected_links = {
+                (link["link_id"], link["from_node"], link["to_node"], link["from_port"],
+                 link["to_port"], link["is_fabric"], link["capacity_mbps"], link["delay_ms"])
+                for link in data["links"]
+            }
+            cur.execute("""
+                SELECT link_id, from_node, to_node, from_port, to_port,
+                       is_fabric, capacity_mbps, delay_ms
+                FROM public.links WHERE topology_id = %s
+            """, (topology_id,))
+            if set(cur.fetchall()) != expected_links:
+                raise ValueError("Links trong DB khác với topology bundle nguồn.")
+
+            expected_flows = {
+                (flow["flow_group_id"], flow["flow_cookie"], flow["src_host"], flow["dst_host"],
+                 flow["src_ip"], flow["dst_ip"], flow["src_edge"], flow["dst_edge"], flow["udp_port"])
+                for flow in data["flow_groups"]
+            }
+            cur.execute("""
+                SELECT flow_group_id, flow_cookie, src_host, dst_host, src_ip, dst_ip,
+                       src_edge, dst_edge, udp_port
+                FROM public.flow_groups WHERE topology_id = %s
+            """, (topology_id,))
+            if set(cur.fetchall()) != expected_flows:
+                raise ValueError("Flow groups trong DB khác với topology bundle nguồn.")
+
     print("Import thành công!")
     print("Số links trong JSON:", len(data["links"]))
     print("Số flow groups trong JSON:", len(data["flow_groups"]))

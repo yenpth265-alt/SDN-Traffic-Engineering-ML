@@ -42,6 +42,13 @@ try:
                 psycopg2.Binary(raw_data)
             ))
 
+            cur.execute("""
+                SELECT topology_version, topology_hash, bundle
+                FROM public.topologies WHERE topology_id = %s
+            """, (topology_id,))
+            if cur.fetchone() != (data["topology_version"], data["topology_hash"], raw_data):
+                raise ValueError("Topology ID đã tồn tại nhưng nội dung khác bundle nguồn.")
+
             # 2. Import danh sách hosts
             for host in data["hosts"]:
                 cur.execute("""
@@ -69,6 +76,19 @@ try:
                     switch["role"],
                     switch["dpid"]
                 ))
+
+            expected_nodes = {
+                (host["host_id"], "host", None) for host in data["hosts"]
+            } | {
+                (switch["switch_id"], switch["role"], switch["dpid"])
+                for switch in data["switches"]
+            }
+            cur.execute("""
+                SELECT node_id, role, dpid FROM public.topology_nodes
+                WHERE topology_id = %s
+            """, (topology_id,))
+            if set(cur.fetchall()) != expected_nodes:
+                raise ValueError("Topology nodes trong DB khác với bundle nguồn.")
 
     print("Import thành công!")
     print("Topology ID:", topology_id)

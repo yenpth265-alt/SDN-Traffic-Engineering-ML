@@ -67,6 +67,29 @@ try:
                         link_id
                     ))
 
+            expected_paths = {
+                (path["flow_group_id"], path["path_id"], path["path_label"])
+                for path in data["candidate_paths"]
+            }
+            cur.execute("""
+                SELECT flow_group_id, path_id, path_label
+                FROM public.candidate_paths WHERE topology_id = %s
+            """, (topology_id,))
+            if set(cur.fetchall()) != expected_paths:
+                raise ValueError("Candidate paths trong DB khác với topology bundle nguồn.")
+
+            expected_path_links = {
+                (path["flow_group_id"], path["path_id"], hop, link_id)
+                for path in data["candidate_paths"]
+                for hop, link_id in enumerate(path["ordered_link_ids"], start=1)
+            }
+            cur.execute("""
+                SELECT flow_group_id, path_id, hop, link_id
+                FROM public.path_links WHERE topology_id = %s
+            """, (topology_id,))
+            if set(cur.fetchall()) != expected_path_links:
+                raise ValueError("Path links trong DB khác với topology bundle nguồn.")
+
     print("Import thành công!")
     print("Số candidate paths:", len(data["candidate_paths"]))
     print(

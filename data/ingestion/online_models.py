@@ -125,26 +125,128 @@ class Routing(Message):
     rows: Annotated[list[Route], Field(min_length=1, max_length=4096)]
 
 
-class HistoryRow(Message):
+class SnapshotHistoryRow(Message):
     flow_group_id: ID
+    # Snapshot bins are relative to measurement_started_at_utc. Database demand
+    # bins remain relative to traffic_started_at_utc and include warm-up.
     bin_index: Bin
+    window_start_utc: UTC
+    window_end_utc: UTC
     requested_mbps: Rate | None
-    # Null means the Data service has no stored evidence for this flow/bin.
+    released_at_utc: UTC | None
     available_at_utc: UTC | None
-    reason: ID | None = None
+    valid: Annotated[bool, Field(strict=True)]
+    reason: ID | None
+    release_record_id: ID | None
+
+    @model_validator(mode="after")
+    def check_history_evidence(self):
+        if self.window_end_utc - self.window_start_utc != timedelta(seconds=1):
+            raise ValueError("Snapshot history must use one-second bins")
+        if self.valid != (self.requested_mbps is not None):
+            raise ValueError("History valid flag must match requested_mbps availability")
+        if self.requested_mbps is not None and not all((
+                self.released_at_utc, self.available_at_utc, self.release_record_id)):
+            raise ValueError("Valid demand requires release and availability evidence")
+        if self.released_at_utc is not None and self.released_at_utc < self.window_end_utc:
+            raise ValueError("Demand cannot be released before its bin closes")
+        if (self.released_at_utc is not None and self.available_at_utc is not None
+                and self.available_at_utc < self.released_at_utc):
+            raise ValueError("Demand cannot be available before release")
+        return self
+
+
+class SnapshotRoute(Message):
+    run_id: ID
+    flow_group_id: ID
+    path_id: ID | None
+    state_version: Count
+    confirmed_at: UTC | None
+    last_successful_change_at: UTC | None
+    verification_status: Literal["VERIFIED", "UNKNOWN", "INCONSISTENT"]
+    config_version: ID
+    evidence_mode: ID
+    last_optimization_change_at: UTC | None
+
+    @model_validator(mode="after")
+    def check_route_evidence(self):
+        verified = self.verification_status == "VERIFIED"
+        if verified != (self.path_id is not None) or verified != (self.confirmed_at is not None):
+            raise ValueError("Verified routing state requires a path and confirmation time")
+        return self
+
+
+class SnapshotRouteHistory(Message):
+    run_id: ID
+    flow_group_id: ID
+    path_id: ID | None
+    valid_from: UTC
+    valid_to: UTC | None
+    status: ID
+    batch_id: ID | None
+    evidence_mode: ID
+
+    @model_validator(mode="after")
+    def check_interval(self):
+        if self.valid_to is not None and self.valid_to <= self.valid_from:
+            raise ValueError("Routing history interval must have positive duration")
+        return self
+
+
+class SnapshotOriginRefs(Message):
+    run_started_at_utc: UTC
+    traffic_started_at_utc: UTC
+    measurement_started_at_utc: UTC
+    warmup_s: Annotated[int, Field(strict=True, ge=0)]
+    delta_s: Annotated[int, Field(strict=True, gt=0)]
+
+
+class SnapshotProvenance(Message):
+    producer: ID
+    demand_channel_status: ID
+    demand_provider_name: ID
+    schema_version: ID
+    evidence_mode: ID
+
+
+class SDNSnapshotV14(Message):
+    snapshot_id: ID
+    run_id: ID
+    snapshot_as_of_utc: UTC
+    history_cutoff_utc: UTC
+    cutoff_offset_s: Annotated[int, Field(strict=True, ge=0)]
+    lookback_L: Annotated[int, Field(strict=True, gt=0)]
+    delta_s: Annotated[int, Field(strict=True, gt=0)]
+    state_version: Count
+    config_version: ID
+    config_hash: ID
+    topology_version: ID
+    topology_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    content_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    origin_refs: SnapshotOriginRefs
+    flow_group_ids: Annotated[list[ID], Field(min_length=1, max_length=4096)]
+    history: Annotated[list[SnapshotHistoryRow], Field(max_length=100000)]
+    routing_state: Annotated[list[SnapshotRoute], Field(min_length=1, max_length=4096)]
+    routing_history: Annotated[list[SnapshotRouteHistory], Field(max_length=100000)]
+    link_sample_refs: Annotated[list[dict | ID], Field(max_length=100000)]
+    quality_status: Literal["VALID", "INCOMPLETE", "STALE", "INVALID"]
+    missing_groups: Annotated[list[dict | ID], Field(max_length=4096)]
+    routing_state_complete: Annotated[bool, Field(strict=True)]
+    unknown_flow_group_ids: Annotated[list[ID], Field(max_length=4096)]
+    provenance: SnapshotProvenance
+    reason: ID | None
+    expected_bin_count: Count
+    valid_bin_count: Count
 
 
 class Snapshot(Message):
-    run_id: ID
-    snapshot_id: ID
-    history_cutoff_utc: UTC
-    cutoff_bin: Annotated[int, Field(strict=True, ge=0, lt=2**31)]
-    snapshot_as_of_utc: UTC
-    state_version: Count
-    schema_version: ID
-    quality_status: Literal["VALID", "INCOMPLETE", "STALE", "INVALID"]
-    history: Annotated[list[HistoryRow], Field(max_length=100000)]
-    routing_state: Annotated[list[Route], Field(min_length=1, max_length=4096)]
+    # v1.4 is the canonical wire object. The raw request bytes are stored and
+    # returned unchanged; the nested model is only used for validation.
+    sdn: SDNSnapshotV14
+
+    @property
+    def run_id(self):
+        return self.sdn.run_id
 
 
 class Prediction(Message):

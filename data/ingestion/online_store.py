@@ -234,65 +234,176 @@ def demand_history(cursor, run_id, cutoff, as_of, lookback, *, measurement_origi
     return rows
 
 
+def snapshot_content_hash(snapshot_payload):
+    """Hash canonical SDN v1.4 JSON with its content_hash field omitted."""
+    content = dict(snapshot_payload)
+    content.pop("content_hash", None)
+    canonical = json.dumps(content, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return sha256(canonical).hexdigest()
+
+
 def ingest_snapshot(cursor, run, message, raw, digest):
+    snapshot = message.sdn
+    wire = json.loads(raw)
+    if snapshot_content_hash(wire["sdn"]) != snapshot.content_hash:
+        raise ValueError("Snapshot content_hash does not match canonical SDN v1.4 content")
     cursor.execute("""
         SELECT payload, payload_hash FROM public.snapshots
         WHERE run_id = %s AND snapshot_id = %s
-    """, (message.run_id, message.snapshot_id))
+    """, (snapshot.run_id, snapshot.snapshot_id))
     existing = cursor.fetchone()
     if existing:
         if existing["payload_hash"] != digest or bytes(existing["payload"]) != raw:
             raise Conflict("Snapshot ID is already associated with different bytes")
         return 0
-    check_time(run, message.snapshot_as_of_utc)
-    if (message.history_cutoff_utc > message.snapshot_as_of_utc
-            or traffic_bin(run, message.history_cutoff_utc) != message.cutoff_bin
-            or message.schema_version != run["schema_version"]):
-        raise ValueError("Snapshot cutoff or schema does not match the run")
+
+    origin = run["measurement_started_at_utc"]
+    origins = snapshot.origin_refs
+    if origin is None:
+        raise Conflict("Run is missing measurement_started_at_utc")
+    if (snapshot.run_id != run["run_id"]
+            or origins.run_started_at_utc != run["run_started_at_utc"]
+            or origins.traffic_started_at_utc != run["traffic_started_at_utc"]
+            or origins.measurement_started_at_utc != origin
+            or origins.warmup_s != run["warmup_s"]
+            or origins.measurement_started_at_utc != origins.traffic_started_at_utc + timedelta(seconds=origins.warmup_s)
+            or origins.delta_s != snapshot.delta_s
+            or snapshot.delta_s != 1):
+        raise Conflict("Snapshot origins or bin duration differ from the registered run")
+    check_time(run, snapshot.snapshot_as_of_utc)
+    expected_cutoff = origin + timedelta(seconds=snapshot.cutoff_offset_s * snapshot.delta_s)
+    if (snapshot.history_cutoff_utc != expected_cutoff
+            or snapshot.history_cutoff_utc > snapshot.snapshot_as_of_utc
+            or snapshot.cutoff_offset_s > run["measurement_s"]):
+        raise ValueError("Snapshot cutoff does not match its measurement-relative offset")
+    cutoff_bin = traffic_bin(run, snapshot.history_cutoff_utc)
+    if run["lookback_bins"] is None or snapshot.lookback_L != run["lookback_bins"]:
+        raise Conflict("Snapshot lookback_L differs from the registered run")
+
+    cursor.execute("SELECT topology_hash, topology_version FROM public.topologies WHERE topology_id=%s",
+                   (run["topology_id"],))
+    topology = cursor.fetchone()
+    if (not topology or topology["topology_hash"] != snapshot.topology_hash
+            or topology["topology_version"] != snapshot.topology_version):
+        raise Conflict("Snapshot topology metadata differs from the registered topology")
+
     cursor.execute("""
         SELECT state_version FROM public.routing_versions
         WHERE run_id = %s AND available_at_utc <= %s
         ORDER BY state_version DESC LIMIT 1
-    """, (message.run_id, message.snapshot_as_of_utc))
+    """, (snapshot.run_id, snapshot.snapshot_as_of_utc))
     state = cursor.fetchone()
-    if not state or state["state_version"] != message.state_version:
+    if not state or state["state_version"] != snapshot.state_version:
         raise Conflict("Snapshot references an incorrect routing version for its as-of time")
-    routes = {row.flow_group_id: row.model_dump() for row in message.routing_state}
-    if len(routes) != len(message.routing_state) or routes != route_rows(cursor, message.run_id, message.state_version):
+
+    groups = flow_ids(cursor, run)
+    listed_groups = snapshot.flow_group_ids
+    if len(listed_groups) != len(set(listed_groups)) or set(listed_groups) != groups:
+        raise Conflict("Snapshot flow_group_ids must match the topology's 48 flow groups")
+    route_by_id = {row.flow_group_id: row for row in snapshot.routing_state}
+    if len(route_by_id) != len(snapshot.routing_state) or route_by_id.keys() != groups:
+        raise Conflict("Snapshot routing_state must contain every flow exactly once")
+    if any(row.run_id != snapshot.run_id or row.state_version != snapshot.state_version
+           for row in snapshot.routing_state):
+        raise Conflict("Snapshot routing rows must match its run and state_version")
+    routes = {
+        row.flow_group_id: {
+            "path_id": row.path_id,
+            "confirmed_at_utc": row.confirmed_at,
+            "verification_status": row.verification_status,
+        }
+        for row in snapshot.routing_state
+    }
+    if routes != route_rows(cursor, snapshot.run_id, snapshot.state_version):
         raise Conflict("Snapshot routing state differs from the published version")
-    lookback = run["lookback_bins"]
-    if lookback is None:
-        raise Conflict("Run is missing lookback_bins")
+
+    unknown_groups = {group for group, row in routes.items() if row["verification_status"] != "VERIFIED"}
+    if (len(snapshot.unknown_flow_group_ids) != len(set(snapshot.unknown_flow_group_ids))
+            or set(snapshot.unknown_flow_group_ids) != unknown_groups
+            or snapshot.routing_state_complete is not True):
+        raise Conflict("Snapshot routing completeness metadata is inconsistent")
+
+    supplied_route_history = set()
+    for row in snapshot.routing_history:
+        if row.run_id != snapshot.run_id or row.flow_group_id not in groups or row.valid_from > snapshot.snapshot_as_of_utc:
+            raise Conflict("Snapshot routing_history contains an out-of-scope or future row")
+        key = (row.flow_group_id, row.path_id, row.valid_from, row.valid_to)
+        if key in supplied_route_history:
+            raise Conflict("Snapshot routing_history contains duplicate intervals")
+        supplied_route_history.add(key)
+    cursor.execute("""
+        SELECT h.flow_group_id, h.path_id, h.valid_from_utc, h.valid_to_utc
+        FROM public.routing_history h
+        JOIN public.routing_versions v
+          ON v.run_id = h.run_id AND v.state_version = h.state_version
+        WHERE h.run_id = %s AND h.valid_from_utc <= %s AND v.available_at_utc <= %s
+    """, (snapshot.run_id, snapshot.snapshot_as_of_utc, snapshot.snapshot_as_of_utc))
+    known_route_history = set()
+    for row in cursor:
+        # A closure published after snapshot_as_of was not yet knowable then.
+        end = row["valid_to_utc"]
+        if end is not None and end > snapshot.snapshot_as_of_utc:
+            end = None
+        known_route_history.add((row["flow_group_id"], row["path_id"], row["valid_from_utc"], end))
+    supplied_known_route_history = {row for row in supplied_route_history if row[1] is not None}
+    if supplied_known_route_history != known_route_history:
+        raise Conflict("Snapshot routing_history differs from Data's verified history as of snapshot time")
+
+    expected_bins = set(range(snapshot.cutoff_offset_s - snapshot.lookback_L,
+                              snapshot.cutoff_offset_s))
     observed = {(row["flow_group_id"], row["bin_index"]): row for row in demand_history(
-        cursor, message.run_id, message.history_cutoff_utc, message.snapshot_as_of_utc,
-        lookback, include_reason=True)}
-    supplied = {(row.flow_group_id, row.bin_index): row.model_dump() for row in message.history}
-    expected_bins = set(range(message.cutoff_bin - lookback, message.cutoff_bin))
-    if len(supplied) != len(message.history):
+        cursor, snapshot.run_id, snapshot.history_cutoff_utc, snapshot.snapshot_as_of_utc,
+        snapshot.lookback_L, measurement_origin=origin)}
+    supplied = {(row.flow_group_id, row.bin_index): row for row in snapshot.history}
+    if len(supplied) != len(snapshot.history):
         raise Conflict("Snapshot history contains duplicate flow/bin rows")
     for key, row in supplied.items():
-        if key[0] not in routes or key[1] not in expected_bins:
+        if key[0] not in groups or key[1] not in expected_bins:
             raise Conflict("Snapshot history contains a flow/bin outside its declared window")
         evidence = observed.get(key)
         if evidence is None:
-            # Preserve a declared gap. Never invent a value or availability time.
-            if (row["requested_mbps"] is not None or row["available_at_utc"] is not None
-                    or row["reason"] is not None):
+            # A missing observation remains explicitly missing; do not synthesize 0.
+            if (row.valid or row.requested_mbps is not None or row.released_at_utc is not None
+                    or row.available_at_utc is not None or row.reason is not None
+                    or row.release_record_id is not None):
                 raise Conflict("Snapshot claims demand evidence that Data does not have")
-        elif any(evidence[field] != row[field]
-                 for field in ("requested_mbps", "available_at_utc", "reason")):
+        elif any((getattr(row, field) != evidence[field]) for field in (
+                "requested_mbps", "released_at_utc", "available_at_utc", "valid", "reason", "release_record_id")):
             raise Conflict("Snapshot modifies stored demand evidence")
-    if message.quality_status == "VALID":
-        bins = range(message.cutoff_bin - lookback, message.cutoff_bin)
-        if (len(supplied) != len(routes) * lookback
-                or any(group not in routes or index not in bins for group, index in supplied)
-                or any(row["requested_mbps"] is None or row["available_at_utc"] is None
-                       for row in supplied.values())
-                or any(row["verification_status"] != "VERIFIED" for row in routes.values())):
+        expected_window_start = origin + timedelta(seconds=row.bin_index)
+        if (row.window_start_utc != expected_window_start
+                or row.window_end_utc != expected_window_start + timedelta(seconds=snapshot.delta_s)):
+            raise ValueError("Snapshot history windows do not match measurement-relative bins")
+
+    expected_count = len(groups) * snapshot.lookback_L
+    valid_count = sum(row.valid for row in snapshot.history)
+    if snapshot.expected_bin_count != expected_count or snapshot.valid_bin_count != valid_count:
+        raise ValueError("Snapshot history counts do not match its rows and lookback")
+    if snapshot.quality_status == "VALID":
+        if (len(supplied) != expected_count or set(supplied) != {
+                (group, bin_index) for group in groups for bin_index in expected_bins}
+                or valid_count != expected_count or snapshot.missing_groups
+                or unknown_groups or any(row.verification_status != "VERIFIED"
+                                         for row in snapshot.routing_state)):
             raise ValueError("VALID snapshot requires complete demand and verified routing")
-    metadata = message.model_dump(exclude={"history", "routing_state"})
-    return insert_once(cursor, "snapshots", dict(metadata, payload=raw, payload_hash=digest,
-                                                available_at_utc=run["now"]),
+
+    # Keep the canonical full payload in BYTEA; the relational columns are only
+    # an index for Data's lookup and forecast/decision guards.
+    metadata = dict(
+        run_id=snapshot.run_id,
+        snapshot_id=snapshot.snapshot_id,
+        history_cutoff_utc=snapshot.history_cutoff_utc,
+        cutoff_bin=cutoff_bin,
+        snapshot_as_of_utc=snapshot.snapshot_as_of_utc,
+        state_version=snapshot.state_version,
+        schema_version=snapshot.provenance.schema_version,
+        quality_status=snapshot.quality_status,
+        payload=raw,
+        payload_hash=digest,
+        available_at_utc=run["now"],
+    )
+    return insert_once(cursor, "snapshots", metadata,
                        ("run_id", "snapshot_id"), ("available_at_utc",))
 
 def ingest_forecast(cursor, run, batch):

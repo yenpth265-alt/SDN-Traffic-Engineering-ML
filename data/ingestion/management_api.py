@@ -139,8 +139,17 @@ def record_decision(cursor, run, payload):
     if run["status"] != "running":
         raise store.Conflict("New decisions require a running run")
     store.check_time(run, payload.tick_at_utc)
+    if payload.tick_at_utc < run["run_started_at_utc"]:
+        raise ValueError("Decision tick predates the run")
+    if payload.apply_deadline_utc <= payload.tick_at_utc:
+        raise ValueError("Apply deadline must be later than the decision tick")
     if payload.apply_deadline_utc <= run["now"]:
         raise ValueError("Decision deadline has expired")
+    cursor.execute("SELECT max(tick_at_utc) AS tick_at_utc FROM public.control_ticks WHERE run_id=%s",
+                   (payload.run_id,))
+    previous_tick = cursor.fetchone()["tick_at_utc"]
+    if previous_tick is not None and payload.tick_at_utc <= previous_tick:
+        raise store.Conflict("Decision ticks must be recorded in strictly increasing time order")
     cursor.execute("SELECT * FROM public.snapshots WHERE run_id=%s AND snapshot_id=%s",
                    (payload.run_id, payload.snapshot_id))
     snapshot = cursor.fetchone()
@@ -198,6 +207,8 @@ def record_result(cursor, run, payload):
     cursor.execute("SELECT * FROM public.control_ticks WHERE run_id=%s AND tick_id=%s", (payload.run_id, decision["tick_id"]))
     if payload.completed_at_utc < cursor.fetchone()["tick_at_utc"]:
         raise ValueError("Completion predates decision")
+    if payload.response_state_version < decision["expected_state_version"]:
+        raise store.Conflict("Result routing version cannot precede the decision version")
     cursor.execute("SELECT * FROM public.routing_decisions WHERE run_id=%s AND decision_batch_id=%s",
                    (payload.run_id, payload.decision_batch_id))
     expected = {r["flow_group_id"]: r for r in cursor}
@@ -219,8 +230,6 @@ def record_result(cursor, run, payload):
             raise ValueError("KEPT/ROLLED_BACK requires the old path")
         if payload.response_status == "APPLIED" and row.status not in ("APPLIED", "KEPT"):
             raise ValueError("APPLIED batch cannot contain failed or unknown rows")
-        if payload.response_status == "APPLIED" and row.actual_path_id != proposed["proposed_path_id"]:
-            raise ValueError("APPLIED batch requires every proposed path to be realized")
         cursor.execute("""UPDATE public.routing_decisions SET actual_path_id=%s, status=%s,
             verified_at_utc=%s, reason=%s WHERE run_id=%s AND decision_batch_id=%s AND flow_group_id=%s""",
             (row.actual_path_id, row.status, row.verified_at_utc, row.reason,
@@ -241,8 +250,8 @@ def install_management(app, authorized, db_call):
     def ready():
         def check(cursor, _run):
             cursor.execute("SELECT version FROM public.schema_migrations")
-            if not {1, 2, 3}.issubset({r["version"] for r in cursor}):
-                raise HTTPException(503, "Apply schema revisions 1, 2 and 3")
+            if not {1, 2, 3, 4}.issubset({r["version"] for r in cursor}):
+                raise HTTPException(503, "Apply schema revisions 1, 2, 3 and 4")
             return {"status": "ready"}
         try:
             return db_call(check, None)

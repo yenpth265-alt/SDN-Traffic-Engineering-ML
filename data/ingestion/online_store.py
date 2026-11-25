@@ -99,6 +99,17 @@ def ingest_links(cursor, run, batch):
     check_time(run, batch.sampled_at_utc)
     cursor.execute("SELECT * FROM public.links WHERE topology_id = %s", (run["topology_id"],))
     links = {row["link_id"]: row for row in cursor}
+    # The Network collector emits one sample for every measurable directed
+    # link. Ports numbered 0 are host-facing/unmeasured and are excluded.
+    expected_ids = {link_id for link_id, link in links.items() if link["from_port"] > 0}
+    supplied_ids = {row.link_id for row in batch.samples}
+    if supplied_ids != expected_ids:
+        missing = expected_ids - supplied_ids
+        unexpected = supplied_ids - expected_ids
+        raise ValueError(
+            f"Link batch must cover every measurable topology link exactly once "
+            f"(missing={len(missing)}, unexpected={len(unexpected)})"
+        )
     columns = {"link_id", "measure_switch", "measure_port", "tx_bytes_total", "delta_bytes",
                "delta_t_s", "port_tx_mbps", "counter_status"}
     cursor.execute(
@@ -193,7 +204,7 @@ def ingest_routing(cursor, run, batch):
     return 1
 
 
-def demand_history(cursor, run_id, cutoff, as_of, lookback, *, measurement_origin=None):
+def demand_history(cursor, run_id, cutoff, as_of, lookback, *, measurement_origin=None, include_reason=False):
     cursor.execute("""
         SELECT flow_group_id, bin_index, requested_mbps, available_at_utc,
                window_start_utc, window_end_utc, released_at_utc, event_id, reason
@@ -205,6 +216,8 @@ def demand_history(cursor, run_id, cutoff, as_of, lookback, *, measurement_origi
     rows = []
     for row in cursor:
         record = {key: row[key] for key in ("flow_group_id", "bin_index", "requested_mbps", "available_at_utc")}
+        if include_reason:
+            record["reason"] = row["reason"]
         if measurement_origin is not None:
             record.update(
                 run_id=run_id,
@@ -251,15 +264,30 @@ def ingest_snapshot(cursor, run, message, raw, digest):
     if lookback is None:
         raise Conflict("Run is missing lookback_bins")
     observed = {(row["flow_group_id"], row["bin_index"]): row for row in demand_history(
-        cursor, message.run_id, message.history_cutoff_utc, message.snapshot_as_of_utc, lookback)}
+        cursor, message.run_id, message.history_cutoff_utc, message.snapshot_as_of_utc,
+        lookback, include_reason=True)}
     supplied = {(row.flow_group_id, row.bin_index): row.model_dump() for row in message.history}
-    if len(supplied) != len(message.history) or any(observed.get(key) != row for key, row in supplied.items()):
-        raise Conflict("Snapshot contains duplicate, unavailable or modified demand")
+    expected_bins = set(range(message.cutoff_bin - lookback, message.cutoff_bin))
+    if len(supplied) != len(message.history):
+        raise Conflict("Snapshot history contains duplicate flow/bin rows")
+    for key, row in supplied.items():
+        if key[0] not in routes or key[1] not in expected_bins:
+            raise Conflict("Snapshot history contains a flow/bin outside its declared window")
+        evidence = observed.get(key)
+        if evidence is None:
+            # Preserve a declared gap. Never invent a value or availability time.
+            if (row["requested_mbps"] is not None or row["available_at_utc"] is not None
+                    or row["reason"] is not None):
+                raise Conflict("Snapshot claims demand evidence that Data does not have")
+        elif any(evidence[field] != row[field]
+                 for field in ("requested_mbps", "available_at_utc", "reason")):
+            raise Conflict("Snapshot modifies stored demand evidence")
     if message.quality_status == "VALID":
         bins = range(message.cutoff_bin - lookback, message.cutoff_bin)
         if (len(supplied) != len(routes) * lookback
                 or any(group not in routes or index not in bins for group, index in supplied)
-                or any(row["requested_mbps"] is None for row in supplied.values())
+                or any(row["requested_mbps"] is None or row["available_at_utc"] is None
+                       for row in supplied.values())
                 or any(row["verification_status"] != "VERIFIED" for row in routes.values())):
             raise ValueError("VALID snapshot requires complete demand and verified routing")
     metadata = message.model_dump(exclude={"history", "routing_state"})

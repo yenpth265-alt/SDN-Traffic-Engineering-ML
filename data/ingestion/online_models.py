@@ -129,7 +129,9 @@ class HistoryRow(Message):
     flow_group_id: ID
     bin_index: Bin
     requested_mbps: Rate | None
-    available_at_utc: UTC
+    # Null means the Data service has no stored evidence for this flow/bin.
+    available_at_utc: UTC | None
+    reason: ID | None = None
 
 
 class Snapshot(Message):

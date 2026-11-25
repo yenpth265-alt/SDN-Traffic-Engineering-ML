@@ -5,15 +5,17 @@ Usage (run on virtual source host, e.g., h1):
     python3 sender.py --host h1 --manifest run_manifest.json --schedule demand_plan.csv --schedule-id S1_seed01
 
 Outputs in results/<run_id>/:
-    requested_<host>.csv : time_offset_s,flow_group_id,requested_mbps,available_at_utc
-    sent_<host>.csv      : time_offset_s,flow_group_id,packets_sent,bytes_sent,late_packets
-    releases_<host>.jsonl: Online DemandRelease events emitted strictly after each 1s bin completes
+    requested_<host>.csv         : time_offset_s,flow_group_id,requested_mbps,reason,recorded_at_utc
+    sent_<host>.csv              : time_offset_s,flow_group_id,packets_sent,bytes_sent,late_packets
+    releases_<host>.jsonl        : Online DemandRelease events emitted strictly after each 1s bin completes
+    demand_outbox_<host>.jsonl   : Pending unacked DemandRelease events for replay with original ID & payload
 """
 
 import argparse
 import csv
 from datetime import datetime, timezone
 import json
+import math
 import os
 import signal
 import socket
@@ -42,9 +44,25 @@ def _to_rfc3339_utc(ts_or_str: float | str) -> str:
     return s
 
 
-def load_schedule(path: str, wanted: set[str], schedule_id: str | None = None) -> dict[tuple[int, str], float]:
-    """Loads demand schedule for wanted flow_group_ids, filtering by schedule_id if present."""
-    sched = {}
+def _parse_optional_mbps(raw_val) -> float | None:
+    if raw_val is None:
+        return None
+    s = str(raw_val).strip()
+    if not s or s.lower() in ("null", "none", "nan", "na"):
+        return None
+    val = float(s)
+    if not math.isfinite(val) or val < 0.0:
+        return None
+    return float(val)
+
+
+def load_schedule(
+    path: str,
+    wanted: set[str],
+    schedule_id: str | None = None,
+) -> dict[tuple[int, str], float | None]:
+    """Loads demand schedule for wanted flow_group_ids; returns None when value is missing/unavailable."""
+    sched: dict[tuple[int, str], float | None] = {}
     with open(path, encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         has_sched_col = reader.fieldnames and "schedule_id" in reader.fieldnames
@@ -55,20 +73,92 @@ def load_schedule(path: str, wanted: set[str], schedule_id: str | None = None) -
                 continue
             fg = r["flow_group_id"].strip()
             if fg in wanted:
-                sched[(int(float(r["time_offset_s"])), fg)] = float(r["requested_mbps"])
+                t = int(float(r["time_offset_s"]))
+                sched[(t, fg)] = _parse_optional_mbps(r.get("requested_mbps"))
     return sched
 
 
-def _post_with_retry(
+class DemandOutbox:
+    """Persists unacknowledged DemandRelease payloads so retries keep exact event_id and content."""
+
+    def __init__(self, path: str):
+        self.path = path
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self._pending: dict[str, dict] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+        with open(self.path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                eid = rec.get("event_id")
+                payload = rec.get("payload")
+                if eid and isinstance(payload, dict):
+                    self._pending[eid] = payload
+
+    def _rewrite(self) -> None:
+        tmp_path = f"{self.path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for eid, payload in self._pending.items():
+                f.write(json.dumps({"event_id": eid, "payload": payload}, separators=(",", ":")) + "\n")
+        os.replace(tmp_path, self.path)
+
+    def add_if_missing(self, payload: dict) -> None:
+        eid = payload["event_id"]
+        if eid not in self._pending:
+            self._pending[eid] = payload
+            self._rewrite()
+
+    def ack(self, event_id: str) -> None:
+        if event_id in self._pending:
+            del self._pending[event_id]
+            self._rewrite()
+
+    def items(self) -> list[dict]:
+        return list(self._pending.values())
+
+
+def build_demand_event(
+    *,
+    run_id: str,
+    flow_group_id: str,
+    bin_index: int,
+    window_start_utc: str,
+    window_end_utc: str,
+    released_at_utc: str,
+    requested_mbps: float | None,
+    missing_reason: str = "missing_demand_value",
+) -> dict:
+    """Builds DemandRelease payload strictly conforming to online_models.Demand."""
+    event = {
+        "event_id": f"network:{run_id}:demand:{flow_group_id}:{bin_index}",
+        "run_id": run_id,
+        "flow_group_id": flow_group_id,
+        "bin_index": int(bin_index),
+        "source": "network",
+        "window_start_utc": window_start_utc,
+        "window_end_utc": window_end_utc,
+        "requested_mbps": float(requested_mbps) if requested_mbps is not None else None,
+        "released_at_utc": released_at_utc,
+    }
+    if requested_mbps is None:
+        event["reason"] = missing_reason
+    return event
+
+
+def _post_demand_once(
     url: str,
     body_bytes: bytes,
     *,
     api_key: str | None = None,
     timeout: float = 1.0,
-    max_retries: int = 3,
-    backoff_base: float = 0.15,
-) -> tuple[bool, int | None, str]:
-    """POSTs JSON payload with bounded retry on transient/network/5xx/429 errors."""
+) -> tuple[str, int | None, str]:
+    """Returns ('acked' | 'conflict_409' | 'invalid_422' | 'retryable', status_code, detail)."""
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -76,38 +166,36 @@ def _post_with_retry(
     if api_key:
         headers["X-API-Key"] = api_key
 
-    last_err = ""
-    for attempt in range(max_retries + 1):
-        req = urllib.request.Request(
-            url=url,
-            data=body_bytes,
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status = resp.getcode()
-                resp_text = resp.read().decode("utf-8", errors="replace")
-                if 200 <= status < 300:
-                    return True, status, resp_text
-                last_err = f"HTTP {status}: {resp_text}"
-        except urllib.error.HTTPError as err:
-            status = err.code
-            err_text = err.read().decode("utf-8", errors="replace") if err.fp else ""
-            last_err = f"HTTP {status}: {err_text}"
-            if status != 429 and not (500 <= status < 600):
-                return False, status, last_err
-        except (urllib.error.URLError, TimeoutError, OSError) as err:
-            last_err = f"Network/Timeout error: {err}"
-
-        if attempt < max_retries and not STOP:
-            time.sleep(backoff_base * (2 ** attempt))
-
-    return False, None, last_err
+    req = urllib.request.Request(
+        url=url,
+        data=body_bytes,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            resp_text = resp.read().decode("utf-8", errors="replace")
+            if 200 <= status < 300:
+                return "acked", status, resp_text
+            return "retryable", status, f"HTTP {status}: {resp_text}"
+    except urllib.error.HTTPError as err:
+        status = err.code
+        err_text = err.read().decode("utf-8", errors="replace") if err.fp else ""
+        if status == 409:
+            return "conflict_409", status, err_text
+        if status == 422:
+            return "invalid_422", status, err_text
+        if status == 429 or (500 <= status < 600):
+            return "retryable", status, err_text
+        return "retryable", status, f"HTTP {status}: {err_text}"
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        return "retryable", None, f"Network/Timeout error: {err}"
 
 
-def emit_release_event(
+def _send_or_queue_event(
     event: dict,
+    outbox: DemandOutbox,
     release_fp=None,
     release_url: str | None = None,
     *,
@@ -115,27 +203,89 @@ def emit_release_event(
     timeout: float = 1.0,
     max_retries: int = 3,
     backoff_base: float = 0.15,
-):
-    """Writes online DemandRelease event to local outbox and optionally POSTs with retry."""
-    payload = json.dumps(event, separators=(",", ":"))
+) -> None:
+    """Appends event to local release log and POSTs with exact same event_id & payload."""
+    payload_str = json.dumps(event, separators=(",", ":"))
     if release_fp is not None:
-        release_fp.write(payload + "\n")
+        release_fp.write(payload_str + "\n")
         release_fp.flush()
-    if release_url:
-        ok, status_code, detail = _post_with_retry(
+
+    if not release_url:
+        return
+
+    body_bytes = payload_str.encode("utf-8")
+    last_outcome = "retryable"
+    last_status: int | None = None
+    last_detail = ""
+
+    for attempt in range(max_retries + 1):
+        outcome, status_code, detail = _post_demand_once(
             url=release_url,
-            body_bytes=payload.encode("utf-8"),
+            body_bytes=body_bytes,
             api_key=api_key,
             timeout=timeout,
-            max_retries=max_retries,
-            backoff_base=backoff_base,
         )
-        if not ok:
+        last_outcome, last_status, last_detail = outcome, status_code, detail
+        if outcome == "acked":
+            outbox.ack(event["event_id"])
+            return
+        if outcome in ("conflict_409", "invalid_422"):
+            break
+        if attempt < max_retries and not STOP:
+            time.sleep(backoff_base * (2 ** attempt))
+
+    if last_outcome == "conflict_409":
+        print(
+            f"[!] 409 Conflict for {event['event_id']} (existing record differs): {last_detail}",
+            file=sys.stderr,
+        )
+    elif last_outcome == "invalid_422":
+        print(
+            f"[!] 422 Invalid payload for {event['event_id']}: {last_detail}",
+            file=sys.stderr,
+        )
+    else:
+        outbox.add_if_missing(event)
+        print(
+            f"[!] Queued {event['event_id']} in outbox (Data unavailable, status={last_status}): {last_detail}",
+            file=sys.stderr,
+        )
+
+
+def flush_outbox(
+    outbox: DemandOutbox,
+    release_url: str | None,
+    *,
+    api_key: str | None = None,
+    timeout: float = 1.0,
+    backoff_base: float = 0.15,
+) -> None:
+    """Replays unacked items in outbox preserving exact event_id and payload."""
+    if not release_url:
+        return
+    for idx, payload in enumerate(outbox.items()):
+        if STOP:
+            break
+        body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        outcome, status_code, detail = _post_demand_once(
+            url=release_url,
+            body_bytes=body_bytes,
+            api_key=api_key,
+            timeout=timeout,
+        )
+        if outcome == "acked":
+            outbox.ack(payload["event_id"])
+        elif outcome == "conflict_409":
+            print(f"[!] Outbox 409 Conflict for {payload['event_id']}: {detail}", file=sys.stderr)
+        elif outcome == "invalid_422":
+            print(f"[!] Outbox 422 Invalid for {payload['event_id']}: {detail}", file=sys.stderr)
+        else:
             print(
-                f"[!] Warning: failed to POST DemandRelease {event['event_id']} "
-                f"(status={status_code}): {detail}",
+                f"[!] Outbox still pending for {payload['event_id']} (status={status_code}): {detail}",
                 file=sys.stderr,
             )
+            time.sleep(min(1.0, backoff_base * (2 ** min(idx, 4))))
+            break
 
 
 def main():
@@ -150,11 +300,12 @@ def main():
     ap.add_argument("--flow-group", default=None, help="Optional single flow_group_id (e.g., 0x103) for testing")
     ap.add_argument("--dst-override", default=None, help="Override destination IP for single-machine testing")
     ap.add_argument("--host-cap-mbps", type=float, default=10.0, help="Host send capacity cap in Mbps (default: 10.0)")
-    ap.add_argument("--release-url", default=None, help="Optional HTTP endpoint to push DemandRelease events")
+    ap.add_argument("--release-url", default=None, help="Optional HTTP endpoint (e.g., .../v1/network/demand)")
     ap.add_argument("--api-key", default=None, help="Optional X-API-Key header for HTTP endpoints (fallback: DATA_API_KEY)")
     ap.add_argument("--release-timeout", type=float, default=1.0, help="HTTP timeout in seconds per attempt (default: 1.0)")
     ap.add_argument("--release-retries", type=int, default=3, help="Max HTTP retry attempts for DemandRelease (default: 3)")
     ap.add_argument("--release-backoff", type=float, default=0.15, help="Base backoff in seconds between retries (default: 0.15)")
+    ap.add_argument("--missing-reason", default="missing_demand_value", help="Reason sent when requested_mbps is null")
     args = ap.parse_args()
 
     if args.payload_size < HEADER.size:
@@ -192,13 +343,17 @@ def main():
             "phase": k / len(groups),
         }
 
-    missing = sum(1 for g in groups for t in range(total) if (t, g["flow_group_id"]) not in sched)
+    missing = sum(1 for g in groups for t in range(total) if sched.get((t, g["flow_group_id"])) is None)
     if missing:
-        print(f"[!] Warning: schedule missing {missing} (second, flow_group) entries; treating as 0 Mbps", file=sys.stderr)
+        print(
+            f"[!] Warning: schedule missing {missing} (second, flow_group) entries; "
+            f"sending requested_mbps=null with reason='{args.missing_reason}'",
+            file=sys.stderr,
+        )
 
     over = [
         t for t in range(total)
-        if sum(sched.get((t, g["flow_group_id"]), 0.0) for g in groups) > args.host_cap_mbps * 1.001
+        if sum((sched.get((t, g["flow_group_id"])) or 0.0) for g in groups) > args.host_cap_mbps * 1.001
     ]
     if over:
         print(
@@ -219,14 +374,25 @@ def main():
     req_path = os.path.join(outdir, f"requested_{args.host}.csv")
     sent_path = os.path.join(outdir, f"sent_{args.host}.csv")
     rel_path = os.path.join(outdir, f"releases_{args.host}.jsonl")
+    outbox_path = os.path.join(outdir, f"demand_outbox_{args.host}.jsonl")
+    outbox = DemandOutbox(outbox_path)
 
     with open(req_path, "w", encoding="utf-8", newline="") as fr, \
          open(sent_path, "w", encoding="utf-8", newline="") as fs, \
          open(rel_path, "w", encoding="utf-8") as frel:
         wr = csv.writer(fr, lineterminator="\n")
         ws = csv.writer(fs, lineterminator="\n")
-        wr.writerow(["time_offset_s", "flow_group_id", "requested_mbps", "available_at_utc"])
+        wr.writerow(["time_offset_s", "flow_group_id", "requested_mbps", "reason", "recorded_at_utc"])
         ws.writerow(["time_offset_s", "flow_group_id", "packets_sent", "bytes_sent", "late_packets"])
+
+        # Attempt replay of any leftover unacked items from a previous interrupted run
+        flush_outbox(
+            outbox,
+            args.release_url,
+            api_key=api_key,
+            timeout=args.release_timeout,
+            backoff_base=args.release_backoff,
+        )
 
         for t in range(total):
             if STOP:
@@ -234,7 +400,8 @@ def main():
             sec_start = t0 + t
             events, counts, late = [], {}, {}
             for fg, st in state.items():
-                mbps = sched.get((t, fg), 0.0)
+                raw_mbps = sched.get((t, fg))
+                mbps = float(raw_mbps) if raw_mbps is not None else 0.0
                 st["carry"] += mbps * 1e6 / 8 / args.payload_size
                 n = int(st["carry"])
                 st["carry"] -= n
@@ -271,23 +438,31 @@ def main():
             win_end_utc = _to_rfc3339_utc(win_end_ts)
 
             for fg in state:
-                req_val = float(round(sched.get((t, fg), 0.0), 6))
-                wr.writerow([t, fg, f"{req_val:.6f}", released_at])
+                raw_req = sched.get((t, fg))
+                req_val = float(round(raw_req, 6)) if raw_req is not None else None
+                reason_str = "" if req_val is not None else args.missing_reason
+                wr.writerow([
+                    t,
+                    fg,
+                    f"{req_val:.6f}" if req_val is not None else "",
+                    reason_str,
+                    released_at,
+                ])
                 ws.writerow([t, fg, counts[fg], counts[fg] * args.payload_size, late[fg]])
 
-                release_event = {
-                    "event_id": f"network:{man['run_id']}:demand:{fg}:{t}",
-                    "run_id": man["run_id"],
-                    "flow_group_id": fg,
-                    "bin_index": t,
-                    "source": "network",
-                    "window_start_utc": win_start_utc,
-                    "window_end_utc": win_end_utc,
-                    "requested_mbps": req_val,
-                    "released_at_utc": released_at,
-                }
-                emit_release_event(
+                release_event = build_demand_event(
+                    run_id=man["run_id"],
+                    flow_group_id=fg,
+                    bin_index=t,
+                    window_start_utc=win_start_utc,
+                    window_end_utc=win_end_utc,
+                    released_at_utc=released_at,
+                    requested_mbps=req_val,
+                    missing_reason=args.missing_reason,
+                )
+                _send_or_queue_event(
                     release_event,
+                    outbox,
                     release_fp=frel,
                     release_url=args.release_url,
                     api_key=api_key,
@@ -299,8 +474,25 @@ def main():
             fr.flush()
             fs.flush()
 
+            # Try draining pending outbox items once per second when Data is reachable
+            if outbox.items() and not STOP:
+                flush_outbox(
+                    outbox,
+                    args.release_url,
+                    api_key=api_key,
+                    timeout=args.release_timeout,
+                    backoff_base=args.release_backoff,
+                )
+
     sock.close()
-    print(f"[+] Completed host {args.host}: logs saved in {outdir}")
+    remaining_outbox = len(outbox.items())
+    if remaining_outbox:
+        print(
+            f"[!] Completed host {args.host} with {remaining_outbox} unacked demand item(s) in {outbox_path}",
+            file=sys.stderr,
+        )
+    else:
+        print(f"[+] Completed host {args.host}: logs saved in {outdir}")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,12 @@
 # SDN <-> Data API v1 Integration Contract Review & Adapter Handoff
 
 - **Repository:** `https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML`
-- **SDN Branch / Baseline:** `feature/sdn-controller` @ `7d695e2d34833d5f9f06c01779d7434fb327f1cb` (uncommitted preparation patch strictly inside `sdn/`)
-- **Data API Reference:** `origin/integration/e2e` @ `59df9ce9459e02ec1cfaf1c9b7431f5437871b9c` (`data/ingestion/online_api.py`, `online_models.py`, `management_api.py`, `docs/architecture/Online_API_Team_Decisions.md`)
-- **Network Reference:** `origin/main` @ `69c56f67445979f8527b8e21973e1285f4fe3b94`
-- **Test Classification:** **`PASS_CONTRACT_MOCK`** (no live PostgreSQL database; `TC-I01` remains **PENDING**)
+- **SDN Branch / Baseline:** `feature/sdn-data-contract-v14` (from `feature/sdn-controller` @ `ca405ecf6f6f595df979656d490e96e2fdce3cb8`)
+- **Updated Data/Network Reference (Phase 2):** `origin/main` @ `8ee1782554f48296942595873aaa989e9b4ca637` (`e0db494` canonical `SDNSnapshotV14`, `458df93` 48-flow `DecisionBatch`/`ApplyResult` + migration `004`, `8ee1782` Network DemandRelease outbox, `docs/architecture/Data_Integration_Contracts.md`)
+- **Historical Phase 1 Reference:** `origin/integration/e2e` @ `59df9ce9459e02ec1cfaf1c9b7431f5437871b9c`
+- **Test Classification:** **`PASS_CONTRACT_MOCK`** (`148/148` PASS; no live PostgreSQL database; `TC-I01` remains **PENDING**)
+
+> **Phase 2 Update (`origin/main` @ `8ee1782`):** See [SDN_CROSS_ROLE_INTEGRATION_V14.md](file:///d:/PROGRAMMING%20FOLDER/SDN-Traffic-Engineering-ML/sdn/SDN_CROSS_ROLE_INTEGRATION_V14.md) for the updated canonical v1.4 adapter specification. In Phase 2, **M1, M2, M3, M4, M5, M6, and M7 are RESOLVED** on the SDN adapter side (`PASS_CONTRACT_MOCK`); **M8** (standalone `RoutingHistory` / `VerificationEvidence` endpoints) and live PostgreSQL / `TC-I01` validation remain pending.
 
 ---
 

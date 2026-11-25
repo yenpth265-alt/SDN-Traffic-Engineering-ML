@@ -15,18 +15,28 @@ core control logic or v1.4 cross-role schemas:
 
 from sdn.adapters.data_api_v1_adapter import (
     DATA_V1_ENDPOINT_APPLY_RESULTS,
+    DATA_V1_ENDPOINT_DECISION_LOOKUP_TEMPLATE,
     DATA_V1_ENDPOINT_ROUTING,
     DATA_V1_ENDPOINT_SNAPSHOTS,
     DataV1ContractBlockedError,
     DataV1MappingError,
+    build_48_flow_apply_result_data_v1,
     build_data_v1_headers,
     compute_bytes_sha256,
+    compute_sdn_v14_content_hash,
     compute_warmup_bin_offset,
+    fetch_decision_batch_from_data_v1,
     is_valid_data_v1_ack,
     map_apply_response_to_data_v1,
     map_routing_state_to_data_v1,
     map_snapshot_to_data_v1,
     serialize_canonical_json_bytes,
+)
+from sdn.adapters.data_demand_history_provider import (
+    DATA_V1_DEMAND_HISTORY_PATH_TEMPLATE,
+    DataAPIDemandHistoryProvider,
+    DataDemandHistoryConfig,
+    DataDemandHistoryError,
 )
 from sdn.adapters.data_event_publisher import (
     DataEventPublisher,

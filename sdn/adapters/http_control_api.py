@@ -561,19 +561,30 @@ class SDNNorthboundHTTPApp:
                 "503 Service Unavailable",
                 {"ack": False, "error": "DEMAND_PERSISTENCE_FAILED", "message": str(exc)},
             )
-        except (StateManagerError, KeyError) as exc:
-            return self._json_response(
-                start_response,
-                "404 Not Found",
-                {"error": "RUN_NOT_FOUND", "message": str(exc)},
-            )
-        except SnapshotCreationError as exc:
-            return self._json_response(
-                start_response,
-                "400 Bad Request",
-                {"error": "SNAPSHOT_CREATION_ERROR", "message": str(exc)},
-            )
         except Exception as exc:
+            if type(exc).__name__ == "DataDemandHistoryError":
+                return self._json_response(
+                    start_response,
+                    "503 Service Unavailable",
+                    {
+                        "error": "DATA_DEMAND_HISTORY_UNAVAILABLE",
+                        "reason_code": getattr(exc, "reason_code", "DATA_DEMAND_HISTORY_ERROR"),
+                        "http_status": getattr(exc, "http_status", None),
+                        "message": str(exc),
+                    },
+                )
+            if isinstance(exc, (StateManagerError, KeyError)):
+                return self._json_response(
+                    start_response,
+                    "404 Not Found",
+                    {"error": "RUN_NOT_FOUND", "message": str(exc)},
+                )
+            if isinstance(exc, SnapshotCreationError):
+                return self._json_response(
+                    start_response,
+                    "400 Bad Request",
+                    {"error": "SNAPSHOT_CREATION_ERROR", "message": str(exc)},
+                )
             return self._json_response(
                 start_response,
                 "500 Internal Server Error",
@@ -870,6 +881,20 @@ class SDNNorthboundHTTPApp:
         body: dict[str, Any],
         start_response: Callable[[str, list[tuple[str, str]]], Any],
     ) -> list[bytes]:
+        if not hasattr(self._demand_provider, "ingest_release_payload"):
+            return self._json_response(
+                start_response,
+                "409 Conflict",
+                {
+                    "ack": False,
+                    "error": "DEMAND_PROVIDER_IS_DATA_V1_READ_ONLY",
+                    "message": (
+                        "SDN is configured to read demand history from Data API v1 "
+                        "(SDN_DEMAND_PROVIDER_MODE=data_v1); direct HTTP demand-release push "
+                        "is disabled to prevent mixing Data and local SQLite demand histories."
+                    ),
+                },
+            )
         receipt_utc = _utc_now_rfc3339()
         if "events" in body:
             raw_events = body["events"]
@@ -952,16 +977,26 @@ class SDNNorthboundHTTPApp:
                     measurement_started_at_utc=validate_rfc3339_utc_timestamp(
                         raw_origins.get("measurement_started_at_utc"), "origin_refs.measurement_started_at_utc", normalize=True
                     ),
+                    warmup_s=int(raw_origins.get("warmup_s", 60)),
                     delta_s=int(raw_origins.get("delta_s", 1)),
                 ),
             )
 
-        snap = self._snapshot_creator.create_snapshot(
-            run_id=run_id,
-            cutoff=cutoff,
-            lookback_L=lookback_L,
-            snapshot_as_of_utc=snap_as_of,
-        )
+        if hasattr(self._demand_provider, "create_snapshot_via_data"):
+            snap = self._demand_provider.create_snapshot_via_data(
+                self._snapshot_creator,
+                run_id=run_id,
+                cutoff=cutoff,
+                lookback_L=lookback_L,
+                snapshot_as_of_utc=snap_as_of,
+            )
+        else:
+            snap = self._snapshot_creator.create_snapshot(
+                run_id=run_id,
+                cutoff=cutoff,
+                lookback_L=lookback_L,
+                snapshot_as_of_utc=snap_as_of,
+            )
         self._decision_handler.register_snapshot(snap)
         if self._data_publisher is not None:
             self._data_publisher.publish_snapshot(snap, deliver_now=False)

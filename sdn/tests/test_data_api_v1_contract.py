@@ -100,28 +100,56 @@ def _assert_data_v1_routing(payload: dict[str, Any]) -> None:
 
 
 def _assert_data_v1_snapshot(payload: dict[str, Any], raw_bytes: bytes, sha_hex: str) -> None:
-    assert set(payload.keys()) == {
-        "run_id",
+    assert set(payload.keys()) == {"sdn"}
+    sdn_obj = payload["sdn"]
+    assert {
         "snapshot_id",
-        "history_cutoff_utc",
-        "cutoff_bin",
+        "run_id",
         "snapshot_as_of_utc",
+        "history_cutoff_utc",
+        "cutoff_offset_s",
+        "lookback_L",
+        "delta_s",
         "state_version",
-        "schema_version",
-        "quality_status",
+        "config_version",
+        "config_hash",
+        "topology_version",
+        "topology_hash",
+        "content_hash",
+        "origin_refs",
+        "flow_group_ids",
         "history",
         "routing_state",
-    }
-    _assert_data_v1_utc(payload["history_cutoff_utc"])
-    _assert_data_v1_utc(payload["snapshot_as_of_utc"])
-    assert isinstance(payload["cutoff_bin"], int) and payload["cutoff_bin"] >= 0
-    assert payload["quality_status"] in {"VALID", "INCOMPLETE", "STALE", "INVALID"}
+        "routing_history",
+        "link_sample_refs",
+        "quality_status",
+        "missing_groups",
+        "routing_state_complete",
+        "unknown_flow_group_ids",
+        "provenance",
+        "reason",
+        "expected_bin_count",
+        "valid_bin_count",
+    } == set(sdn_obj.keys())
+    _assert_data_v1_utc(sdn_obj["history_cutoff_utc"])
+    _assert_data_v1_utc(sdn_obj["snapshot_as_of_utc"])
+    assert sdn_obj["quality_status"] in {"VALID", "INCOMPLETE", "STALE", "INVALID"}
     assert hashlib.sha256(raw_bytes).hexdigest() == sha_hex
-    for h in payload["history"]:
-        assert set(h.keys()) == {"flow_group_id", "bin_index", "requested_mbps", "available_at_utc"}
-        _assert_data_v1_utc(h["available_at_utc"])
-    for r in payload["routing_state"]:
-        _assert_data_v1_route(r)
+    for h in sdn_obj["history"]:
+        assert set(h.keys()) == {
+            "flow_group_id",
+            "bin_index",
+            "window_start_utc",
+            "window_end_utc",
+            "requested_mbps",
+            "released_at_utc",
+            "available_at_utc",
+            "valid",
+            "reason",
+            "release_record_id",
+        }
+        if h["available_at_utc"] is not None:
+            _assert_data_v1_utc(h["available_at_utc"])
 
 
 def _assert_data_v1_apply_result(payload: dict[str, Any]) -> None:
@@ -220,14 +248,15 @@ def test_c02_snapshot_mapper_warmup60_origin_and_byte_sha256_and_missing_blocked
         origin_refs=origins,
     )
 
-    mapped, raw_bytes, sha_hex = map_snapshot_to_data_v1(snap_ok, use_traffic_origin_bins=True)
+    mapped, raw_bytes, sha_hex = map_snapshot_to_data_v1(snap_ok)
     _assert_data_v1_snapshot(mapped, raw_bytes, sha_hex)
-    # Warmup=60s: measurement bin 0 -> traffic bin 60; measurement cutoff 1 -> traffic cutoff_bin 61!
-    assert mapped["cutoff_bin"] == 61
-    assert all(h["bin_index"] == 60 for h in mapped["history"])
-    assert all(h["requested_mbps"] == 3.5 for h in mapped["history"])
+    # Canonical SDNSnapshotV14 preserves measurement-origin bin_index=0 and warmup_s=60!
+    assert mapped["sdn"]["origin_refs"]["warmup_s"] == 60
+    assert mapped["sdn"]["cutoff_offset_s"] == 1
+    assert all(h["bin_index"] == 0 for h in mapped["sdn"]["history"])
+    assert all(h["requested_mbps"] == 3.5 for h in mapped["sdn"]["history"])
 
-    # Missing bin (available_at_utc=None) MUST raise DataV1ContractBlockedError (never fabricate timestamp or 0.0!)
+    # Missing bin (available_at_utc=None) maps cleanly to canonical INCOMPLETE with null evidence (never fabricates 0.0!)
     snap_missing = sc.create_snapshot(
         "run_c02",
         cutoff=2,
@@ -235,8 +264,19 @@ def test_c02_snapshot_mapper_warmup60_origin_and_byte_sha256_and_missing_blocked
         snapshot_as_of_utc="2026-11-23T09:01:02.200000Z",
         origin_refs=origins,
     )
-    with pytest.raises(DataV1ContractBlockedError):
-        map_snapshot_to_data_v1(snap_missing, use_traffic_origin_bins=True)
+    mapped_inc, raw_inc, sha_inc = map_snapshot_to_data_v1(snap_missing)
+    _assert_data_v1_snapshot(mapped_inc, raw_inc, sha_inc)
+    assert mapped_inc["sdn"]["quality_status"] == "INCOMPLETE"
+    missing_rows = [h for h in mapped_inc["sdn"]["history"] if not h["valid"]]
+    assert len(missing_rows) == 48
+    assert all(
+        h["requested_mbps"] is None
+        and h["released_at_utc"] is None
+        and h["available_at_utc"] is None
+        and h["release_record_id"] is None
+        and h["reason"] is None
+        for h in missing_rows
+    )
 
 
 def test_c03_apply_response_mapper_valid_unknown_and_inconsistent_rejection() -> None:

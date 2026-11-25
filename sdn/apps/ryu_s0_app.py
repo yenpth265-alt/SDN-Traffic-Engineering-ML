@@ -117,6 +117,7 @@ class S0AppConfig:
     northbound_auth_token: Optional[str] = None
     northbound_sync_wait_ms: int = 300
     idempotency_db_path: Optional[Path] = None
+    demand_provider_mode: str = "http_sqlite"  # "http_sqlite" (default) | "data_v1"
     demand_db_path: Optional[Path] = None
     demand_retention_bins: Optional[int] = 3600
     data_endpoint_url: Optional[str] = None
@@ -171,6 +172,10 @@ class S0AppConfig:
             northbound_auth_token=_env_opt_str("SDN_NORTHBOUND_TOKEN"),
             northbound_sync_wait_ms=int(os.environ.get("SDN_NORTHBOUND_SYNC_WAIT_MS", "300")),
             idempotency_db_path=Path(idem_raw) if idem_raw else None,
+            demand_provider_mode=(
+                os.environ.get("SDN_DEMAND_PROVIDER_MODE", "http_sqlite").strip().lower()
+                or "http_sqlite"
+            ),
             demand_db_path=Path(demand_db_raw) if demand_db_raw else None,
             demand_retention_bins=int(demand_ret_raw) if demand_ret_raw else 3600,
             data_endpoint_url=_env_opt_str("SDN_DATA_ENDPOINT_URL"),
@@ -275,6 +280,7 @@ class S0ControllerOrchestrator:
         self._data_publisher = None
         if (
             self._config.northbound_enable
+            or self._config.demand_provider_mode == "data_v1"
             or self._config.demand_db_path is not None
             or self._config.data_endpoint_url is not None
             or self._config.data_outbox_dir is not None
@@ -287,22 +293,44 @@ class S0ControllerOrchestrator:
             from sdn.adapters.sqlite_demand_ledger import SQLiteDemandReleaseLedger
             from sdn.monitoring.snapshot_creator import SnapshotCreator
 
-            if self._config.demand_db_path is not None:
-                self._demand_ledger = SQLiteDemandReleaseLedger(
-                    self._config.demand_db_path,
-                    retention_bins=self._config.demand_retention_bins,
+            if self._config.demand_provider_mode == "data_v1":
+                from sdn.adapters.data_demand_history_provider import (
+                    DataAPIDemandHistoryProvider,
+                    DataDemandHistoryConfig,
                 )
-            self._demand_provider = HTTPDemandReleaseProvider(ledger=self._demand_ledger)
+
+                # Explicit Data-backed provider ONLY: never open or mix SQLite demand history.
+                self._demand_ledger = None
+                self._demand_provider = DataAPIDemandHistoryProvider(
+                    DataDemandHistoryConfig(
+                        endpoint_base_url=self._config.data_endpoint_url,
+                        api_key=self._config.data_api_key or self._config.northbound_auth_token,
+                        timeout_s=max(0.1, float(self._config.data_timeout_s)),
+                    )
+                )
+            elif self._config.demand_provider_mode == "http_sqlite":
+                if self._config.demand_db_path is not None:
+                    self._demand_ledger = SQLiteDemandReleaseLedger(
+                        self._config.demand_db_path,
+                        retention_bins=self._config.demand_retention_bins,
+                    )
+                self._demand_provider = HTTPDemandReleaseProvider(ledger=self._demand_ledger)
+            else:
+                raise ValueError(
+                    f"Unsupported demand_provider_mode {self._config.demand_provider_mode!r}; "
+                    f"expected 'http_sqlite' or 'data_v1'."
+                )
             self._snapshot_creator = SnapshotCreator(
                 self._topology,
                 self._state_manager,
                 self._demand_provider,
             )
-            self._demand_provider._origin_refs_lookup = (
-                lambda rid: self._snapshot_creator.get_run_origin_refs(rid)
-                if self._snapshot_creator is not None
-                else None
-            )
+            if hasattr(self._demand_provider, "_origin_refs_lookup"):
+                self._demand_provider._origin_refs_lookup = (
+                    lambda rid: self._snapshot_creator.get_run_origin_refs(rid)
+                    if self._snapshot_creator is not None
+                    else None
+                )
             if (
                 self._config.data_endpoint_url is not None
                 or self._config.data_outbox_dir is not None

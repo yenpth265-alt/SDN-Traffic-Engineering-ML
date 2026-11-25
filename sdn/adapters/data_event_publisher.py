@@ -98,6 +98,7 @@ class OutboxEventRecord:
     last_error: Optional[str] = None
     acked_at_utc: Optional[str] = None
     ack_http_status: Optional[int] = None
+    depends_on_dedup_key: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +113,7 @@ class OutboxEventRecord:
             "last_error": self.last_error,
             "acked_at_utc": self.acked_at_utc,
             "ack_http_status": self.ack_http_status,
+            "depends_on_dedup_key": self.depends_on_dedup_key,
         }
 
 
@@ -155,7 +157,7 @@ def _default_http_sender(
     headers: dict[str, str],
     timeout_s: float,
 ) -> tuple[int, str]:
-    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    body = serialize_canonical_json_bytes(payload)
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -341,6 +343,11 @@ class DataEventPublisher:
                         last_error=None,
                         acked_at_utc=str(ack["acked_at_utc"]) if ack and ack.get("acked_at_utc") else None,
                         ack_http_status=int(ack["ack_http_status"]) if ack and ack.get("ack_http_status") is not None else None,
+                        depends_on_dedup_key=(
+                            str(raw["depends_on_dedup_key"])
+                            if raw.get("depends_on_dedup_key") is not None
+                            else None
+                        ),
                     )
                     self._records[dk] = evt
                     self._order.append(dk)
@@ -370,6 +377,7 @@ class DataEventPublisher:
         run_id: str,
         payload: dict[str, Any],
         deliver_now: bool = False,
+        depends_on_dedup_key: Optional[str] = None,
     ) -> PublishResult:
         with self._lock:
             existing = self._records.get(dedup_key)
@@ -390,6 +398,7 @@ class DataEventPublisher:
                 enqueued_at_utc=_utc_now_rfc3339(),
                 payload=payload,
                 status=DeliveryStatus.PENDING_DELIVERY,
+                depends_on_dedup_key=depends_on_dedup_key,
             )
             self._records[dedup_key] = rec
             self._order.append(dedup_key)
@@ -402,6 +411,7 @@ class DataEventPublisher:
                     "run_id": rec.run_id,
                     "enqueued_at_utc": rec.enqueued_at_utc,
                     "payload": rec.payload,
+                    "depends_on_dedup_key": rec.depends_on_dedup_key,
                 },
             )
 
@@ -522,14 +532,23 @@ class DataEventPublisher:
         deliver_now: bool = False,
         full_routing_state: Optional[RoutingStateSnapshot] = None,
         expand_unchanged_as_kept: bool = False,
+        decision_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+        require_routing_state_ack: Optional[bool] = None,
     ) -> PublishResult:
         response.validate_contract()
         if self._config.api_mode == "data_v1":
+            enforce_dep = True if require_routing_state_ack is None else bool(require_routing_state_ack)
+            dep_key = (
+                f"routing_state:{response.run_id}:v{response.state_version}"
+                if enforce_dep
+                else None
+            )
             try:
                 mapped = map_apply_response_to_data_v1(
                     response,
                     full_routing_state=full_routing_state,
                     expand_unchanged_as_kept=expand_unchanged_as_kept,
+                    decision_rows=decision_rows,
                 )
                 return self._enqueue(
                     dedup_key=f"apply_response:{response.run_id}:{response.decision_batch_id}",
@@ -538,6 +557,7 @@ class DataEventPublisher:
                     run_id=response.run_id,
                     payload=mapped,
                     deliver_now=deliver_now,
+                    depends_on_dedup_key=dep_key,
                 )
             except DataV1ContractBlockedError as exc:
                 return self._enqueue(
@@ -547,6 +567,7 @@ class DataEventPublisher:
                     run_id=response.run_id,
                     payload=response.to_dict(),
                     deliver_now=False,
+                    depends_on_dedup_key=dep_key,
                 )
         return self._enqueue(
             dedup_key=f"apply_response:{response.run_id}:{response.decision_batch_id}",
@@ -599,9 +620,32 @@ class DataEventPublisher:
                     status=DeliveryStatus.PENDING_DELIVERY,
                     attempts=rec.attempts,
                     last_error=rec.endpoint_path,
+                    depends_on_dedup_key=rec.depends_on_dedup_key,
                 )
                 self._records[dedup_key] = updated
                 return updated
+            if rec.depends_on_dedup_key is not None:
+                dep = self._records.get(rec.depends_on_dedup_key)
+                if dep is None or dep.status != DeliveryStatus.DELIVERED:
+                    dep_detail = (
+                        f"WAITING_FOR_DEPENDENCY:{rec.depends_on_dedup_key} ({dep.last_error})"
+                        if dep is not None and dep.last_error
+                        else f"WAITING_FOR_DEPENDENCY:{rec.depends_on_dedup_key}"
+                    )
+                    updated = OutboxEventRecord(
+                        dedup_key=rec.dedup_key,
+                        event_type=rec.event_type,
+                        endpoint_path=rec.endpoint_path,
+                        run_id=rec.run_id,
+                        enqueued_at_utc=rec.enqueued_at_utc,
+                        payload=rec.payload,
+                        status=DeliveryStatus.PENDING_DELIVERY,
+                        attempts=rec.attempts,
+                        last_error=dep_detail,
+                        depends_on_dedup_key=rec.depends_on_dedup_key,
+                    )
+                    self._records[dedup_key] = updated
+                    return updated
             if dedup_key in self._in_flight_keys:
                 # Another worker/caller is already delivering this logical event; never double-send.
                 return rec
@@ -675,6 +719,7 @@ class DataEventPublisher:
                             last_error=None,
                             acked_at_utc=acked_at,
                             ack_http_status=status_code,
+                            depends_on_dedup_key=rec.depends_on_dedup_key,
                         )
                         with self._lock:
                             self._records[dedup_key] = delivered
@@ -713,6 +758,7 @@ class DataEventPublisher:
                 status=DeliveryStatus.PENDING_DELIVERY,
                 attempts=attempts,
                 last_error=last_err,
+                depends_on_dedup_key=rec.depends_on_dedup_key,
             )
             with self._lock:
                 self._records[dedup_key] = still_pending
@@ -723,20 +769,35 @@ class DataEventPublisher:
                 self._in_flight_keys.discard(dedup_key)
 
     def flush_pending(self) -> dict[str, int]:
-        """Attempt bounded delivery for all `PENDING_DELIVERY` outbox records."""
+        """
+        Attempt bounded delivery for all `PENDING_DELIVERY` outbox records, respecting
+        causal `depends_on_dedup_key` ordering (e.g., `RoutingState` ACK before `ApplyResult`).
+        """
+        total_delivered = 0
         with self._lock:
-            pending_keys = [
-                k for k in self._order if self._records[k].status == DeliveryStatus.PENDING_DELIVERY
-            ]
-        delivered = 0
-        still_pending = 0
-        for key in pending_keys:
-            res = self._deliver_single(key)
-            if res.status == DeliveryStatus.DELIVERED:
-                delivered += 1
-            else:
-                still_pending += 1
-        return {"delivered": delivered, "pending": still_pending}
+            max_passes = max(1, len(self._order) + 1)
+
+        for _ in range(max_passes):
+            with self._lock:
+                pending_keys = [
+                    k for k in self._order if self._records[k].status == DeliveryStatus.PENDING_DELIVERY
+                ]
+            if not pending_keys:
+                break
+            delivered_this_pass = 0
+            for key in pending_keys:
+                res = self._deliver_single(key)
+                if res.status == DeliveryStatus.DELIVERED:
+                    delivered_this_pass += 1
+                    total_delivered += 1
+            if delivered_this_pass == 0:
+                break
+
+        with self._lock:
+            still_pending = sum(
+                1 for k in self._order if self._records[k].status == DeliveryStatus.PENDING_DELIVERY
+            )
+        return {"delivered": total_delivered, "pending": still_pending}
 
     def get_event(self, dedup_key: str) -> Optional[OutboxEventRecord]:
         with self._lock:

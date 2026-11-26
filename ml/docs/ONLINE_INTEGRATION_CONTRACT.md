@@ -170,14 +170,26 @@ result = runner.process_snapshot("run001", "snap:run001:t100:v1", emit_event=Tru
 - **Ngưỡng `context` online mặc định:** `max_snapshot_age_s`, `forecast_timeout_ms`, `fallback_policy` (`skip` hay `persistence`), và `fallback_epsilon`.
 - **Kênh dữ liệu offline chuẩn (`I03`):** Chốt dùng trực tiếp `network/traffic_schedules/demand_plan.zip` qua `python -m ml from-schedule` hay cập nhật `data/export/export_ml_offline.py` xuất cặp `history.csv` + `runs.json`.
 
-## 7. C?u h?nh b?n giao ?? kh?a
+## 7. Cấu hình bàn giao offline và trạng thái pilot
 
-Theo quy?t ??nh ng??i ph? tr?ch ng?y 26/11/2026: **L=30, H=1, epsilon=0**. YAML d?ng chung l? `configs/ml/selected.yaml`; Optimization tham chi?u qua `ml_deployment_config` trong `configs/optimization/optimization.yaml`. Optimization ki?m H=1, nh?n c?c gi? tr? final v? t?nh mean H, kh?ng ?p l?i epsilon. Khi truy?n Data ForecastBatch d?ng rows, Runner b? sung `measurement_started_at_utc` t? run v? deadline th?c t?; adapter kh?ng t? b?a origin/deadline.
+Theo quyết định người phụ trách ngày 26/11/2026: **L=30, H=1, epsilon=0, W=5**. YAML dùng chung là `configs/ml/selected.yaml`; Optimization tham chiếu qua `ml_deployment_config`. Đây là cấu hình offline đã khóa của ML, chưa phải xác nhận rằng toàn vòng điều khiển đáp ứng deadline với H=1.
 
-L??t t?m ki?m to?n l??i tr??c ?? b? ng?t; model b?n giao ???c hu?n luy?n l?i v?i c?p L/H ?? ch?n, 50.000 m?u train v? RF 150 c?y, depth 24, min_samples_leaf 4. Kh?ng coi ??y l? k?t qu? ho?n t?t 24 c?u h?nh.
+Model bàn giao được huấn luyện lại với cặp L/H đã chọn, 50.000 mẫu train, RF 150 cây, depth 24, min_samples_leaf 4. Lượt tìm kiếm toàn lưới trước bị ngắt; không tuyên bố đã hoàn tất 24 cấu hình. Khi nhận ForecastBatch dạng rows, Runner bổ sung measurement origin từ run và deadline thực tế; adapter không tự tạo origin/deadline.
 
-## 8. Ki?m ch?ng y?u c?u Data
+SDN báo apply/verify Live OVS khoảng 607–661 ms, chưa gồm inference, solve và Data API. Đề xuất pilot H=1/3/5 trên cùng môi trường vẫn chờ thực thi và phê duyệt baseline runtime. Các H khác cần model tương ứng đã huấn luyện, không sửa riêng H trong YAML của model H=1. Chưa có số đo toàn vòng nên không kết luận H=1 khả thi hoặc bất khả thi.
 
-Batch ??y ?? v? snapshot/context t??ng ?ng n?m ? `testing/fixtures/ml_data_v14/`. Test `ml/tests/test_data_handoff.py` ki?m schema, strict integer, run/snapshot/cutoff, 48?H, HTTP 200 cho batch h?p l? v? 422 cho float; t?ng DB d?ng cursor ki?m th?. Ch?a ph?i x?c nh?n PostgreSQL/live network.
+CLI hiện mặc định `max_snapshot_age_s=2.0`, `forecast_timeout_ms=500`, `fallback_policy=skip`, `fallback_epsilon=0.0`. Đây là mặc định triển khai, chưa phải SLA được pilot xác nhận; Runner có thể truyền chính sách đã thống nhất. Khi H=1, kiểm tra forecast expiry vẫn giới hạn tuổi dự báo dù max_snapshot_age_s là 2.
 
-Gi?i h?n c?n l?i: client retry c?ng m?t HTTP request gi? nguy?n bytes; g?i l?i Predictor cho c?ng snapshot ho?c kh?i ??ng l?i worker hi?n ch?a c? durable outbox ?? gi? issued_at/payload, n?n c? th? g?p 409. Quy t?c tick ??u v? bin history ?m trong warm-up v?n c?n ??ng b? v?i Data reader tr??c runtime.
+## 8. Kiểm chứng yêu cầu Data
+
+Batch đầy đủ và snapshot/context tương ứng nằm ở `testing/fixtures/ml_data_v14/`. Test `ml/tests/test_data_handoff.py` kiểm schema, strict integer, run/snapshot/cutoff, 48×H, HTTP 200 cho batch hợp lệ và 422 cho float; tầng DB dùng cursor kiểm thử. Chưa phải xác nhận PostgreSQL/live network.
+
+Giới hạn còn lại: retry cùng một HTTP request giữ nguyên bytes; gọi Predictor lại cho cùng snapshot hoặc khởi động lại worker chưa có durable outbox giữ issued_at/payload, nên có thể gặp 409. Quy tắc tick đầu và bin history âm trong warm-up còn cần đồng bộ với Data reader trước runtime.
+
+## 9. Xác nhận fixture SDN commit 2ec0a583
+
+Test `ml/tests/test_native_sdn_fixture.py` đọc nguyên fixture trong `sdn/fixtures/data_v14/`, không sửa schema hoặc hash của producer. Snapshot VALID có L=10 và 480 dòng history; model triển khai có L=30 và yêu cầu 1.440 dòng history. Không padding, lặp history hoặc điền 0 để làm hai cấu hình khớp nhau.
+
+Test sử dụng một model L=10/H=1 nhỏ, huấn luyện trên dữ liệu tổng hợp chỉ phục vụ kiểm hợp đồng, để chứng minh Predictor đọc trực tiếp fixture VALID và xuất 48 dòng integer 100/101. Model kiểm thử này không thay model bàn giao. Các trạng thái INCOMPLETE/STALE/INVALID và sai hash bị từ chối.
+
+Với model thật trong `selected.yaml`, fixture L=10 phải bị từ chối do `Snapshot lookback_L mismatch`. Để xác nhận tích hợp model bàn giao, SDN cần sinh Snapshot L=30 từ producer và demand evidence tương ứng. Chạy lại test bằng đồng hồ kiểm thử tại thời điểm fixture; fixture lịch sử không được dùng cho tick live.

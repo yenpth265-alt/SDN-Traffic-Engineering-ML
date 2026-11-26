@@ -128,6 +128,36 @@ class S0AppConfig:
     data_flush_interval_s: float = 0.5
     data_timeout_s: float = 0.5
     data_max_retries: int = 3
+    strict_integration_profile: bool = False
+
+    def validate_integration_profile(self) -> None:
+        """
+        Fail-closed validation for the official `data_v1` cross-role integration profile.
+        Does nothing in `legacy` mode unless `strict_integration_profile=True`.
+        """
+        if not self.strict_integration_profile and self.data_api_mode != "data_v1":
+            return
+        errors: list[str] = []
+        if self.data_api_mode != "data_v1":
+            errors.append("SDN_DATA_API_MODE must be 'data_v1' for integration profile.")
+        if self.demand_provider_mode != "data_v1":
+            errors.append("SDN_DEMAND_PROVIDER_MODE must be 'data_v1' (never mix SQLite demand history).")
+        if not self.data_endpoint_url or not (
+            self.data_endpoint_url.startswith("http://") or self.data_endpoint_url.startswith("https://")
+        ):
+            errors.append("SDN_DATA_ENDPOINT_URL must be a valid http(s):// URL.")
+        if not self.data_api_key or not self.data_api_key.strip():
+            errors.append("SDN_DATA_API_KEY (role SDN X-API-Key) must be provided via environment variable.")
+        if self.northbound_enable and (not self.northbound_auth_token or not self.northbound_auth_token.strip()):
+            errors.append("SDN_NORTHBOUND_TOKEN must be provided via environment variable when northbound HTTP API is enabled.")
+        if self.data_outbox_dir is None:
+            errors.append("SDN_DATA_OUTBOX_DIR must be configured for durable outbox recovery.")
+        if self.idempotency_db_path is None:
+            errors.append("SDN_IDEMPOTENCY_DB_PATH must be configured for durable AC-S08 idempotency.")
+        if self.data_timeout_s <= 0:
+            errors.append(f"SDN_DATA_TIMEOUT_S must be > 0, got {self.data_timeout_s!r}.")
+        if errors:
+            raise ValueError("Invalid SDN integration profile: " + " | ".join(errors))
 
     @classmethod
     def from_env(cls) -> "S0AppConfig":
@@ -186,6 +216,7 @@ class S0AppConfig:
             data_flush_interval_s=float(os.environ.get("SDN_DATA_FLUSH_INTERVAL_S", "0.5")),
             data_timeout_s=float(os.environ.get("SDN_DATA_TIMEOUT_S", "0.5")),
             data_max_retries=int(os.environ.get("SDN_DATA_MAX_RETRIES", "3")),
+            strict_integration_profile=_env_bool("SDN_STRICT_INTEGRATION_PROFILE", False),
         )
 
 
@@ -232,6 +263,8 @@ class S0ControllerOrchestrator:
         event_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._config = config or S0AppConfig()
+        if self._config.strict_integration_profile:
+            self._config.validate_integration_profile()
         bundle_path = Path(self._config.topology_bundle_path)
         csv_dir = (
             Path(self._config.csv_config_dir)

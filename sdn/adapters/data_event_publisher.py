@@ -808,6 +808,94 @@ class DataEventPublisher:
             last_error=pending_err,
         )
 
+    def reconcile_pending_audit(
+        self,
+        run_id: str,
+        decision_batch_id: str,
+        *,
+        current_state_version: Optional[int] = None,
+        ovs_verified: bool = True,
+        ovs_reconcile_required: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Controlled, targeted administrative reconciliation for a specific `(run_id, decision_batch_id)`
+        after `DecisionBatch` 404 lookup retries were exhausted.
+
+        Safety guarantees:
+        - NEVER deletes `pending_apply_audits.jsonl` records.
+        - NEVER resets unrelated pending batches.
+        - NEVER fabricates a Data ACK.
+        - NEVER opens `optimization_tick_eligible` unless both `RoutingState` and `ApplyResult`
+          receive valid Data persistence ACKs.
+        """
+        dedup_key = f"apply_response:{run_id}:{decision_batch_id}"
+        with self._lock:
+            pending = self._pending_audits.get(dedup_key)
+            existing = self._records.get(dedup_key)
+            if pending is None and existing is None:
+                return {
+                    "found": False,
+                    "run_id": run_id,
+                    "decision_batch_id": decision_batch_id,
+                    "reconciled": False,
+                    "status": "NOT_FOUND",
+                    "sync_gate": self.sync_gate_status(
+                        run_id,
+                        current_state_version=current_state_version,
+                        ovs_verified=ovs_verified,
+                        ovs_reconcile_required=ovs_reconcile_required,
+                    ),
+                }
+            if pending is not None:
+                # Reset retry counter ONLY for this specific (run_id, decision_batch_id)
+                pending["lookup_exhausted"] = False
+                pending["lookup_404_attempts"] = 0
+
+        if pending is not None:
+            self._resolve_single_pending_audit(dedup_key)
+        self.flush_pending()
+
+        with self._lock:
+            rec_after = self._records.get(dedup_key)
+            still_pending_audit = self._pending_audits.get(dedup_key)
+            eff_sv = current_state_version
+            if eff_sv is None and rec_after is not None:
+                raw_sv = rec_after.payload.get("response_state_version")
+                if isinstance(raw_sv, int) and not isinstance(raw_sv, bool):
+                    eff_sv = raw_sv
+            elif eff_sv is None and still_pending_audit is not None:
+                raw_sv = still_pending_audit.get("state_version")
+                if isinstance(raw_sv, int) and not isinstance(raw_sv, bool):
+                    eff_sv = raw_sv
+
+            delivered = rec_after is not None and rec_after.status == DeliveryStatus.DELIVERED
+            last_err = (
+                rec_after.last_error
+                if rec_after is not None
+                else (still_pending_audit.get("last_error") if still_pending_audit else None)
+            )
+            status_str = (
+                rec_after.status.value
+                if rec_after is not None
+                else DeliveryStatus.PENDING_DELIVERY.value
+            )
+
+        gate = self.sync_gate_status(
+            run_id,
+            current_state_version=eff_sv,
+            ovs_verified=ovs_verified,
+            ovs_reconcile_required=ovs_reconcile_required,
+        )
+        return {
+            "found": True,
+            "run_id": run_id,
+            "decision_batch_id": decision_batch_id,
+            "reconciled": bool(delivered),
+            "status": status_str,
+            "last_error": last_err,
+            "sync_gate": gate,
+        }
+
     def publish_verification_evidence(
         self,
         run_id: str,

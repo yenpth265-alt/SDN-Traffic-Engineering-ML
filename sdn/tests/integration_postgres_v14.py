@@ -36,6 +36,7 @@ from uuid import uuid4
 
 from sdn.adapters.data_api_v1_adapter import (
     fetch_decision_batch_from_data_v1,
+    map_snapshot_to_data_v1,
     serialize_canonical_json_bytes,
 )
 from sdn.adapters.data_demand_history_provider import (
@@ -236,27 +237,7 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
             r_dem = self._client.post("/v1/network/demand", headers={"X-API-Key": "qa-network"}, json=ev)
             self.assertEqual(r_dem.status_code, 200, r_dem.text)
 
-        with self._transaction() as cursor:
-            cursor.execute("SELECT clock_timestamp() AS now")
-            as_of_dt = cursor.fetchone()["now"]
-
-        provider = DataAPIDemandHistoryProvider(
-            DataDemandHistoryConfig(
-                endpoint_base_url="http://testserver",
-                api_key="qa-sdn",
-                timeout_s=5.0,
-            ),
-            http_get_fn=self._testclient_get,
-        )
-        fetched = provider.fetch_demand_history(
-            run_id,
-            history_cutoff_utc=_fmt_utc_sec(w_end),
-            snapshot_as_of_utc=_fmt_utc(as_of_dt),
-            lookback_L=1,
-        )
-        self.assertEqual(len(fetched), 48)
-
-        # Contract 2: Bootstrap SDN RoutingState v1 -> publish RoutingState -> publish canonical Snapshot v1.4 -> GET round-trip
+        # Bootstrap SDN RoutingState v1 -> publish RoutingState v1 to real Data API -> confirm ACK
         drv = InMemorySwitchDriver(self._topo)
         comp = RouteCompiler(self._topo, FlowMatcher(self._topo))
         inst = RuleInstaller(comp, drv, RuleVerifier(comp, drv))
@@ -280,6 +261,31 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
             r_rt1 = pub.publish_routing_state(rs_v1, deliver_now=True)
             self.assertEqual(r_rt1.status, DeliveryStatus.DELIVERED, r_rt1.last_error)
 
+            # Query fresh DB clock_timestamp() AFTER RoutingState v1 persistence ACK so both
+            # demand_observations.available_at_utc <= snapshot_as_of_utc AND
+            # routing_versions(v1).available_at_utc <= snapshot_as_of_utc hold causally,
+            # while preserving the original history_cutoff_utc (w_end, cutoff=1).
+            with self._transaction() as cursor:
+                cursor.execute("SELECT clock_timestamp() AS now")
+                as_of_dt = cursor.fetchone()["now"]
+
+            provider = DataAPIDemandHistoryProvider(
+                DataDemandHistoryConfig(
+                    endpoint_base_url="http://testserver",
+                    api_key="qa-sdn",
+                    timeout_s=5.0,
+                ),
+                http_get_fn=self._testclient_get,
+            )
+            fetched = provider.fetch_demand_history(
+                run_id,
+                history_cutoff_utc=_fmt_utc_sec(w_end),
+                snapshot_as_of_utc=_fmt_utc(as_of_dt),
+                lookback_L=1,
+            )
+            self.assertEqual(len(fetched), 48)
+
+            # Contract 2: Build canonical Snapshot v1.4 -> POST exact bytes + X-Content-SHA256 -> GET byte/hash parity
             sc = SnapshotCreator(self._topo, sm, provider)
             origins = OriginRefs(
                 run_started_at_utc=_fmt_utc_sec(run_start),
@@ -296,6 +302,10 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
                 snapshot_as_of_utc=_fmt_utc(as_of_dt),
                 origin_refs=origins,
             )
+            self.assertEqual(snap.history_cutoff_utc, _fmt_utc_sec(w_end))
+            self.assertEqual(snap.snapshot_as_of_utc, _fmt_utc(as_of_dt))
+            _, expected_snap_bytes, expected_snap_sha = map_snapshot_to_data_v1(snap)
+
             r_sn = pub.publish_snapshot(snap, deliver_now=True)
             self.assertEqual(r_sn.status, DeliveryStatus.DELIVERED, r_sn.last_error)
 
@@ -304,6 +314,8 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
                 headers={"X-API-Key": "qa-reader"},
             )
             self.assertEqual(got.status_code, 200, got.text)
+            self.assertEqual(got.content, expected_snap_bytes)
+            self.assertEqual(got.headers["X-Content-SHA256"], expected_snap_sha)
             self.assertEqual(hashlib.sha256(got.content).hexdigest(), got.headers["X-Content-SHA256"])
             self.assertEqual(json.loads(got.content)["sdn"]["snapshot_id"], snap.snapshot_id)
 

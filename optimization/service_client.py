@@ -7,15 +7,16 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from optimization.planner import OptimizationController
-from optimization.result_serializer import bind_decision_batch_id
+from optimization.result_serializer import bind_decision_batch_id, build_decision_wire_payload
 
 
 class OptimizationServiceClient:
     """
     Cầu nối HTTP:
     1. Lấy forecast READY qua GET /v1/runs/{run_id}/forecasts/{forecast_batch_id}.
-    2. Tính DecisionBatch (48 rows) & ApplyRequest (<= B changes).
-    3. POST DecisionBatch lên Data (/v1/optimization/decisions) trước khi gọi SDN, giữ nguyên ID khi retry.
+    2. Tính DecisionBatch (48 rows) & ApplyRequest (1..B changes).
+    3. POST wire payload của DecisionBatch lên Data (/v1/optimization/decisions) trước khi gọi SDN,
+       giữ nguyên decision_batch_id và payload khi retry.
     4. Gắn decision_batch_id từ Data ACK sang ApplyRequest rồi POST sang SDN.
     """
 
@@ -88,12 +89,12 @@ class OptimizationServiceClient:
         decision_batch: Mapping[str, Any],
         endpoint_path: str = "/v1/optimization/decisions",
     ) -> dict[str, Any]:
-        # Giữ nguyên decision_batch_id và toàn bộ payload qua các lần retry
-        frozen_payload = dict(decision_batch)
+        # Tách strict wire payload cho Data (extra="forbid") và giữ nguyên qua các lần retry
+        frozen_wire_payload = build_decision_wire_payload(decision_batch)
         return self._request_json(
             "POST",
             f"{self.data_base_url}{endpoint_path}",
-            payload=frozen_payload,
+            payload=frozen_wire_payload,
             retryable=True,
         )
 
@@ -158,8 +159,16 @@ class OptimizationServiceClient:
                 apply_request, endpoint_path=sdn_apply_endpoint
             )
             plan["apply_result"] = apply_result
+            pub_state = (
+                apply_result.get("published_routing_state")
+                if isinstance(apply_result, Mapping)
+                and isinstance(apply_result.get("published_routing_state"), Mapping)
+                else None
+            )
             plan["hold_down_update"] = self.controller.ingest_apply_result(
-                apply_result, now_utc=now_utc
+                apply_result,
+                now_utc=now_utc,
+                published_routing_state=pub_state,
             )
 
         return plan

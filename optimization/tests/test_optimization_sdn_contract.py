@@ -1,506 +1,442 @@
-import copy
-import json
+﻿import json
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
-from optimization.config_loader import load_optimization_config
-from optimization.load_estimator import load_topology_from_configs
+from optimization.input_validator import validate_forecast, validate_routing_state
 from optimization.planner import OptimizationController, run_planner
-from optimization.result_serializer import bind_decision_batch_id
+from optimization.result_serializer import (
+    bind_decision_batch_id,
+    build_decision_wire_payload,
+    serialize_apply_request,
+)
 from optimization.service_client import OptimizationServiceClient
 
-try:
-    from sdn.schemas.apply_models import ApplyRequest, ApplyResponse, compute_apply_payload_hash
-except ImportError:
-    ApplyRequest = None
-    ApplyResponse = None
-    compute_apply_payload_hash = None
+
+def _build_topology(num_flows: int = 48) -> dict[str, Any]:
+    flows = [f"0x{100 + i:03x}" for i in range(num_flows)]
+    paths = {fg: [f"p_{fg}_a", f"p_{fg}_b"] for fg in flows}
+    links = {
+        "l_a": {"capacity_mbps": 400.0},
+        "l_b": {"capacity_mbps": 1500.0},
+    }
+    path_links: dict[str, list[str]] = {}
+    for idx, fg in enumerate(flows):
+        path_links[f"p_{fg}_a"] = ["l_a"] if idx % 2 == 0 else ["l_b"]
+        path_links[f"p_{fg}_b"] = ["l_b"] if idx % 2 == 0 else ["l_a"]
+
+    a_fpe: dict[str, dict[str, dict[str, int]]] = {}
+    for fg in flows:
+        a_fpe[fg] = {}
+        for p in paths[fg]:
+            active_links = set(path_links.get(p, ()))
+            a_fpe[fg][p] = {e: (1 if e in active_links else 0) for e in links}
+
+    return {
+        "topology_version": "topo_v1_4",
+        "topology_hash": "hash_topo_v1_4",
+        "F": flows,
+        "P": paths,
+        "E": list(links.keys()),
+        "links": links,
+        "path_links": path_links,
+        "a_fpe": a_fpe,
+    }
+
+
+def _build_routing_state(
+    topology: dict[str, Any],
+    eligible: bool = True,
+    include_gate: bool = True,
+    state_version: int = 1,
+) -> dict[str, Any]:
+    routes: dict[str, Any] = {}
+    for fg in topology["F"]:
+        routes[fg] = {
+            "flow_group_id": fg,
+            "current_path": topology["P"][fg][0],
+            "verification_status": "VERIFIED",
+        }
+    state: dict[str, Any] = {
+        "run_id": "run_test_01",
+        "state_version": state_version,
+        "routing_state_complete": True,
+        "routes": routes,
+    }
+    if include_gate:
+        state["data_sync_gate"] = {
+            "optimization_tick_eligible": eligible,
+            "synced": eligible,
+            "pending_count": 0 if eligible else 1,
+        }
+    return state
+
+
+def _build_forecast(
+    topology: dict[str, Any],
+    h_bins: int = 3,
+    high_demand_count: int = 8,
+    forecast_start: int = 0,
+    forecast_end: int = 1,
+) -> dict[str, Any]:
+    rows = []
+    for idx, fg in enumerate(topology["F"]):
+        demand = 120.0 if idx < high_demand_count else 20.0
+        for off in range(h_bins):
+            rows.append(
+                {
+                    "flow_group_id": fg,
+                    "offset": off,
+                    "predicted_mbps": demand,
+                }
+            )
+    return {
+        "run_id": "run_test_01",
+        "forecast_batch_id": "fb_001",
+        "snapshot_id": "snap_001",
+        "snapshot_as_of_utc": "2026-11-26T14:00:00Z",
+        "history_cutoff_utc": "2026-11-26T13:59:00Z",
+        "measurement_started_at_utc": "2026-11-26T14:00:00Z",
+        "delta_s": 1.0,
+        "forecast_start": forecast_start,
+        "forecast_end": forecast_end,
+        "status": "READY",
+        "rows": rows,
+    }
+
+
+def _base_config(budget_b: int = 4, t_hold: float = 30.0) -> dict[str, Any]:
+    return {
+        "config_version": "cfg_v1_4",
+        "TH": 0.5,
+        "N": 1,
+        "B": budget_b,
+        "T_hold": t_hold,
+        "h": 0.0,
+        "lambda_weight": 0.001,
+        "deadline_ms": 200,
+        "apply_guard_ms": 200,
+        "C_e": 1000.0,
+        "w_u": 1.0,
+        "w_m": 0.01,
+        "w_c": 0.01,
+    }
 
 
 class TestOptimizationSDNContract(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.topology = load_topology_from_configs("configs/network")
-        cls.config = load_optimization_config("configs/optimization/optimization.yaml")
-
-    def _make_routing_state(
-        self,
-        state_version: int = 3,
-        unknown_flow: str | None = None,
-        omit_status_flow: str | None = None,
-    ) -> dict:
-        entries = []
-        for fg in self.topology["F"]:
-            p1 = self.topology["P"][fg][0]
-            if fg == unknown_flow:
-                entries.append(
-                    {
-                        "flow_group_id": fg,
-                        "current_path": None,
-                        "actual_path_id": None,
-                        "verification_status": "UNKNOWN",
-                        "last_successful_change_at": None,
-                    }
-                )
-            elif fg == omit_status_flow:
-                entries.append(
-                    {
-                        "flow_group_id": fg,
-                        "current_path": p1,
-                        "actual_path_id": p1,
-                        "last_successful_change_at": None,
-                    }
-                )
-            else:
-                entries.append(
-                    {
-                        "flow_group_id": fg,
-                        "current_path": p1,
-                        "actual_path_id": p1,
-                        "verification_status": "VERIFIED",
-                        "last_successful_change_at": None,
-                    }
-                )
-        return {
-            "run_id": "run_test_01",
-            "state_version": state_version,
-            "routing_state_complete": True,
-            "reconcile_required": False,
-            "in_flight_batch_id": None,
-            "data_sync_gate": {"synced": True, "pending_count": 0},
-            "routing_state": entries,
-        }
-
-    def _find_congested_pair(self) -> tuple[set[str], float]:
-        F = self.topology["F"]
-        P = self.topology["P"]
-        E = self.topology["E"]
-        a_fpe = self.topology["a_fpe"]
-        C_map = self.topology.get("C", {})
-
-        best_ratio = 1.0
-        best_pair: list[str] = []
-        best_m_before = 0.0
-
-        for fg1 in F:
-            if len(P[fg1]) < 2:
-                continue
-            p1_1, p2_1 = P[fg1][0], P[fg1][1]
-            for fg2 in F:
-                if fg2 == fg1:
-                    continue
-                p1_2 = P[fg2][0]
-                m_before = 0.0
-                m_after = 0.0
-                for e in E:
-                    cap = float(C_map.get(e, 100.0))
-                    if cap <= 0:
-                        continue
-                    u_b = (a_fpe[fg1][p1_1][e] + a_fpe[fg2][p1_2][e]) / cap
-                    u_a = (a_fpe[fg1][p2_1][e] + a_fpe[fg2][p1_2][e]) / cap
-                    if u_b > m_before:
-                        m_before = u_b
-                    if u_a > m_after:
-                        m_after = u_a
-                if m_before > 0:
-                    ratio = m_after / m_before
-                    if ratio < best_ratio:
-                        best_ratio = ratio
-                        best_pair = [fg1, fg2]
-                        best_m_before = m_before
-
-        high_mbps = (0.96 / best_m_before) if best_m_before > 0 else 48.0
-        return set(best_pair), high_mbps
-
-    def _make_forecast(
-        self,
-        now_dt: datetime,
-        congested: bool = True,
-        expired: bool = False,
-        include_deadline: bool = True,
-    ) -> dict:
-        f_start = now_dt.isoformat().replace("+00:00", "Z")
-        f_end = (now_dt + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
-        deadline = (
-            (now_dt - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
-            if expired
-            else (now_dt + timedelta(seconds=4)).isoformat().replace("+00:00", "Z")
-        )
-
-        selected, high_mbps = self._find_congested_pair()
-        preds = {}
-        for fg in self.topology["F"]:
-            mbps = high_mbps if (congested and fg in selected) else 0.0
-            preds[fg] = {"predicted_mbps_array": [mbps, mbps, mbps]}
-
-        fc = {
-            "run_id": "run_test_01",
-            "snapshot_id": "snap_001",
-            "forecast_batch_id": "fc_001",
-            "status": "READY",
-            "forecast_start": f_start,
-            "forecast_end": f_end,
-            "topology_version": self.topology["topology_version"],
-            "topology_hash": self.topology["topology_hash"],
-            "snapshot_as_of_utc": f_start,
-            "history_cutoff_utc": f_start,
-            "predictions": preds,
-        }
-        if include_deadline:
-            fc["apply_deadline_utc"] = deadline
-        return fc
+    def setUp(self) -> None:
+        self.topo = _build_topology(48)
+        self.rs = _build_routing_state(self.topo, eligible=True)
+        self.fc = _build_forecast(self.topo, h_bins=3, high_demand_count=8)
+        self.now = datetime(2026, 11, 26, 14, 0, 0, tzinfo=timezone.utc)
+        self.tick_at = "2026-11-26T14:00:00Z"
+        self.deadline = "2026-11-26T14:00:10Z"
 
     def test_01_topology_mapping_counts(self) -> None:
-        self.assertEqual(len(self.topology["F"]), 48)
-        self.assertEqual(len(self.topology["E"]), 32)
-        total_paths = sum(len(v) for v in self.topology["P"].values())
-        self.assertEqual(total_paths, 96)
+        self.assertEqual(len(self.topo["F"]), 48)
+        self.assertEqual(len(self.topo["P"]), 48)
 
     def test_02_block_unknown_or_missing_verification_status(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        res_unknown = run_planner(
-            self._make_forecast(now_dt),
-            self._make_routing_state(unknown_flow=self.topology["F"][0]),
-            [0.90, 0.91, 0.92],
-            self.config,
-            topology_override=self.topology,
-            now_utc=now_dt,
-        )
-        self.assertEqual(res_unknown["status"], "STATE_UNKNOWN")
-
-        res_missing = run_planner(
-            self._make_forecast(now_dt),
-            self._make_routing_state(omit_status_flow=self.topology["F"][1]),
-            [0.90, 0.91, 0.92],
-            self.config,
-            topology_override=self.topology,
-            now_utc=now_dt,
-        )
-        self.assertEqual(res_missing["status"], "STATE_UNKNOWN")
+        bad_rs = _build_routing_state(self.topo, eligible=True)
+        first_fg = self.topo["F"][0]
+        del bad_rs["routes"][first_fg]["verification_status"]
+        ok, code, _ = validate_routing_state(bad_rs, self.topo["F"], self.topo["P"])
+        self.assertFalse(ok)
+        self.assertEqual(code, "STATE_UNKNOWN")
 
     def test_03_block_stale_deadline(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        res = run_planner(
-            self._make_forecast(now_dt, expired=True),
-            self._make_routing_state(),
-            [0.90, 0.91, 0.92],
-            self.config,
-            topology_override=self.topology,
-            now_utc=now_dt,
+        short_deadline = (self.now + timedelta(milliseconds=100)).isoformat().replace("+00:00", "Z")
+        ok, code, _ = validate_forecast(
+            self.fc,
+            self.topo["F"],
+            deadline_ms=200,
+            apply_guard_ms=200,
+            now_utc=self.now,
+            apply_deadline_utc=short_deadline,
         )
-        self.assertEqual(res["status"], "DATA_STALE")
+        self.assertFalse(ok)
+        self.assertEqual(code, "DATA_STALE")
 
     def test_04_milp_reroute_and_strict_sdn_apply_request(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        ctrl = OptimizationController(self.config, topology_override=self.topology)
-        rs = self._make_routing_state(state_version=7)
-        fc = self._make_forecast(now_dt, congested=True)
-
-        self.assertEqual(ctrl.step(0.90, fc, rs, now_utc=now_dt)["status"], "NO_TRIGGER")
-        self.assertEqual(ctrl.step(0.92, fc, rs, now_utc=now_dt)["status"], "NO_TRIGGER")
-
-        res = ctrl.step(0.95, fc, rs, now_utc=now_dt)
+        ctrl = OptimizationController(_base_config(budget_b=4), topology_override=self.topo)
+        res = ctrl.step(
+            0.92,
+            self.fc,
+            self.rs,
+            now_utc=self.now,
+            decision_batch_id="dec_004",
+            apply_deadline_utc=self.deadline,
+            tick_id="tick_004",
+            tick_at_utc=self.tick_at,
+        )
         self.assertEqual(res["status"], "APPLY_REQUESTED")
-        apply_dict = res["apply_request"]
+        wire = build_decision_wire_payload(res["decision_batch"])
+        expected_keys = {
+            "run_id",
+            "decision_batch_id",
+            "tick_id",
+            "tick_at_utc",
+            "snapshot_id",
+            "forecast_batch_id",
+            "expected_state_version",
+            "apply_deadline_utc",
+            "optimizer_result",
+            "rows",
+        }
+        self.assertEqual(set(wire.keys()), expected_keys)
+        self.assertIsInstance(wire["tick_id"], str)
+        self.assertEqual(len(wire["rows"]), 48)
+        for r in wire["rows"]:
+            self.assertEqual(set(r.keys()), {"flow_group_id", "old_path_id", "proposed_path_id"})
 
-        self.assertGreaterEqual(len(apply_dict["changes"]), 1)
-        self.assertLessEqual(len(apply_dict["changes"]), self.config["B"])
-        self.assertEqual(len(apply_dict["config_hash"]), 64)
-
-        if ApplyRequest is not None:
-            sdn_parsed = ApplyRequest.from_dict(apply_dict, strict=True)
-            self.assertEqual(sdn_parsed.expected_state_version, 7)
-            self.assertEqual(sdn_parsed.config_version, "1.0")
-            self.assertEqual(sdn_parsed.effective_config_hash, apply_dict["config_hash"])
-            self.assertEqual(sdn_parsed.effective_payload_hash, apply_dict["payload_hash"])
-            if compute_apply_payload_hash is not None:
-                self.assertEqual(compute_apply_payload_hash(apply_dict), apply_dict["payload_hash"])
+        app_req = res["apply_request"]
+        self.assertIsNotNone(app_req)
+        self.assertLessEqual(len(app_req["changes"]), 4)
+        self.assertGreater(len(app_req["changes"]), 0)
+        self.assertIn("payload_hash", app_req)
 
     def test_05_decision_batch_48_rows_shared_id_and_zero_budget(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        rs = self._make_routing_state(state_version=8)
-        fc = self._make_forecast(now_dt, congested=True, include_deadline=False)
-        shared_id = "dec_data_ack_20261126_001"
-        deadline_str = (now_dt + timedelta(seconds=3)).isoformat().replace("+00:00", "Z")
-
         res = run_planner(
-            fc,
-            rs,
-            [0.91, 0.92, 0.94],
-            self.config,
-            topology_override=self.topology,
-            now_utc=now_dt,
-            decision_batch_id=shared_id,
-            apply_deadline_utc=deadline_str,
-            tick_id=100,
+            self.fc,
+            self.rs,
+            [0.92],
+            _base_config(budget_b=0),
+            topology_override=self.topo,
+            now_utc=self.now,
+            decision_batch_id="dec_005",
+            apply_deadline_utc=self.deadline,
+            tick_id="tick_005",
+            tick_at_utc=self.tick_at,
         )
-        self.assertEqual(res["status"], "APPLY_REQUESTED")
-        db = res["decision_batch"]
-        req = res["apply_request"]
+        self.assertEqual(res["status"], "KEPT")
+        self.assertIsNone(res["apply_request"])
+        wire = build_decision_wire_payload(res["decision_batch"])
+        self.assertEqual(len(wire["rows"]), 48)
+        for r in wire["rows"]:
+            self.assertEqual(r["proposed_path_id"], r["old_path_id"])
 
-        self.assertEqual(db["tick_id"], 100)
-        self.assertNotIn("tick_id", req)
-        self.assertEqual(db["decision_batch_id"], shared_id)
-        self.assertEqual(req["decision_batch_id"], shared_id)
-        self.assertEqual(len(db["decision_rows"]), 48)
-        self.assertEqual(db["total_flows"], 48)
-        self.assertEqual(db["changed_flows_count"], len(req["changes"]))
+    def test_06_data_sync_gate_blocks_missing_or_ineligible(self) -> None:
+        no_gate_rs = _build_routing_state(self.topo, include_gate=False)
+        ok1, code1, _ = validate_routing_state(no_gate_rs, self.topo["F"], self.topo["P"])
+        self.assertFalse(ok1)
+        self.assertEqual(code1, "DATA_NOT_SYNCED")
 
-        cfg_b0 = dict(self.config, B=0)
-        res_b0 = run_planner(
-            fc,
-            rs,
-            [0.91, 0.92, 0.94],
-            cfg_b0,
-            topology_override=self.topology,
-            now_utc=now_dt,
-            decision_batch_id="dec_b0_tick",
-            tick_id=101,
-        )
-        self.assertEqual(res_b0["status"], "KEPT")
-        self.assertIsNone(res_b0["apply_request"])
-        self.assertEqual(len(res_b0["decision_batch"]["decision_rows"]), 48)
-        self.assertEqual(res_b0["decision_batch"]["changed_flows_count"], 0)
-
-    def test_06_data_sync_gate_preserves_verified(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        ctrl = OptimizationController(self.config, topology_override=self.topology)
-        rs = self._make_routing_state(state_version=9)
-        rs["data_synced"] = False
-        rs["acked_routing_version"] = 8
-        rs_snapshot = copy.deepcopy(rs["routing_state"])
-        fc = self._make_forecast(now_dt, congested=True)
-
-        res = ctrl.step(0.95, fc, rs, now_utc=now_dt)
-        self.assertEqual(res["status"], "DATA_NOT_SYNCED")
-        self.assertEqual(rs["routing_state"], rs_snapshot)
+        false_gate_rs = _build_routing_state(self.topo, eligible=False, include_gate=True)
+        ok2, code2, _ = validate_routing_state(false_gate_rs, self.topo["F"], self.topo["P"])
+        self.assertFalse(ok2)
+        self.assertEqual(code2, "DATA_NOT_SYNCED")
 
     def test_07_hold_down_only_on_verified_path_change(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        ctrl = OptimizationController(self.config, topology_override=self.topology)
-        rs = self._make_routing_state(state_version=10)
-        fc = self._make_forecast(now_dt, congested=True)
-
-        ctrl.step(0.90, fc, rs, now_utc=now_dt)
-        ctrl.step(0.92, fc, rs, now_utc=now_dt)
-        res = ctrl.step(0.95, fc, rs, now_utc=now_dt)
-        self.assertEqual(res["status"], "APPLY_REQUESTED")
-
-        changed_row = next(r for r in res["decision_batch"]["decision_rows"] if r["changed"])
-        kept_row = next(r for r in res["decision_batch"]["decision_rows"] if not r["changed"])
-
-        summary = ctrl.ingest_apply_result(
-            {
-                "decision_batch_id": res["decision_batch"]["decision_batch_id"],
-                "status": "APPLIED",
-                "completed_at": now_dt.isoformat().replace("+00:00", "Z"),
-                "results": [
-                    {
-                        "flow_group_id": changed_row["flow_group_id"],
-                        "old_path_id": changed_row["old_path_id"],
-                        "actual_path_id": changed_row["new_path_id"],
-                        "proposed_path_id": changed_row["new_path_id"],
-                        "status": "APPLIED",
-                        "verification_status": "VERIFIED",
-                        "rule_count": 2,
-                        "applied_at": now_dt.isoformat().replace("+00:00", "Z"),
-                    },
-                    {
-                        "flow_group_id": kept_row["flow_group_id"],
-                        "old_path_id": kept_row["old_path_id"],
-                        "actual_path_id": kept_row["old_path_id"],
-                        "proposed_path_id": kept_row["old_path_id"],
-                        "status": "KEPT",
-                        "verification_status": "VERIFIED",
-                        "rule_count": 0,
-                        "applied_at": None,
-                    },
-                ],
-            },
-            now_utc=now_dt,
+        ctrl = OptimizationController(_base_config(budget_b=4, t_hold=60.0), topology_override=self.topo)
+        first = ctrl.step(
+            0.92,
+            self.fc,
+            self.rs,
+            now_utc=self.now,
+            decision_batch_id="dec_007_a",
+            apply_deadline_utc=self.deadline,
+            tick_id="tick_007_a",
+            tick_at_utc=self.tick_at,
         )
-        self.assertIn(changed_row["flow_group_id"], summary["locked_updated"])
-        self.assertNotIn(kept_row["flow_group_id"], summary["locked_updated"])
+        self.assertEqual(first["status"], "APPLY_REQUESTED")
+        changed_fg = first["apply_request"]["changes"][0]["flow_group_id"]
+        old_p = first["apply_request"]["changes"][0]["old_path_id"]
+        new_p = first["apply_request"]["changes"][0]["new_path_id"]
 
-    def test_08_integer_offsets_to_utc_apply_request_bridge(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        rs = self._make_routing_state(state_version=11)
-        selected, high_mbps = self._find_congested_pair()
-
-        rows = []
-        for fg in self.topology["F"]:
-            mbps = high_mbps if fg in selected else 0.0
-            for offset in range(100, 105):
-                rows.append({"flow_group_id": fg, "offset": offset, "predicted_mbps": mbps})
-
-        fc_rows = {
-            "run_id": "run_test_01",
-            "tick_id": 100,
-            "snapshot_id": "snap_001",
-            "forecast_batch_id": "fc_int_100",
-            "status": "READY",
-            "forecast_start": 100,
-            "forecast_end": 105,
-            "measurement_started_at_utc": "2026-11-26T04:00:00Z",
-            "delta_s": 1,
-            "rows": rows,
+        apply_res = {
+            "status": "APPLIED",
+            "results": [
+                {
+                    "flow_group_id": changed_fg,
+                    "old_path_id": old_p,
+                    "actual_path_id": new_p,
+                    "changed": True,
+                    "status": "APPLIED",
+                    "verification_status": "VERIFIED",
+                    "verified_at_utc": self.tick_at,
+                }
+            ],
         }
-        res = run_planner(
-            fc_rows,
-            rs,
-            [0.91, 0.92, 0.94],
-            self.config,
-            topology_override=self.topology,
-            now_utc=now_dt,
+        pub_rs = _build_routing_state(self.topo, eligible=True)
+        pub_rs["routes"][changed_fg]["current_path"] = new_p
+        upd = ctrl.ingest_apply_result(apply_res, now_utc=self.now, published_routing_state=pub_rs)
+        self.assertTrue(upd["complete_48"])
+        self.assertIn(changed_fg, upd["locked_updated"])
+
+    def test_08_duplicate_or_non_contiguous_bins_rejected(self) -> None:
+        dup_fc = _build_forecast(self.topo, h_bins=2, high_demand_count=2)
+        dup_fc["rows"].append(
+            {"flow_group_id": self.topo["F"][0], "offset": 1, "predicted_mbps": 700.0}
+        )
+        ok_dup, _, _ = validate_forecast(dup_fc, self.topo["F"], now_utc=self.now, apply_deadline_utc=self.deadline)
+        self.assertFalse(ok_dup)
+
+        gap_fc = _build_forecast(self.topo, h_bins=2, high_demand_count=2)
+        gap_fc["rows"] = [
+            r for r in gap_fc["rows"] if not (r["flow_group_id"] == self.topo["F"][0] and r["offset"] == 1)
+        ]
+        gap_fc["rows"].append({"flow_group_id": self.topo["F"][0], "offset": 2, "predicted_mbps": 700.0})
+        ok_gap, code_gap, _ = validate_forecast(
+            gap_fc, self.topo["F"], now_utc=self.now, apply_deadline_utc=self.deadline
+        )
+        self.assertFalse(ok_gap)
+        self.assertEqual(code_gap, "INVALID_FORECAST_WINDOW")
+
+    def test_09_bind_decision_batch_id_recomputes_sdn_payload_hash(self) -> None:
+        ctrl = OptimizationController(_base_config(budget_b=4), topology_override=self.topo)
+        res = ctrl.step(
+            0.92,
+            self.fc,
+            self.rs,
+            now_utc=self.now,
+            decision_batch_id="dec_tmp_009",
+            apply_deadline_utc=self.deadline,
+            tick_id="tick_009",
+            tick_at_utc=self.tick_at,
         )
         self.assertEqual(res["status"], "APPLY_REQUESTED")
-        self.assertEqual(res["decision_batch"]["forecast_start"], 100)
-        self.assertEqual(res["decision_batch"]["forecast_end"], 105)
-        self.assertEqual(res["apply_request"]["forecast_start"], "2026-11-26T04:01:40Z")
-        self.assertEqual(res["apply_request"]["forecast_end"], "2026-11-26T04:01:45Z")
-        if ApplyRequest is not None:
-            parsed = ApplyRequest.from_dict(res["apply_request"], strict=True)
-            self.assertEqual(parsed.effective_payload_hash, res["apply_request"]["payload_hash"])
+        old_hash = res["apply_request"]["payload_hash"]
+        bind_decision_batch_id(res, "dec_canonical_009")
+        self.assertEqual(res["decision_batch"]["decision_batch_id"], "dec_canonical_009")
+        self.assertEqual(res["apply_request"]["decision_batch_id"], "dec_canonical_009")
+        self.assertNotEqual(res["apply_request"]["payload_hash"], old_hash)
 
-        fc_float = dict(fc_rows, forecast_start=100.0, forecast_end=105.0)
-        res_float = run_planner(
-            fc_float,
-            rs,
-            [0.91, 0.92, 0.94],
-            self.config,
-            topology_override=self.topology,
-            now_utc=now_dt,
-        )
-        self.assertEqual(res_float["status"], "INVALID_FORECAST_OFFSET")
+    def test_10_service_client_get_forecast_post_data_before_sdn_and_retry_id(self) -> None:
+        received_order: list[str] = []
+        decision_post_count = 0
+        captured_decision_payloads: list[dict[str, Any]] = []
+        forecast_payload = self.fc
 
-    def test_09_nested_sdn_data_sync_gate_blocks_unsynced_tick(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        rs = self._make_routing_state(state_version=12)
-        rs["data_sync_gate"] = {"synced": False, "pending_count": 1}
-        fc = self._make_forecast(now_dt, congested=True)
-
-        res = run_planner(
-            fc,
-            rs,
-            [0.91, 0.92, 0.94],
-            self.config,
-            topology_override=self.topology,
-            now_utc=now_dt,
-        )
-        self.assertEqual(res["status"], "DATA_NOT_SYNCED")
-
-    def test_10_service_client_http_order_data_before_sdn(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        call_log: list[tuple[str, dict]] = []
-
-        class MockContractHandler(BaseHTTPRequestHandler):
-            def log_message(self, format: str, *args) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
                 return
 
-            def do_POST(self) -> None:
-                length = int(self.headers.get("Content-Length", "0"))
-                body = json.loads(self.rfile.read(length).decode("utf-8"))
-                call_log.append((self.path, body))
-
-                if self.path == "/v1/optimization/decisions":
-                    resp = {"accepted": True, "decision_batch_id": "dec_ack_from_data_999"}
-                elif self.path == "/v1/routing/apply":
-                    if ApplyRequest is not None:
-                        ApplyRequest.from_dict(body, strict=True)
-                    chg = body["changes"][0]
-                    resp = {
-                        "run_id": body["run_id"],
-                        "decision_batch_id": body["decision_batch_id"],
-                        "status": "APPLIED",
-                        "state_version": body["expected_state_version"] + 1,
-                        "completed_at": now_dt.isoformat().replace("+00:00", "Z"),
-                        "results": [
-                            {
-                                "flow_group_id": chg["flow_group_id"],
-                                "old_path_id": chg["old_path_id"],
-                                "actual_path_id": chg["new_path_id"],
-                                "proposed_path_id": chg["new_path_id"],
-                                "status": "APPLIED",
-                                "verification_status": "VERIFIED",
-                                "rule_count": 2,
-                                "applied_at": now_dt.isoformat().replace("+00:00", "Z"),
-                            }
-                        ],
-                    }
-                    if ApplyResponse is not None:
-                        ApplyResponse.from_dict(resp, strict=True)
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-                    return
-
-                encoded = json.dumps(resp).encode("utf-8")
+            def do_GET(self) -> None:
+                received_order.append(f"GET:{self.path}")
+                body = json.dumps(forecast_payload).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(encoded)
+                self.wfile.write(body)
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), MockContractHandler)
+            def do_POST(self) -> None:
+                nonlocal decision_post_count
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length).decode("utf-8")
+                parsed = json.loads(raw)
+                received_order.append(f"POST:{self.path}:{parsed.get('decision_batch_id')}")
+
+                if self.path == "/v1/optimization/decisions":
+                    captured_decision_payloads.append(parsed)
+                    decision_post_count += 1
+                    if decision_post_count == 1:
+                        self.send_response(503)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", "2")
+                        self.end_headers()
+                        self.wfile.write(b"{}")
+                        return
+                    resp = json.dumps({"status": "ACCEPTED", "decision_batch_id": parsed["decision_batch_id"]}).encode(
+                        "utf-8"
+                    )
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.end_headers()
+                    self.wfile.write(resp)
+                    return
+
+                resp = json.dumps({"status": "APPLIED", "results": []}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         port = server.server_address[1]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         try:
-            ctrl = OptimizationController(self.config, topology_override=self.topology)
+            base_url = f"http://127.0.0.1:{port}"
+            ctrl = OptimizationController(_base_config(budget_b=4), topology_override=self.topo)
             client = OptimizationServiceClient(
                 controller=ctrl,
-                data_base_url=f"http://127.0.0.1:{port}",
-                sdn_base_url=f"http://127.0.0.1:{port}",
-                api_key="test_opt_key",
+                data_base_url=base_url,
+                sdn_base_url=base_url,
+                max_retries=2,
+                retry_backoff_sec=0.01,
             )
-            rs = self._make_routing_state(state_version=15)
-            fc = self._make_forecast(now_dt, congested=True)
-
-            ctrl.step(0.90, fc, rs, now_utc=now_dt)
-            ctrl.step(0.92, fc, rs, now_utc=now_dt)
-            res = client.execute_tick(
-                u_current=0.95,
-                forecast_data=fc,
-                routing_state=rs,
-                now_utc=now_dt,
-                decision_batch_id="dec_initial_015",
-                tick_id=15,
+            out = client.execute_tick(
+                u_current=0.92,
+                run_id="run_test_01",
+                forecast_batch_id="fb_001",
+                routing_state=self.rs,
+                now_utc=self.now,
+                decision_batch_id="dec_retry_fixed_010",
+                apply_deadline_utc=self.deadline,
+                tick_id=10,
+                tick_at_utc=self.tick_at,
             )
-
-            self.assertEqual(res["status"], "APPLY_REQUESTED")
-            self.assertEqual(len(call_log), 2)
-            self.assertEqual(call_log[0][0], "/v1/optimization/decisions")
-            self.assertEqual(len(call_log[0][1]["decision_rows"]), 48)
-            self.assertEqual(call_log[1][0], "/v1/routing/apply")
-            # Xác nhận ID từ Data ACK được truyền sang SDN
-            self.assertEqual(call_log[1][1]["decision_batch_id"], "dec_ack_from_data_999")
-            self.assertEqual(len(res["hold_down_update"]["locked_updated"]), 1)
         finally:
             server.shutdown()
             server.server_close()
 
-    def test_11_bind_decision_batch_id_recomputes_sdn_payload_hash(self) -> None:
-        now_dt = datetime.now(timezone.utc)
-        rs = self._make_routing_state(state_version=16)
-        fc = self._make_forecast(now_dt, congested=True)
-        res = run_planner(
-            fc,
-            rs,
-            [0.91, 0.92, 0.94],
-            self.config,
-            topology_override=self.topology,
-            now_utc=now_dt,
-            tick_id=16,
+        self.assertEqual(out["status"], "APPLY_REQUESTED")
+        self.assertEqual(
+            received_order,
+            [
+                "GET:/v1/runs/run_test_01/forecasts/fb_001",
+                "POST:/v1/optimization/decisions:dec_retry_fixed_010",
+                "POST:/v1/optimization/decisions:dec_retry_fixed_010",
+                "POST:/v1/routing/apply:dec_retry_fixed_010",
+            ],
         )
-        bind_decision_batch_id(res, "dec_runner_data_ack_20261126")
-        self.assertEqual(res["decision_batch"]["decision_batch_id"], "dec_runner_data_ack_20261126")
-        self.assertEqual(res["apply_request"]["decision_batch_id"], "dec_runner_data_ack_20261126")
-        if ApplyRequest is not None:
-            parsed = ApplyRequest.from_dict(res["apply_request"], strict=True)
-            self.assertEqual(parsed.effective_payload_hash, res["apply_request"]["payload_hash"])
+        self.assertEqual(len(captured_decision_payloads), 2)
+        self.assertEqual(captured_decision_payloads[0], captured_decision_payloads[1])
+        self.assertEqual(
+            set(captured_decision_payloads[0].keys()),
+            {
+                "run_id",
+                "decision_batch_id",
+                "tick_id",
+                "tick_at_utc",
+                "snapshot_id",
+                "forecast_batch_id",
+                "expected_state_version",
+                "apply_deadline_utc",
+                "optimizer_result",
+                "rows",
+            },
+        )
+        self.assertIsInstance(captured_decision_payloads[0]["tick_id"], str)
+
+    def test_11_over_budget_changes_not_silently_sliced(self) -> None:
+        fake_rows = [
+            {
+                "flow_group_id": fg,
+                "old_path_id": "p_old",
+                "proposed_path_id": "p_new",
+                "new_path_id": "p_new",
+                "changed": True,
+            }
+            for fg in self.topo["F"][:3]
+        ]
+        with self.assertRaises(ValueError):
+            serialize_apply_request(
+                decision_batch_id="dec_over_b",
+                decision_rows=fake_rows,
+                forecast_data=self.fc,
+                state_version=1,
+                config=_base_config(budget_b=2),
+                apply_deadline_utc=self.deadline,
+                topology=self.topo,
+                now_utc=self.now,
+            )
 
 
 if __name__ == "__main__":

@@ -183,6 +183,44 @@ def bind_decision_batch_id(plan_result: dict[str, Any], decision_batch_id: str) 
     return plan_result
 
 
+def build_decision_wire_payload(decision_batch: Mapping[str, Any]) -> dict[str, Any]:
+    """Wire payload strict cho POST /v1/optimization/decisions (khớp extra='forbid')."""
+    raw_rows = decision_batch.get("rows")
+    if raw_rows is None:
+        raw_rows = decision_batch.get("decision_rows", ())
+
+    wire_rows = [
+        {
+            "flow_group_id": str(r["flow_group_id"]),
+            "old_path_id": str(r["old_path_id"]),
+            "proposed_path_id": str(r["proposed_path_id"]),
+        }
+        for r in raw_rows
+    ]
+
+    tick_raw = decision_batch.get("tick_id")
+    tick_id_str = str(tick_raw).strip() if tick_raw is not None and str(tick_raw).strip() else "tick_default"
+
+    opt_res = decision_batch.get("optimizer_result")
+    wire_opt = dict(opt_res) if isinstance(opt_res, Mapping) else {}
+
+    fb_id = decision_batch.get("forecast_batch_id")
+    fb_id_str = str(fb_id).strip() if fb_id is not None and str(fb_id).strip() else ""
+
+    return {
+        "run_id": str(decision_batch["run_id"]),
+        "decision_batch_id": str(decision_batch["decision_batch_id"]),
+        "tick_id": tick_id_str,
+        "tick_at_utc": str(decision_batch["tick_at_utc"]),
+        "snapshot_id": str(decision_batch["snapshot_id"]),
+        "forecast_batch_id": fb_id_str,
+        "expected_state_version": int(decision_batch["expected_state_version"]),
+        "apply_deadline_utc": str(decision_batch["apply_deadline_utc"]),
+        "optimizer_result": wire_opt,
+        "rows": wire_rows,
+    }
+
+
 def serialize_decision_batch(
     *,
     decision_batch_id: str,
@@ -201,7 +239,7 @@ def serialize_decision_batch(
     tick_at_utc: str | None = None,
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
-    """Đóng gói đủ 48 flow vào rows cho POST /v1/optimization/decisions."""
+    """Đóng gói đủ 48 flow cho DecisionBatch nội bộ (dùng build_decision_wire_payload khi gửi Data)."""
     ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
     resolved_tick_at = (
         str(tick_at_utc).strip()
@@ -272,7 +310,7 @@ def serialize_decision_batch(
     return {
         "run_id": str(forecast_data.get("run_id", "run_default")),
         "decision_batch_id": decision_batch_id,
-        "tick_id": tick_id if tick_id is not None else "tick_default",
+        "tick_id": str(tick_id) if tick_id is not None and str(tick_id).strip() else "tick_default",
         "tick_at_utc": resolved_tick_at,
         "snapshot_id": str(forecast_data.get("snapshot_id", "snap_default")),
         "forecast_batch_id": _resolve_forecast_batch_id(forecast_data),
@@ -329,6 +367,8 @@ def serialize_apply_request(
     ]
     if not changes:
         return None
+    if len(changes) > max_b:
+        raise ValueError(f"Số luồng đổi tuyến ({len(changes)}) vượt quá ngân sách B={max_b}")
 
     ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
     f_start_utc, f_end_utc = _extract_apply_request_utc_bounds(forecast_data, ref_now)
@@ -353,7 +393,7 @@ def serialize_apply_request(
         "forecast_start": f_start_utc,
         "forecast_end": f_end_utc,
         "apply_deadline_utc": apply_deadline_utc,
-        "changes": changes[:max_b],
+        "changes": changes,
         "topology_version": topo_ver,
         "topology_hash": topo_hash,
         "config_hash": config.get("config_hash"),

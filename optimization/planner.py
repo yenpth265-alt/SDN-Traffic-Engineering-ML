@@ -58,6 +58,7 @@ def run_planner(
     apply_deadline_utc: str | None = None,
     hold_down_overrides: Mapping[str, Any] | None = None,
     tick_id: int | str | None = None,
+    tick_at_utc: str | None = None,
 ) -> dict[str, Any]:
     topology = (
         dict(topology_override)
@@ -76,15 +77,14 @@ def run_planner(
 
     ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
     effective_tick_id = tick_id if tick_id is not None else forecast_data.get("tick_id")
+    effective_tick_at = tick_at_utc if tick_at_utc is not None else forecast_data.get("tick_at_utc")
     F = topology["F"]
     routes = normalize_routing_entries(routing_state)
 
-    # 1. Data Sync Gate & kiểm tra RoutingState (chặn DATA_NOT_SYNCED / STATE_UNKNOWN / IN_FLIGHT)
     state_ok, state_status, state_msg = validate_routing_state(routing_state, F, topology["P"])
     if not state_ok:
         return {"status": state_status, "reason": state_msg}
 
-    # 2. Kiểm tra ForecastBatch READY, đủ 48 x H dòng, integer offsets & quỹ thời gian apply_deadline_utc
     effective_deadline = resolve_apply_deadline_utc(
         forecast_data, merged_config, ref_now, override_deadline=apply_deadline_utc
     )
@@ -99,11 +99,9 @@ def run_planner(
     if not fc_ok:
         return {"status": fc_status, "reason": fc_msg}
 
-    # 3. Kiểm tra Trigger (N chu kỳ liên tiếp vượt ngưỡng TH)
     if not check_trigger(U_current_history, float(merged_config["TH"]), int(merged_config["N"])):
         return {"status": "NO_TRIGGER"}
 
-    # 4. Chuẩn bị dữ liệu tải dự báo, ID batch dùng chung và các luồng đang Hold-down
     b_f = calculate_mean_demand(forecast_data, F)
     default_ce = float(merged_config.get("C_e", 100.0))
     U_old = evaluate_routing_utilization(topology, b_f, routes, default_ce=default_ce)
@@ -153,6 +151,7 @@ def run_planner(
             },
             reason=reason_code,
             tick_id=effective_tick_id,
+            tick_at_utc=effective_tick_at,
             now_utc=ref_now,
         )
         out: dict[str, Any] = {
@@ -168,14 +167,12 @@ def run_planner(
             out["J_new"] = round(j_fin, 4)
         return out
 
-    # 5. Nếu tải dự báo dưới ngưỡng TH hoặc ngân sách B=0 -> xuất DecisionBatch 48 dòng KEPT, không gửi ApplyRequest
     if U_old <= float(merged_config["TH"]):
         return _build_kept_result("FORECAST_BELOW_THRESHOLD")
 
     if int(merged_config.get("B", 4)) <= 0:
         return _build_kept_result("BUDGET_ZERO")
 
-    # 6. Xây dựng & Giải mô hình MILP (kèm fallback Branch-and-Bound chính xác)
     prob, x, y, U = build_milp(topology, b_f, locked_groups, routes, merged_config)
     status, U_new, J_new, y_vals, x_vals, solve_ms = solve_model(
         prob,
@@ -195,7 +192,6 @@ def run_planner(
     if status not in ["Optimal", "Feasible"]:
         return _build_kept_result(f"Solver status: {status}", solver_status=status, solve_ms=solve_ms)
 
-    # 7. Kiểm định ngưỡng cải thiện Hysteresis (h)
     n_changes = sum(y_vals.values())
     if not check_hysteresis(J_old, J_new, n_changes, float(merged_config["h"])):
         return _build_kept_result(
@@ -206,7 +202,6 @@ def run_planner(
             solve_ms=solve_ms,
         )
 
-    # 8. Trích xuất tuyến tối ưu cho đủ 48 luồng và đóng gói DecisionBatch (48 dòng) + ApplyRequest (tối đa B dòng)
     selected_paths: dict[str, str] = {}
     for f in F:
         chosen = current_selected[f]
@@ -237,12 +232,13 @@ def run_planner(
         },
         reason="REROUTED",
         tick_id=effective_tick_id,
+        tick_at_utc=effective_tick_at,
         now_utc=ref_now,
     )
 
     apply_req = serialize_apply_request(
         decision_batch_id=batch_id,
-        decision_rows=decision_batch["decision_rows"],
+        decision_rows=decision_batch["rows"],
         forecast_data=forecast_data,
         state_version=state_ver,
         config=merged_config,
@@ -268,12 +264,6 @@ def run_planner(
 
 
 class OptimizationController:
-    """
-    Wrapper có trạng thái cho Runner/Orchestrator:
-    - Quản lý cửa sổ trigger N tick và tạm dừng khi Data chưa ACK (DATA_NOT_SYNCED).
-    - Nhận ApplyResponse từ SDN để chỉ cập nhật hold-down T_hold cho các luồng đổi đường thành công (VERIFIED).
-    """
-
     def __init__(self, config: Mapping[str, Any], topology_override: Mapping[str, Any] | None = None) -> None:
         self.config = dict(config)
         self.topology = (
@@ -294,6 +284,7 @@ class OptimizationController:
         decision_batch_id: str | None = None,
         apply_deadline_utc: str | None = None,
         tick_id: int | str | None = None,
+        tick_at_utc: str | None = None,
     ) -> dict[str, Any]:
         self._u_history.append(float(u_current))
         res = run_planner(
@@ -307,6 +298,7 @@ class OptimizationController:
             apply_deadline_utc=apply_deadline_utc,
             hold_down_overrides=self._hold_down_overrides,
             tick_id=tick_id,
+            tick_at_utc=tick_at_utc,
         )
         if res["status"] in ("DATA_NOT_SYNCED", "SKIPPED_IN_FLIGHT"):
             if self._u_history:
@@ -318,6 +310,7 @@ class OptimizationController:
             "FORECAST_INVALID",
             "FORECAST_NOT_READY",
             "INVALID_FORECAST_OFFSET",
+            "INVALID_FORECAST_WINDOW",
         ):
             self._u_history.clear()
         return res
@@ -326,7 +319,9 @@ class OptimizationController:
         self,
         apply_result: Mapping[str, Any],
         now_utc: datetime | None = None,
-    ) -> dict[str, list[str]]:
+        published_routing_state: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Xác nhận ApplyResult đủ 48 flow sau khi RoutingState mới được công bố."""
         ts_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
         batch_status = str(apply_result.get("status", "")).upper()
         batch_completed_at = apply_result.get("completed_at")
@@ -334,18 +329,32 @@ class OptimizationController:
         rows = (
             apply_result.get("results")
             or apply_result.get("flow_results")
+            or apply_result.get("rows")
             or apply_result.get("decision_rows")
             or apply_result.get("changes")
             or []
         )
 
+        expected_flows = list(self.topology.get("F", ()))
+        seen_flows: set[str] = set()
+        duplicate_flows: list[str] = []
         locked_updated: list[str] = []
         unverified_flows: list[str] = []
+
+        pub_routes = (
+            normalize_routing_entries(published_routing_state)
+            if published_routing_state is not None
+            else {}
+        )
 
         for item in rows:
             fg = str(item.get("flow_group_id", "")).strip()
             if not fg:
                 continue
+            if fg in seen_flows:
+                duplicate_flows.append(fg)
+            seen_flows.add(fg)
+
             old_p = item.get("old_path_id") or item.get("old_path")
             new_p = (
                 item.get("actual_path_id")
@@ -371,6 +380,15 @@ class OptimizationController:
                 item.get("changed", old_p is not None and new_p is not None and str(old_p) != str(new_p))
             )
             if actually_changed and ver_status == "VERIFIED" and flow_status in ("", "APPLIED", "VERIFIED"):
+                if pub_routes and fg in pub_routes:
+                    pub_status = str(
+                        pub_routes[fg].get("verification_status") or pub_routes[fg].get("status") or ""
+                    ).upper()
+                    pub_path = pub_routes[fg].get("current_path") or pub_routes[fg].get("actual_path_id")
+                    if pub_status != "VERIFIED" or (new_p is not None and str(pub_path) != str(new_p)):
+                        unverified_flows.append(fg)
+                        continue
+
                 verified_ts = str(
                     item.get("verified_at_utc")
                     or item.get("applied_at")
@@ -380,6 +398,9 @@ class OptimizationController:
                 self._hold_down_overrides[fg] = verified_ts
                 locked_updated.append(fg)
 
+        missing_flows = [fg for fg in expected_flows if fg not in seen_flows] if expected_flows else []
+        complete_48 = (len(missing_flows) == 0 and len(duplicate_flows) == 0)
+
         if (
             apply_result.get("reconcile_required") is True
             or batch_status in ("INCONSISTENT", "PARTIAL", "FAILED")
@@ -388,6 +409,10 @@ class OptimizationController:
             self._u_history.clear()
 
         return {
+            "complete_48": complete_48,
+            "total_received": len(seen_flows),
+            "missing_flows": missing_flows,
+            "duplicate_flows": duplicate_flows,
             "locked_updated": locked_updated,
             "unverified_flows": unverified_flows,
         }

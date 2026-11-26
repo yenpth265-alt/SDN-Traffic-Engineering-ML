@@ -1,0 +1,23 @@
+{
+  "run_id": "run_interoperability_01",
+  "decision_batch_id": "dec_interoperability_tick_100",
+  "snapshot_id": "snap_interoperability_001",
+  "expected_state_version": 2,
+  "config_version": "1.0",
+  "forecast_start": "2026-11-26T05:00:00Z",
+  "forecast_end": "2026-11-26T05:00:05Z",
+  "apply_deadline_utc": "2026-11-26T05:00:04Z",
+  "changes": [
+    {
+      "flow_group_id": "0x103",
+      "old_path_id": "0x103_P1",
+      "new_path_id": "0x103_P2"
+    }
+  ],
+  "topology_version": "1.0",
+  "topology_hash": "2fa43f873e8530d934661d455fad946cd28d4d77b8f0f87b0b0cb4aa4594d0dc",
+  "config_hash": "3f4635df0049d5588e2f18166782e1c30caf82632e97e418e5fe42db89093d9b",
+  "snapshot_as_of_utc": "2026-11-26T05:00:00Z",
+  "history_cutoff_utc": "2026-11-26T05:00:00Z",
+  "payload_hash": "5fc8c45f79949d57a26622304cbed28912979c827676389f3c6679d26b347cd4"
+}

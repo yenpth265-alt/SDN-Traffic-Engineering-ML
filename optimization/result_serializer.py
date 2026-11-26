@@ -17,6 +17,15 @@ def _to_rfc3339_utc(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
+def _parse_utc(raw: Any, field_name: str = "timestamp") -> datetime:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{field_name} phải là chuỗi RFC3339 UTC hợp lệ")
+    dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        raise ValueError(f"{field_name} thiếu múi giờ UTC")
+    return dt.astimezone(timezone.utc)
+
+
 def _parse_optional_utc(raw: Any) -> datetime | None:
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -27,7 +36,6 @@ def _parse_optional_utc(raw: Any) -> datetime | None:
 
 
 def _resolve_forecast_batch_id(forecast_data: Mapping[str, Any]) -> str | None:
-    """Ưu tiên forecast_batch_id (đề xuất của ML), fallback sang batch_id (tên cũ)."""
     for key in ("forecast_batch_id", "batch_id"):
         val = forecast_data.get(key)
         if val is not None and str(val).strip():
@@ -61,7 +69,7 @@ def _extract_decision_batch_bounds(
 def _extract_apply_request_utc_bounds(
     forecast_data: Mapping[str, Any], now_utc: datetime
 ) -> tuple[str, str]:
-    """Quy đổi integer bin offsets (vd: 100..105) sang chuỗi RFC3339 UTC khớp ApplyRequest.from_dict(strict=True)."""
+    """Quy đổi bin dự báo qua measurement_started_at_utc sang RFC3339 UTC cho ApplyRequest."""
     s_utc = forecast_data.get("forecast_start_utc")
     e_utc = forecast_data.get("forecast_end_utc")
     if isinstance(s_utc, str) and s_utc.strip() and isinstance(e_utc, str) and e_utc.strip():
@@ -108,7 +116,6 @@ def resolve_decision_batch_id(
     now_utc: datetime,
     tick_id: int | str | None = None,
 ) -> str:
-    """Không sinh UUID ngẫu nhiên: ưu tiên ID từ Runner/Data và giữ định danh tất định theo run_id + tick_id."""
     if provided_id and str(provided_id).strip():
         return str(provided_id).strip()
     if tick_id is not None and str(tick_id).strip():
@@ -123,7 +130,6 @@ def resolve_apply_deadline_utc(
     now_utc: datetime,
     override_deadline: str | None = None,
 ) -> str:
-    """apply_deadline_utc thuộc DecisionBatch/ApplyRequest, không bắt buộc có trên Snapshot."""
     if isinstance(override_deadline, str) and override_deadline.strip():
         return override_deadline.strip()
     raw = forecast_data.get("apply_deadline_utc")
@@ -134,7 +140,6 @@ def resolve_apply_deadline_utc(
 
 
 def compute_apply_request_hash(payload: Mapping[str, Any]) -> str:
-    """Tính SHA-256 trên đúng 11 trường canonical khớp compute_apply_payload_hash() của SDN v1.4."""
     if _sdn_compute_hash is not None:
         return _sdn_compute_hash(payload)
 
@@ -163,10 +168,6 @@ def compute_apply_request_hash(payload: Mapping[str, Any]) -> str:
 
 
 def bind_decision_batch_id(plan_result: dict[str, Any], decision_batch_id: str) -> dict[str, Any]:
-    """
-    Khi Runner POST DecisionBatch lên Data và nhận ACK kèm decision_batch_id chính thức,
-    gọi hàm này để đồng bộ decision_batch_id sang ApplyRequest và cập nhật lại payload_hash trước khi gửi SDN.
-    """
     clean_id = str(decision_batch_id).strip()
     if not clean_id:
         raise ValueError("decision_batch_id không được rỗng")
@@ -197,11 +198,26 @@ def serialize_decision_batch(
     solver_metrics: Mapping[str, Any],
     reason: str = "REROUTED",
     tick_id: int | str | None = None,
+    tick_at_utc: str | None = None,
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
-    """Đóng gói đủ 48 DecisionRows cho Data (cả tick KEPT và B=0)."""
+    """Đóng gói đủ 48 flow vào rows cho POST /v1/optimization/decisions."""
     ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
-    decision_rows: list[dict[str, Any]] = []
+    resolved_tick_at = (
+        str(tick_at_utc).strip()
+        if isinstance(tick_at_utc, str) and tick_at_utc.strip()
+        else (
+            str(forecast_data.get("tick_at_utc")).strip()
+            if isinstance(forecast_data.get("tick_at_utc"), str) and str(forecast_data.get("tick_at_utc")).strip()
+            else _to_rfc3339_utc(ref_now)
+        )
+    )
+    dt_tick = _parse_utc(resolved_tick_at, "tick_at_utc")
+    dt_deadline = _parse_utc(apply_deadline_utc, "apply_deadline_utc")
+    if dt_deadline <= dt_tick:
+        raise ValueError("apply_deadline_utc phải sau tick_at_utc")
+
+    rows: list[dict[str, Any]] = []
     changed_count = 0
 
     for fg in topology["F"]:
@@ -215,12 +231,12 @@ def serialize_decision_batch(
         if raw_ver_status is None:
             raw_ver_status = routing_state[fg].get("status", "UNKNOWN")
 
-        decision_rows.append(
+        rows.append(
             {
                 "flow_group_id": fg,
                 "old_path_id": old_p,
-                "new_path_id": new_p,
                 "proposed_path_id": new_p,
+                "new_path_id": new_p,
                 "changed": is_changed,
                 "decision_status": "REROUTED" if is_changed else "KEPT",
                 "verification_status": str(raw_ver_status).upper(),
@@ -232,24 +248,10 @@ def serialize_decision_batch(
     batch_status = "APPLY_REQUESTED" if changed_count > 0 else "KEPT"
     f_start, f_end = _extract_decision_batch_bounds(forecast_data, ref_now)
 
-    batch: dict[str, Any] = {
-        "decision_batch_id": decision_batch_id,
-        "run_id": str(forecast_data.get("run_id", "run_default")),
-        "snapshot_id": str(forecast_data.get("snapshot_id", "snap_default")),
-        "forecast_batch_id": _resolve_forecast_batch_id(forecast_data),
-        "snapshot_as_of_utc": forecast_data.get("snapshot_as_of_utc"),
-        "history_cutoff_utc": forecast_data.get("history_cutoff_utc"),
-        "topology_version": str(topology["topology_version"]),
-        "topology_hash": topology.get("topology_hash"),
-        "config_version": str(config.get("config_version", "1.0")),
-        "config_hash": config.get("config_hash"),
-        "expected_state_version": int(state_version),
-        "forecast_start": f_start,
-        "forecast_end": f_end,
-        "apply_deadline_utc": apply_deadline_utc,
+    optimizer_result: dict[str, Any] = {
         "decision_status": batch_status,
         "reason": reason,
-        "total_flows": len(decision_rows),
+        "total_flows": len(rows),
         "changed_flows_count": changed_count,
         "solver_status": solver_metrics.get("status", "Optimal"),
         "max_utilization_before": solver_metrics.get("U_before"),
@@ -257,11 +259,47 @@ def serialize_decision_batch(
         "objective_before": solver_metrics.get("J_before"),
         "objective_after": solver_metrics.get("J_after"),
         "solve_ms": solver_metrics.get("solve_ms"),
-        "decision_rows": decision_rows,
+        "topology_version": str(topology["topology_version"]),
+        "topology_hash": topology.get("topology_hash"),
+        "config_version": str(config.get("config_version", "1.0")),
+        "config_hash": config.get("config_hash"),
+        "snapshot_as_of_utc": forecast_data.get("snapshot_as_of_utc"),
+        "history_cutoff_utc": forecast_data.get("history_cutoff_utc"),
+        "forecast_start": f_start,
+        "forecast_end": f_end,
     }
-    if tick_id is not None:
-        batch["tick_id"] = tick_id
-    return batch
+
+    return {
+        "run_id": str(forecast_data.get("run_id", "run_default")),
+        "decision_batch_id": decision_batch_id,
+        "tick_id": tick_id if tick_id is not None else "tick_default",
+        "tick_at_utc": resolved_tick_at,
+        "snapshot_id": str(forecast_data.get("snapshot_id", "snap_default")),
+        "forecast_batch_id": _resolve_forecast_batch_id(forecast_data),
+        "expected_state_version": int(state_version),
+        "apply_deadline_utc": apply_deadline_utc,
+        "optimizer_result": optimizer_result,
+        "decision_status": batch_status,
+        "reason": reason,
+        "total_flows": len(rows),
+        "changed_flows_count": changed_count,
+        "solver_status": optimizer_result["solver_status"],
+        "max_utilization_before": optimizer_result["max_utilization_before"],
+        "max_utilization_after": optimizer_result["max_utilization_after"],
+        "objective_before": optimizer_result["objective_before"],
+        "objective_after": optimizer_result["objective_after"],
+        "solve_ms": optimizer_result["solve_ms"],
+        "topology_version": optimizer_result["topology_version"],
+        "topology_hash": optimizer_result["topology_hash"],
+        "config_version": optimizer_result["config_version"],
+        "config_hash": optimizer_result["config_hash"],
+        "snapshot_as_of_utc": optimizer_result["snapshot_as_of_utc"],
+        "history_cutoff_utc": optimizer_result["history_cutoff_utc"],
+        "forecast_start": f_start,
+        "forecast_end": f_end,
+        "rows": rows,
+        "decision_rows": rows,
+    }
 
 
 def serialize_apply_request(
@@ -275,7 +313,7 @@ def serialize_apply_request(
     topology: Mapping[str, Any] | None = None,
     now_utc: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """Chỉ xuất 1..B luồng đổi đường; trả về None nếu B=0 hoặc 0 thay đổi."""
+    """Chỉ xuất 1..B luồng đổi đường cho SDN; trả về None nếu B=0 hoặc 0 thay đổi."""
     max_b = int(config.get("B", 4))
     if max_b <= 0:
         return None
@@ -284,7 +322,7 @@ def serialize_apply_request(
         {
             "flow_group_id": row["flow_group_id"],
             "old_path_id": row["old_path_id"],
-            "new_path_id": row["new_path_id"],
+            "new_path_id": row.get("new_path_id") or row["proposed_path_id"],
         }
         for row in decision_rows
         if row["changed"]

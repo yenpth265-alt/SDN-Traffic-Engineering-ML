@@ -4,7 +4,7 @@ from typing import Any, Mapping, Sequence
 
 
 def resolve_forecast_batch_id(forecast_data: Mapping[str, Any]) -> str | None:
-    """Ưu tiên forecast_batch_id (đề xuất của ML), fallback sang batch_id (tên cũ)."""
+    """Ưu tiên forecast_batch_id, fallback sang batch_id."""
     for key in ("forecast_batch_id", "batch_id"):
         val = forecast_data.get(key)
         if val is not None and str(val).strip():
@@ -32,7 +32,7 @@ def extract_forecast_series(forecast_data: Mapping[str, Any]) -> dict[str, list[
         raw = forecast_data.get("predictions", forecast_data)
 
     if isinstance(raw, list):
-        grouped: dict[str, list[tuple[int, Any]]] = {}
+        grouped: dict[str, dict[int, Any]] = {}
         for idx, row in enumerate(raw):
             if not isinstance(row, Mapping) or "flow_group_id" not in row:
                 continue
@@ -40,13 +40,21 @@ def extract_forecast_series(forecast_data: Mapping[str, Any]) -> dict[str, list[
             offset_raw = row.get("offset", row.get("step", row.get("horizon_step", idx)))
             if isinstance(offset_raw, bool) or not isinstance(offset_raw, int):
                 raise ValueError(f"Forecast row offset phải là số nguyên (int), nhận được: {offset_raw!r}")
+            by_bin = grouped.setdefault(fg, {})
+            if offset_raw in by_bin:
+                raise ValueError(f"Trùng bin/offset {offset_raw} cho flow {fg}")
             val = row.get("predicted_mbps", row.get("demand_mbps", row.get("value")))
-            grouped.setdefault(fg, []).append((offset_raw, val))
+            by_bin[offset_raw] = val
 
         series_map: dict[str, list[Any]] = {}
-        for fg, items in grouped.items():
-            items.sort(key=lambda pair: pair[0])
-            series_map[fg] = [v for _, v in items]
+        for fg, by_bin in grouped.items():
+            offsets = sorted(by_bin.keys())
+            for i in range(1, len(offsets)):
+                if offsets[i] != offsets[i - 1] + 1:
+                    raise ValueError(
+                        f"Bin dự báo không liên tiếp cho flow {fg}: {offsets[i - 1]} -> {offsets[i]}"
+                    )
+            series_map[fg] = [by_bin[off] for off in offsets]
         return series_map
 
     if isinstance(raw, Mapping):
@@ -65,10 +73,7 @@ def extract_forecast_series(forecast_data: Mapping[str, Any]) -> dict[str, list[
 
 
 def check_data_sync_gate(routing_state: Mapping[str, Any]) -> tuple[bool, str, str]:
-    """
-    Chặn Runner/Optimization mở tick mới khi Data chưa ACK RoutingState,
-    giữ nguyên trạng thái VERIFIED của các luồng OVS (không đổi thành UNKNOWN).
-    """
+    """Chặn mở tick mới khi Data chưa ACK RoutingState, giữ nguyên VERIFIED của các luồng OVS."""
     gate = routing_state.get("data_sync_gate")
     if isinstance(gate, Mapping):
         if (
@@ -147,7 +152,6 @@ def validate_routing_state(
         if raw_status is None:
             raw_status = flow_state.get("status")
 
-        # Thiếu trạng thái xác minh phải coi là UNKNOWN, tuyệt đối không mặc định VERIFIED
         if raw_status is None or not str(raw_status).strip():
             return False, "STATE_UNKNOWN", f"Missing verification_status/status for flow {f}"
 
@@ -203,7 +207,9 @@ def validate_forecast(
     try:
         series_map = extract_forecast_series(forecast_data)
     except ValueError as exc:
-        return False, "INVALID_FORECAST_OFFSET", str(exc)
+        msg = str(exc)
+        code = "INVALID_FORECAST_WINDOW" if "không liên tiếp" in msg else "INVALID_FORECAST_OFFSET"
+        return False, code, msg
 
     expected_h: int | None = None
     for f in flow_groups:

@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from ml.common import ContractError, require, stamp, utc, whole
+from ml.common import ContractError, ROW_FIELDS, numbers, require, stamp, utc, whole
 from ml.inference.predict import Predictor, unwrap_snapshot
 
 METHOD_BY_ID = {
@@ -47,6 +47,9 @@ def resolve_method(method: str, run_info: dict | None = None) -> str:
                 "Cannot resolve method='auto' without run method_id in {M1, M2, M3}")
         return METHOD_BY_ID[run_info["method_id"]]
     require(method in ("rf", "persistence", "moving_average"), f"Unknown method: {method}")
+    if run_info is not None:
+        require(METHOD_BY_ID.get(run_info.get("method_id")) == method,
+                "Explicit method differs from registered run method_id")
     return method
 
 
@@ -56,9 +59,35 @@ def build_forecast_batch(
     rows: list[dict],
     forecast_batch_id: str | None = None,
     method: str = "rf",
+    snapshot: dict | None = None,
+    horizon_H: int | None = None,
 ) -> dict:
     """Wrap 48 x H seven-field Prediction rows into Data API's ForecastBatch payload."""
     require(bool(rows), "Cannot build ForecastBatch from empty rows")
+    groups = {hex(s * 256 + d) for s in range(1, 9) for d in range(1, 9)
+              if (s - 1) // 2 != (d - 1) // 2}
+    H = horizon_H if horizon_H is not None else len(rows) // 48
+    require(type(H) is int and H > 0 and len(rows) == 48 * H, "Forecast must contain exactly 48 x H rows")
+    require(all(set(row) == set(ROW_FIELDS) for row in rows), "Prediction rows must have exactly seven fields")
+    require(all(type(row["forecast_start"]) is int and type(row["forecast_end"]) is int for row in rows),
+            "Forecast offsets must be strict integers")
+    anchor = min(row["forecast_start"] for row in rows)
+    require(anchor >= 0, "Negative forecast offset")
+    expected = {(fg, offset) for fg in groups for offset in range(anchor, anchor + H)}
+    seen = set()
+    for row in rows:
+        key = (row["flow_group_id"], row["forecast_start"])
+        require(key not in seen and key in expected and row["run_id"] == run_id
+                and row["forecast_end"] == row["forecast_start"] + 1
+                and row["issued_at"] == rows[0]["issued_at"] and row["source"] == rows[0]["source"],
+                "Incomplete, duplicate or inconsistent forecast rows")
+        seen.add(key)
+    numbers([row["predicted_mbps"] for row in rows], "predicted_mbps")
+    if snapshot is not None:
+        inner = unwrap_snapshot(snapshot)
+        require(inner["run_id"] == run_id and inner["snapshot_id"] == snapshot_id,
+                "Forecast snapshot/run mismatch")
+        require(inner["cutoff_offset_s"] == anchor, "Forecast bins differ from snapshot cutoff")
     batch_id = forecast_batch_id or f"{run_id}:{snapshot_id}:{method}"
     return {
         "run_id": run_id,
@@ -285,10 +314,13 @@ class OnlineForecastRunner:
     ) -> dict:
         """Fetch snapshot, run Predictor, and POST ForecastBatch to Data API."""
         run_info = self.get_run(run_id)
+        self.predictor.last_audit = {"status": "INVALID", "snapshot_id": snapshot_id, "fallback": False}
         resolved_method = resolve_method(method, run_info)
         batch_id = forecast_batch_id or f"{run_id}:{snapshot_id}:{resolved_method}"
         snapshot_payload, raw_sha256 = self.client.get_snapshot(run_id, snapshot_id)
         try:
+            require(unwrap_snapshot(snapshot_payload).get("snapshot_id") == snapshot_id,
+                    "Downloaded snapshot_id differs from requested snapshot_id")
             context = build_context(
                 run_info,
                 snapshot_payload,
@@ -303,8 +335,7 @@ class OnlineForecastRunner:
             )
         except ContractError as exc:
             audit = dict(self.predictor.last_audit)
-            audit.setdefault("status", "INVALID")
-            audit.setdefault("reason", str(exc))
+            audit.update(status="INVALID", reason=str(exc), snapshot_id=snapshot_id)
             audit["snapshot_http_sha256"] = raw_sha256
             if emit_event and not dry_run:
                 self._try_emit_event(
@@ -329,6 +360,8 @@ class OnlineForecastRunner:
             rows,
             forecast_batch_id=batch_id,
             method=resolved_method,
+            snapshot=snapshot_payload,
+            horizon_H=self.predictor.config["horizon_H"],
         )
         ack = {"inserted": 0} if dry_run else self.client.post_forecast_batch(batch_payload)
         audit = dict(self.predictor.last_audit)

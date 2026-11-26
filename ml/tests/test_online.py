@@ -451,3 +451,22 @@ def test_online_cli_uses_frozen_deployment_yaml(model_dir, tmp_path, monkeypatch
             "--max-snapshot-age-s", "10", "--forecast-timeout-ms", "5000",
         ]) == 0
         assert len(server.forecasts[0]["rows"]) == 48 * frozen["horizon_H"]
+
+
+def test_online_rejects_wrong_snapshot_id_and_wrong_run_method(model_dir):
+    from ml.inference.online import resolve_method
+    predictor = Predictor(model_dir)
+    run, snapshots, cutoff = _live_run_fixture(predictor)
+    wrong_id = "request-with-mismatched-body"
+    snapshots[wrong_id] = snapshots["snap:online-test:t100:v1"]
+    with MockDataServer(run, snapshots) as server:
+        client = DataApiClient(server.base_url, ml_api_key=server.ml_key,
+                               reader_api_key=server.reader_key, opener=server.open)
+        runner = OnlineForecastRunner(model_dir, client)
+        result = runner.process_snapshot(run["run_id"], wrong_id,
+                                          clock=lambda: cutoff + timedelta(milliseconds=350))
+        assert result["status"] == "SKIPPED" and server.post_attempts == 0
+        assert result["audit"]["status"] == "INVALID"
+        assert result["audit"]["snapshot_id"] == wrong_id
+    with pytest.raises(ContractError, match="registered run"):
+        resolve_method("rf", {"method_id": "M1"})

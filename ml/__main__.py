@@ -172,6 +172,9 @@ def main(argv=None):
                     except DataApiError as exc:
                         res = {"status": "API_ERROR", "run_id": tick_run, "snapshot_id": tick_snap,
                                "status_code": exc.status_code, "reason": str(exc)}
+                    except ContractError as exc:
+                        res = {"status": "SKIPPED", "run_id": tick_run, "snapshot_id": tick_snap,
+                               "reason": str(exc)}
                     print(json.dumps({k: v for k, v in res.items() if k != "batch"}, ensure_ascii=False),
                           flush=True)
                 return 0

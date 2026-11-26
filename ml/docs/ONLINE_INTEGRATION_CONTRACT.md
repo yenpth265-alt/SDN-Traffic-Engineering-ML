@@ -88,7 +88,7 @@ Data API gửi/trả JSON dạng:
 
 ### 3.2. Quy tắc nhân quả & Chất lượng
 - **Causal history:** `origin <= cutoff <= snapshot_as_of <= now`. Với mỗi dòng thuộc `[cutoff - L, cutoff)`, yêu cầu `window_end - window_start == 1s`, `window_end <= released_at <= available_at <= snapshot_as_of`, và `bin_index == cutoff_offset_s - L + col` (measurement origin).
-- **Thiếu dữ liệu (`INCOMPLETE` / `STALE` / `INVALID`):** Không được điền `0` giả vào `requested_mbps`; giữ `requested_mbps = null`, `released_at_utc = null`, `available_at_utc = null`, `release_record_id = null`, `valid = false`, `reason != null`.
+- **Thiếu dữ liệu (`INCOMPLETE` / `STALE` / `INVALID`):** Không được điền `0` giả vào `requested_mbps`; giữ `requested_mbps = null`, `released_at_utc = null`, `available_at_utc = null`, `release_record_id = null`, `valid = false`; `reason` gi? ??ng gi? tr? producer/Data, c? th? l? `null` khi kh?ng c? observation.
 - **Hành vi ML (`ml/inference/predict.py`):** Chấp nhận cả envelope `{"sdn": ...}` lẫn dict phẳng; chỉ dự báo khi `quality_status == "VALID"` và mọi kiểm tra hash/origin/routing/causal đạt. Mọi trạng thái khác đều skip sạch sẽ (không phát hành dự báo, ghi audit).
 
 ---
@@ -175,3 +175,9 @@ result = runner.process_snapshot("run001", "snap:run001:t100:v1", emit_event=Tru
 Theo quy?t ??nh ng??i ph? tr?ch ng?y 26/11/2026: **L=30, H=1, epsilon=0**. YAML d?ng chung l? `configs/ml/selected.yaml`; Optimization tham chi?u qua `ml_deployment_config` trong `configs/optimization/optimization.yaml`. Optimization ki?m H=1, nh?n c?c gi? tr? final v? t?nh mean H, kh?ng ?p l?i epsilon. Khi truy?n Data ForecastBatch d?ng rows, Runner b? sung `measurement_started_at_utc` t? run v? deadline th?c t?; adapter kh?ng t? b?a origin/deadline.
 
 L??t t?m ki?m to?n l??i tr??c ?? b? ng?t; model b?n giao ???c hu?n luy?n l?i v?i c?p L/H ?? ch?n, 50.000 m?u train v? RF 150 c?y, depth 24, min_samples_leaf 4. Kh?ng coi ??y l? k?t qu? ho?n t?t 24 c?u h?nh.
+
+## 8. Ki?m ch?ng y?u c?u Data
+
+Batch ??y ?? v? snapshot/context t??ng ?ng n?m ? `testing/fixtures/ml_data_v14/`. Test `ml/tests/test_data_handoff.py` ki?m schema, strict integer, run/snapshot/cutoff, 48?H, HTTP 200 cho batch h?p l? v? 422 cho float; t?ng DB d?ng cursor ki?m th?. Ch?a ph?i x?c nh?n PostgreSQL/live network.
+
+Gi?i h?n c?n l?i: client retry c?ng m?t HTTP request gi? nguy?n bytes; g?i l?i Predictor cho c?ng snapshot ho?c kh?i ??ng l?i worker hi?n ch?a c? durable outbox ?? gi? issued_at/payload, n?n c? th? g?p 409. Quy t?c tick ??u v? bin history ?m trong warm-up v?n c?n ??ng b? v?i Data reader tr??c runtime.

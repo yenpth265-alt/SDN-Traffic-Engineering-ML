@@ -164,6 +164,9 @@ def test_exact_seven_fields_and_origin_tc_i03(online):
     assert {r["predicted_mbps"] for r in rows} == {4.0}
     assert {r["forecast_start"] for r in rows} == {100, 101, 102, 103, 104}
     assert {r["forecast_end"] for r in rows} == {101, 102, 103, 104, 105}
+    assert all(type(r["forecast_start"]) is int and type(r["forecast_end"]) is int for r in rows)
+    serialized = json.dumps(rows[0], separators=(",", ":"))
+    assert '"forecast_start":100,' in serialized and '"forecast_end":101,' in serialized
     assert len({r["issued_at"] for r in rows}) == 1
     assert rows[0]["issued_at"] == "2026-11-12T09:02:40.150000Z"
 
@@ -291,3 +294,35 @@ def test_demo_default_snapshot_has_time_left_for_horizon_one(pipeline, monkeypat
     snapshot, _ = demo.synthetic_snapshot(cfg, predictor.metadata)
     assert utc(snapshot["snapshot_as_of_utc"]) <= now
     assert utc(snapshot["history_cutoff_utc"]) + timedelta(seconds=1) > now
+
+
+def test_deployment_yaml_loads_pinned_model_with_relative_path(pipeline, tmp_path):
+    from ml.deployment import export_deployment
+    package = tmp_path / "package"
+    shutil.copytree(pipeline / "model", package / "model")
+    output = package / "config" / "selected.yaml"
+    frozen = export_deployment(package / "model", output)
+    assert frozen["artifact_dir"] == "../model"
+    # The package remains usable after copying it to another root.
+    shutil.copytree(package, tmp_path / "relocated")
+    selected = Predictor(tmp_path / "relocated/config/selected.yaml")
+    assert selected.config["lookback_L"] == frozen["lookback_L"]
+    assert selected.config["horizon_H"] == frozen["horizon_H"]
+    assert selected.metadata["model_sha256"] == frozen["model_sha256"]
+    assert frozen["selection"]["test_used_for_selection"] is False
+    assert (pipeline / "model/deployment.yaml").exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("lookback_L", 999), ("horizon_H", 999), ("ma_window", 999),
+    ("epsilon", 999.0), ("model_sha256", "0" * 64), ("horizon_H", True),
+    ("epsilon", False),
+])
+def test_deployment_yaml_rejects_drift_from_frozen_model(pipeline, tmp_path, field, value):
+    from ml.deployment import export_deployment
+    output = tmp_path / "selected.yaml"
+    frozen = export_deployment(pipeline / "model", output)
+    frozen[field] = value
+    output.write_text(yaml.safe_dump(frozen), encoding="utf-8")
+    with pytest.raises(ContractError, match="MODEL_LOAD_FAIL: deployment"):
+        Predictor(output)

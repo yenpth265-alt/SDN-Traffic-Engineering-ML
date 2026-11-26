@@ -10,7 +10,13 @@ def normalize_routing_entries(routing_state: Mapping[str, Any]) -> dict[str, dic
     """
     raw = routing_state.get("routing_state")
     if isinstance(raw, list):
-        return {str(item["flow_group_id"]): dict(item) for item in raw if "flow_group_id" in item}
+        entries = {str(item["flow_group_id"]): dict(item) for item in raw if "flow_group_id" in item}
+        for entry in entries.values():
+            if "verification_status" in entry:
+                entry["status"] = entry["verification_status"]
+            if "path_id" in entry:
+                entry["current_path"] = entry["path_id"]
+        return entries
     routes = routing_state.get("routes")
     if isinstance(routes, Mapping):
         return {str(k): dict(v) for k, v in routes.items()}

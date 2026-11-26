@@ -1,4 +1,4 @@
-# Pilot search space; these are candidates, NOT already validated L*/H*/epsilon*.
+# Full offline search space; online reads the selected deployment YAML instead.
 lookback_candidates: [10, 30, 60]
 horizon_candidates: [1, 3, 5, 10]
 epsilon_candidates: [0.0, 0.05, 0.1, 0.2]

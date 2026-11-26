@@ -79,6 +79,7 @@ Với lệnh run, kết quả nằm dưới ml/artifacts/run001/:
 | bundle/bundle.json | Schema, run/split, source hashes, hash các file dữ liệu |
 | model/model.joblib | RF đã huấn luyện |
 | model/ml_config.json | L*, H*, epsilon*, W*, feature order, thứ tự flow và baseline config |
+| model/deployment.yaml | YAML đóng băng cấu hình đã chọn, đường dẫn model tương đối và hash để online nạp |
 | model/metadata.json | Model/config hash, phiên bản thư viện, provenance và sample hash |
 | model/requirements-lock.txt | Phiên bản thư viện để tái tạo môi trường |
 | model/validation.json | Các lượt tìm kiếm và so sánh RF/Persistence/MA |
@@ -96,6 +97,32 @@ Chọn H bằng MAE không chứng minh H đó tối ưu hiệu năng mạng. Mu
 
 ## 5. Dự báo online
 
+### 5.0. Khóa L/H bằng offline và dùng lại YAML khi online
+
+L/H được chọn bằng **validation pooled vector MAE** trong lưới offline; test chỉ đánh giá sau khi chọn xong. Online dùng nguyên cấu hình đã đóng băng, không tự chọn lại L/H theo từng tick. File dùng chung của lần chạy 26/11/2026 là `configs/ml/selected.yaml`, tham chiếu model tại `ml/saved_models/offline-L30-H1/`.
+
+Mỗi lần `train` tự sinh `model/deployment.yaml`. Để xuất YAML sang vị trí bàn giao:
+
+~~~powershell
+python -m ml export-config --artifact ml/saved_models/offline-L30-H1 --out configs/ml/selected.yaml
+~~~
+
+YAML chứa `lookback_L`, `horizon_H`, `ma_window`, epsilon và hash model/config. Loader kiểm chúng khớp model đã huấn luyện; sửa riêng L/H trong YAML sẽ bị từ chối. Cần bàn giao cả YAML lẫn thư mục model được tham chiếu, giữ cấu trúc đường dẫn tương đối. Runner đăng ký `lookback_bins`/`horizon_bins` từ cấu hình đã nạp và lấy `ml_config_hash` từ `ml_config_sha256` trong YAML, không dùng hash bytes YAML thay thế.
+
+### 5.1. Qua Data API (`python -m ml online`, khuyến nghị khi tích hợp)
+
+Chi tiết endpoint, `X-API-Key` và schema v1.4 xem tại [Hợp đồng tích hợp online v1.4](docs/ONLINE_INTEGRATION_CONTRACT.md).
+
+~~~powershell
+$env:SDN_ML_KEY = "<ml-key>"
+$env:SDN_READER_KEY = "<reader-key>"
+python -m ml online --deployment-config configs/ml/selected.yaml --base-url http://127.0.0.1:8000 --run-id run001 --snapshot-id snap_run001_100 --emit-event
+# Hoặc giữ model nạp 1 lần cho Runner đọc từng dòng snapshot_id từ stdin:
+python -m ml online --deployment-config configs/ml/selected.yaml --base-url http://127.0.0.1:8000 --run-id run001 --watch-stdin --emit-event
+~~~
+
+### 5.2. Chế độ file cục bộ (`python -m ml predict`)
+
 ~~~powershell
 python -m ml predict --artifact ml/artifacts/run001/model --snapshot data/exports/snapshot_tick100.json --context data/exports/context_tick100.json --out ml/artifacts/forecast_tick100.json --audit ml/artifacts/audit_tick100.json
 ~~~
@@ -108,7 +135,7 @@ Trong vòng điều khiển, giữ một instance để model chỉ nạp một 
 from ml.inference.predict import Predictor
 from ml.common import ContractError
 
-predictor = Predictor("ml/artifacts/run001/model")
+predictor = Predictor("configs/ml/selected.yaml")
 # snapshot do Data.get_stored_snapshot(...) cung cấp; context do Runner cung cấp.
 try:
     rows = predictor.predict_batch(snapshot, run_context, method="rf")
@@ -123,7 +150,7 @@ else:
 Rows gồm 48×H* hàng như:
 
 ~~~json
-{"run_id":"run001","flow_group_id":"0x103","issued_at":"2026-11-12T09:02:40.150000Z","forecast_start":100.0,"forecast_end":101.0,"predicted_mbps":4.4,"source":"rf_v1"}
+{"run_id":"run001","flow_group_id":"0x103","issued_at":"2026-11-12T09:02:40.150000Z","forecast_start":100,"forecast_end":101,"predicted_mbps":4.4,"source":"rf_v1"}
 ~~~
 
 Forecast start/end là offset theo **measurement origin**. Issued_at lấy lúc phát hành, chung cho batch. ML áp max(0, (1+epsilon) × raw) đúng một lần. Dự báo hữu hạn trên 10 Mbps không bị cắt về dung lượng link.

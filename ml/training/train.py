@@ -137,4 +137,6 @@ def train(bundle_path, config_path, out):
         "- Lower forecasting MAE does not establish better network performance.\n"
         "- Pilot latency/fallback/transport policies still need integration approval.\n",
         encoding="utf-8")
+    from ml.deployment import export_deployment
+    export_deployment(out, out / "deployment.yaml")
     return frozen

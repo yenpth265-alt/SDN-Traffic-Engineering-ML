@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Correlates sender and receiver traffic logs by cohort (send_bin) and sequence,
 writes `correlated_traffic.csv` and `correlated_traffic.jsonl`, and optionally
-POSTs Data-contract `TrafficBatch` payloads (<= 4096 rows per batch) to `/v1/network/traffic`.
+POSTs Data-contract `TrafficBatch` payloads (<= 4096 rows per batch) to
+`/v1/network/traffic` with persistent outbox replay when Data is unavailable.
 
 Usage:
     python3 correlate_traffic.py --manifest run_manifest.json --config-dir configs/network --indir results/<run_id>
@@ -16,6 +17,7 @@ import glob
 import json
 import os
 import re
+import signal
 import sys
 import time
 import urllib.error
@@ -25,22 +27,74 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from common import iso_utc, load_flow_groups, load_manifest
+from common import load_flow_groups, load_manifest
 
 MAX_TRAFFIC_BATCH_ROWS = 4096
+STOP = False
 
 
-def percentile(sorted_vals: list[float], q: float) -> float:
+def _stop(*_):
+    global STOP
+    STOP = True
+
+
+def _parse_utc_to_epoch(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _resolve_traffic_origin_ts(manifest: dict) -> float:
+    for key in ("traffic_started_at_utc", "traffic_start_utc", "t0"):
+        ts = _parse_utc_to_epoch(manifest.get(key))
+        if ts is not None:
+            return ts
+    raise KeyError("Manifest missing valid traffic_started_at_utc or t0")
+
+
+def _parse_optional_int(raw_val) -> int | None:
+    if raw_val is None:
+        return None
+    text = str(raw_val).strip()
+    if not text or text.lower() in ("null", "none", "nan", "na"):
+        return None
+    return int(float(text))
+
+
+def _parse_optional_float(raw_val) -> float | None:
+    if raw_val is None:
+        return None
+    text = str(raw_val).strip()
+    if not text or text.lower() in ("null", "none", "nan", "na"):
+        return None
+    return float(text)
+
+
+def _percentile(sorted_vals: list[float], q: float) -> float:
     if not sorted_vals:
         return 0.0
-    k = (len(sorted_vals) - 1) * q
-    lo = int(k)
+    pos = (len(sorted_vals) - 1) * q
+    lo = int(pos)
     hi = min(lo + 1, len(sorted_vals) - 1)
-    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
 
 
-def _fmt_utc_1s_window(t0: float, bin_idx: int) -> tuple[str, str]:
-    start_dt = datetime.fromtimestamp(t0 + bin_idx, tz=timezone.utc)
+def _fmt_utc_1s_window(origin_ts: float, bin_idx: int) -> tuple[str, str]:
+    start_dt = datetime.fromtimestamp(origin_ts + bin_idx, tz=timezone.utc)
     end_dt = start_dt + timedelta(seconds=1)
     return (
         start_dt.isoformat(timespec="microseconds").replace("+00:00", "Z"),
@@ -49,19 +103,65 @@ def _fmt_utc_1s_window(t0: float, bin_idx: int) -> tuple[str, str]:
 
 
 def _iter_chunks(items: list[dict], chunk_size: int):
-    for i in range(0, len(items), chunk_size):
-        yield i // chunk_size, items[i : i + chunk_size]
+    for start_idx in range(0, len(items), chunk_size):
+        yield start_idx // chunk_size, items[start_idx : start_idx + chunk_size]
 
 
-def _post_with_retry(
+class TrafficOutbox:
+    """Persists unacknowledged TrafficBatch chunks so replays preserve exact content."""
+
+    def __init__(self, path: str):
+        self.path = path
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self._pending: dict[str, dict] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+        with open(self.path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                batch_key = rec.get("batch_key")
+                payload = rec.get("payload")
+                if batch_key and isinstance(payload, dict):
+                    self._pending[batch_key] = payload
+
+    def _rewrite(self) -> None:
+        tmp_path = f"{self.path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for batch_key, payload in self._pending.items():
+                f.write(
+                    json.dumps({"batch_key": batch_key, "payload": payload}, separators=(",", ":"))
+                    + "\n"
+                )
+        os.replace(tmp_path, self.path)
+
+    def add_if_missing(self, batch_key: str, payload: dict) -> None:
+        if batch_key not in self._pending:
+            self._pending[batch_key] = payload
+            self._rewrite()
+
+    def ack(self, batch_key: str) -> None:
+        if batch_key in self._pending:
+            del self._pending[batch_key]
+            self._rewrite()
+
+    def items(self) -> list[tuple[str, dict]]:
+        return list(self._pending.items())
+
+
+def _post_batch_once(
     url: str,
     body_bytes: bytes,
     *,
     api_key: str | None = None,
     timeout: float = 2.0,
-    max_retries: int = 3,
-    backoff_base: float = 0.15,
-) -> tuple[bool, int | None, str]:
+) -> tuple[str, int | None, str]:
+    """Returns ('acked' | 'conflict_409' | 'invalid_422' | 'retryable', status_code, detail)."""
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -69,34 +169,116 @@ def _post_with_retry(
     if api_key:
         headers["X-API-Key"] = api_key
 
-    last_err = ""
-    for attempt in range(max_retries + 1):
-        req = urllib.request.Request(
-            url=url,
-            data=body_bytes,
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status = resp.getcode()
-                resp_text = resp.read().decode("utf-8", errors="replace")
-                if 200 <= status < 300:
-                    return True, status, resp_text
-                last_err = f"HTTP {status}: {resp_text}"
-        except urllib.error.HTTPError as err:
-            status = err.code
-            err_text = err.read().decode("utf-8", errors="replace") if err.fp else ""
-            last_err = f"HTTP {status}: {err_text}"
-            if status != 429 and not (500 <= status < 600):
-                return False, status, last_err
-        except (urllib.error.URLError, TimeoutError, OSError) as err:
-            last_err = f"Network/Timeout error: {err}"
+    req = urllib.request.Request(
+        url=url,
+        data=body_bytes,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            resp_text = resp.read().decode("utf-8", errors="replace")
+            if 200 <= status < 300:
+                return "acked", status, resp_text
+            return "retryable", status, f"HTTP {status}: {resp_text}"
+    except urllib.error.HTTPError as err:
+        status = err.code
+        err_text = err.read().decode("utf-8", errors="replace") if err.fp else ""
+        if status == 409:
+            return "conflict_409", status, err_text
+        if status == 422:
+            return "invalid_422", status, err_text
+        if status == 429 or (500 <= status < 600):
+            return "retryable", status, err_text
+        return "retryable", status, f"HTTP {status}: {err_text}"
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        return "retryable", None, f"Network/Timeout error: {err}"
 
-        if attempt < max_retries:
+
+def _send_or_queue_batch(
+    batch_key: str,
+    payload: dict,
+    outbox: TrafficOutbox,
+    traffic_url: str,
+    *,
+    api_key: str | None = None,
+    timeout: float = 2.0,
+    max_retries: int = 3,
+    backoff_base: float = 0.15,
+) -> None:
+    body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    last_outcome = "retryable"
+    last_status: int | None = None
+    last_detail = ""
+
+    for attempt in range(max_retries + 1):
+        outcome, status_code, detail = _post_batch_once(
+            url=traffic_url,
+            body_bytes=body_bytes,
+            api_key=api_key,
+            timeout=timeout,
+        )
+        last_outcome, last_status, last_detail = outcome, status_code, detail
+        if outcome == "acked":
+            outbox.ack(batch_key)
+            print(
+                f"[+] POST /v1/network/traffic {batch_key} ({len(payload['rows'])} rows) "
+                f"succeeded (status={status_code})"
+            )
+            return
+        if outcome in ("conflict_409", "invalid_422"):
+            break
+        if attempt < max_retries and not STOP:
             time.sleep(backoff_base * (2 ** attempt))
 
-    return False, None, last_err
+    if last_outcome == "conflict_409":
+        print(f"[!] 409 Conflict for TrafficBatch {batch_key}: {last_detail}", file=sys.stderr)
+    elif last_outcome == "invalid_422":
+        print(f"[!] 422 Invalid payload for TrafficBatch {batch_key}: {last_detail}", file=sys.stderr)
+    else:
+        outbox.add_if_missing(batch_key, payload)
+        print(
+            f"[!] Queued TrafficBatch {batch_key} in outbox "
+            f"(Data unavailable, status={last_status}): {last_detail}",
+            file=sys.stderr,
+        )
+
+
+def flush_traffic_outbox(
+    outbox: TrafficOutbox,
+    traffic_url: str | None,
+    *,
+    api_key: str | None = None,
+    timeout: float = 2.0,
+    backoff_base: float = 0.15,
+) -> None:
+    if not traffic_url:
+        return
+    for idx, (batch_key, payload) in enumerate(outbox.items()):
+        if STOP:
+            break
+        body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        outcome, status_code, detail = _post_batch_once(
+            url=traffic_url,
+            body_bytes=body_bytes,
+            api_key=api_key,
+            timeout=timeout,
+        )
+        if outcome == "acked":
+            outbox.ack(batch_key)
+            print(f"[+] Replayed TrafficBatch {batch_key} successfully (status={status_code})")
+        elif outcome == "conflict_409":
+            print(f"[!] Outbox 409 Conflict for {batch_key}: {detail}", file=sys.stderr)
+        elif outcome == "invalid_422":
+            print(f"[!] Outbox 422 Invalid for {batch_key}: {detail}", file=sys.stderr)
+        else:
+            print(
+                f"[!] Traffic outbox still pending for {batch_key} (status={status_code}): {detail}",
+                file=sys.stderr,
+            )
+            time.sleep(min(1.0, backoff_base * (2 ** min(idx, 4))))
+            break
 
 
 def load_requested_logs(indir: str) -> dict[tuple[int, str], dict]:
@@ -107,8 +289,8 @@ def load_requested_logs(indir: str) -> dict[tuple[int, str], dict]:
                 t = int(float(r["time_offset_s"]))
                 fg = r["flow_group_id"].strip()
                 req_map[(t, fg)] = {
-                    "requested_mbps": float(r["requested_mbps"]),
-                    "available_at_utc": r.get("available_at_utc", "").strip(),
+                    "requested_mbps": _parse_optional_float(r.get("requested_mbps")),
+                    "reason": r.get("reason", "").strip(),
                 }
     return req_map
 
@@ -127,14 +309,22 @@ def load_sent_logs(indir: str) -> dict[tuple[int, str], dict]:
                     key,
                     {
                         "src_host": src_host,
-                        "packets_sent": 0,
-                        "bytes_sent": 0,
-                        "late_packets": 0,
+                        "packets_sent": None,
+                        "bytes_sent": None,
+                        "late_packets": None,
+                        "has_sent_log": True,
                     },
                 )
-                entry["packets_sent"] += int(r["packets_sent"])
-                entry["bytes_sent"] += int(r["bytes_sent"])
-                entry["late_packets"] += int(r.get("late_packets", 0))
+                entry["has_sent_log"] = True
+                pkts_sent = _parse_optional_int(r.get("packets_sent"))
+                bytes_sent = _parse_optional_int(r.get("bytes_sent"))
+                late_pkts = _parse_optional_int(r.get("late_packets"))
+                if pkts_sent is not None:
+                    entry["packets_sent"] = (entry["packets_sent"] or 0) + pkts_sent
+                if bytes_sent is not None:
+                    entry["bytes_sent"] = (entry["bytes_sent"] or 0) + bytes_sent
+                if late_pkts is not None:
+                    entry["late_packets"] = (entry["late_packets"] or 0) + late_pkts
     return sent_map
 
 
@@ -147,17 +337,18 @@ def load_recv_bysend_logs(indir: str) -> dict[tuple[int, str], dict]:
                 t = int(float(r["time_offset_s"]))
                 fg = r["flow_group_id"].strip()
                 key = (t, fg)
-                pkts = int(r["packets_received"])
-                has_bytes = "bytes_received" in r and r["bytes_received"] not in (None, "")
-                b_val = int(r["bytes_received"]) if has_bytes else None
+                pkts = _parse_optional_int(r.get("packets_received"))
+                b_val = _parse_optional_int(r.get("bytes_received"))
+
                 entry = cohort_stats.setdefault(
                     key,
-                    {"packets_received": 0, "bytes_received": 0, "has_exact_bytes": False},
+                    {"packets_received": None, "bytes_received": None, "has_recv_log": True},
                 )
-                entry["packets_received"] += pkts
+                entry["has_recv_log"] = True
+                if pkts is not None:
+                    entry["packets_received"] = (entry["packets_received"] or 0) + pkts
                 if b_val is not None:
-                    entry["bytes_received"] += b_val
-                    entry["has_exact_bytes"] = True
+                    entry["bytes_received"] = (entry["bytes_received"] or 0) + b_val
     return cohort_stats
 
 
@@ -195,11 +386,36 @@ def load_recv_packet_logs(indir: str) -> dict[tuple[int, str], dict]:
             "duplicate_or_retrans_packets": max(0, pkt_n - uniq_n),
             "seq_min": min(seqs) if seqs else None,
             "seq_max": max(seqs) if seqs else None,
-            "delay_ms_mean": round(sum(delays) / len(delays), 3) if delays else 0.0,
-            "delay_ms_p95": round(percentile(delays, 0.95), 3) if delays else 0.0,
-            "delay_ms_max": round(delays[-1], 3) if delays else 0.0,
+            "delay_ms_mean": round(sum(delays) / len(delays), 3) if delays else None,
+            "delay_ms_p95": round(_percentile(delays, 0.95), 3) if delays else None,
+            "delay_ms_max": round(delays[-1], 3) if delays else None,
         }
     return seq_stats
+
+
+def _resolve_recv_metrics(
+    bysend_info: dict | None,
+    seq_info: dict | None,
+    *,
+    has_any_recv_source: bool,
+) -> tuple[int | None, int | None]:
+    if bysend_info is not None and bysend_info.get("packets_received") is not None:
+        recv_pkts: int | None = int(bysend_info["packets_received"])
+    elif seq_info is not None:
+        recv_pkts = int(seq_info["unique_seqs_received"])
+    elif has_any_recv_source:
+        recv_pkts = None
+    else:
+        recv_pkts = 0
+
+    if bysend_info is not None and bysend_info.get("bytes_received") is not None:
+        recv_bytes: int | None = int(bysend_info["bytes_received"])
+    elif recv_pkts is None:
+        recv_bytes = None
+    else:
+        recv_bytes = 0
+
+    return recv_pkts, recv_bytes
 
 
 def build_correlated_rows(
@@ -209,53 +425,66 @@ def build_correlated_rows(
     sent_map: dict[tuple[int, str], dict],
     bysend_map: dict[tuple[int, str], dict],
     seq_stats_map: dict[tuple[int, str], dict],
+    *,
+    include_drain: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     fg_meta = {g["flow_group_id"]: g for g in groups}
-    total_bins = man["warmup"] + man["measurement"] + man["drain"]
-    t0 = float(man["t0"])
+    warmup_s = int(man.get("warmup", 60))
+    measurement_s = int(man.get("measurement", 360))
+    drain_s = int(man.get("drain", 10))
+    active_bins = warmup_s + measurement_s
+    total_bins = active_bins + drain_s
+    batch_bins = total_bins if include_drain else active_bins
+    origin_ts = _resolve_traffic_origin_ts(man)
 
     all_keys = set(sent_map) | set(bysend_map) | set(seq_stats_map)
     for t in range(total_bins):
         for g in groups:
             all_keys.add((t, g["flow_group_id"]))
 
+    has_any_recv_source = bool(bysend_map or seq_stats_map)
     detail_rows: list[dict] = []
     traffic_rows: list[dict] = []
 
     for t, fg in sorted(all_keys, key=lambda item: (item[0], item[1])):
-        win_start_utc, win_end_utc = _fmt_utc_1s_window(t0, t)
+        win_start_utc, win_end_utc = _fmt_utc_1s_window(origin_ts, t)
         meta = fg_meta.get(fg, {})
         req = req_map.get((t, fg), {})
         sent = sent_map.get(
             (t, fg),
             {
                 "src_host": meta.get("src_host", ""),
-                "packets_sent": 0,
-                "bytes_sent": 0,
-                "late_packets": 0,
+                "packets_sent": None,
+                "bytes_sent": None,
+                "late_packets": None,
+                "has_sent_log": False,
             },
         )
         seq_info = seq_stats_map.get((t, fg))
         bysend_info = bysend_map.get((t, fg))
-        if bysend_info is not None:
-            recv_cohort = int(bysend_info["packets_received"])
-        elif seq_info:
-            recv_cohort = int(seq_info["unique_seqs_received"])
+
+        recv_pkts, recv_bytes = _resolve_recv_metrics(
+            bysend_info,
+            seq_info,
+            has_any_recv_source=has_any_recv_source,
+        )
+
+        if sent.get("has_sent_log"):
+            pkts_sent: int | None = sent.get("packets_sent")
+            bytes_sent: int | None = sent.get("bytes_sent")
+            late_pkts: int | None = sent.get("late_packets")
+        elif not sent_map:
+            pkts_sent, bytes_sent, late_pkts = 0, 0, 0
         else:
-            recv_cohort = 0
+            pkts_sent, bytes_sent, late_pkts = None, None, None
 
-        pkts_sent = int(sent["packets_sent"])
-        bytes_sent = int(sent["bytes_sent"])
-        if bysend_info is not None and bysend_info.get("has_exact_bytes"):
-            recv_bytes_val = int(bysend_info["bytes_received"])
+        actual_mbps = round((recv_bytes * 8.0) / 1e6, 6) if recv_bytes is not None else None
+        if pkts_sent is not None and recv_pkts is not None:
+            lost_cohort: int | None = max(0, pkts_sent - recv_pkts)
+            loss_ratio: float | None = round(lost_cohort / pkts_sent, 6) if pkts_sent > 0 else 0.0
         else:
-            avg_pkt_bytes = (bytes_sent / pkts_sent) if pkts_sent > 0 else 1000.0
-            recv_bytes_val = int(round(recv_cohort * avg_pkt_bytes))
-
-        traffic_actual_mbps = round((recv_bytes_val * 8.0) / 1e6, 6)
-
-        lost_cohort = max(0, pkts_sent - recv_cohort)
-        loss_ratio = round(lost_cohort / pkts_sent, 6) if pkts_sent > 0 else 0.0
+            lost_cohort = None
+            loss_ratio = None
 
         detail_rows.append({
             "run_id": man["run_id"],
@@ -265,34 +494,34 @@ def build_correlated_rows(
             "flow_group_id": fg,
             "src_host": sent.get("src_host") or meta.get("src_host", ""),
             "dst_host": meta.get("dst_host", ""),
-            "requested_mbps": req.get("requested_mbps", 0.0),
-            "traffic_actual_mbps": traffic_actual_mbps,
-            "available_at_utc": req.get("available_at_utc", ""),
+            "requested_mbps": req.get("requested_mbps"),
+            "traffic_actual_mbps": actual_mbps,
             "packets_sent": pkts_sent,
             "bytes_sent": bytes_sent,
-            "late_packets": int(sent["late_packets"]),
-            "packets_received_cohort": int(recv_cohort),
-            "bytes_received": recv_bytes_val,
-            "packets_lost_cohort": int(lost_cohort),
+            "late_packets": late_pkts,
+            "packets_received_cohort": recv_pkts,
+            "bytes_received": recv_bytes,
+            "packets_lost_cohort": lost_cohort,
             "loss_ratio_cohort": loss_ratio,
-            "unique_seqs_received": int(seq_info["unique_seqs_received"]) if seq_info else int(recv_cohort),
-            "duplicate_or_retrans_packets": int(seq_info["duplicate_or_retrans_packets"]) if seq_info else 0,
+            "unique_seqs_received": int(seq_info["unique_seqs_received"]) if seq_info else None,
+            "duplicate_or_retrans_packets": int(seq_info["duplicate_or_retrans_packets"]) if seq_info else None,
             "seq_min": seq_info["seq_min"] if seq_info else None,
             "seq_max": seq_info["seq_max"] if seq_info else None,
-            "delay_ms_mean": seq_info["delay_ms_mean"] if seq_info else 0.0,
-            "delay_ms_p95": seq_info["delay_ms_p95"] if seq_info else 0.0,
-            "delay_ms_max": seq_info["delay_ms_max"] if seq_info else 0.0,
+            "delay_ms_mean": seq_info["delay_ms_mean"] if seq_info else None,
+            "delay_ms_p95": seq_info["delay_ms_p95"] if seq_info else None,
+            "delay_ms_max": seq_info["delay_ms_max"] if seq_info else None,
         })
 
-        traffic_rows.append({
-            "flow_group_id": fg,
-            "window_start_utc": win_start_utc,
-            "window_end_utc": win_end_utc,
-            "sent_bytes": bytes_sent,
-            "received_bytes": recv_bytes_val,
-            "sent_packets": pkts_sent,
-            "received_packets": int(recv_cohort),
-        })
+        if t < batch_bins:
+            traffic_rows.append({
+                "flow_group_id": fg,
+                "window_start_utc": win_start_utc,
+                "window_end_utc": win_end_utc,
+                "sent_bytes": bytes_sent,
+                "received_bytes": recv_bytes,
+                "sent_packets": pkts_sent,
+                "received_packets": recv_pkts,
+            })
 
     return detail_rows, traffic_rows
 
@@ -308,7 +537,11 @@ def main():
     ap.add_argument("--timeout", type=float, default=2.0, help="HTTP timeout in seconds per attempt (default: 2.0)")
     ap.add_argument("--retries", type=int, default=3, help="Max HTTP retry attempts (default: 3)")
     ap.add_argument("--backoff", type=float, default=0.15, help="Base retry backoff in seconds (default: 0.15)")
+    ap.add_argument("--include-drain", action="store_true", help="Include drain bins in emitted TrafficBatch rows")
     args = ap.parse_args()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
 
     man = load_manifest(args.manifest)
     groups = load_flow_groups(args.config_dir)
@@ -323,16 +556,24 @@ def main():
     seq_stats_map = load_recv_packet_logs(indir)
 
     detail_rows, traffic_rows = build_correlated_rows(
-        man, groups, req_map, sent_map, bysend_map, seq_stats_map
+        man,
+        groups,
+        req_map,
+        sent_map,
+        bysend_map,
+        seq_stats_map,
+        include_drain=args.include_drain,
     )
 
     csv_path = os.path.join(outdir, "correlated_traffic.csv")
     jsonl_path = os.path.join(outdir, "correlated_traffic.jsonl")
+    outbox_path = os.path.join(outdir, "traffic_outbox.jsonl")
+    outbox = TrafficOutbox(outbox_path)
 
     fieldnames = [
         "run_id", "cohort_bin", "window_start_utc", "window_end_utc",
         "flow_group_id", "src_host", "dst_host", "requested_mbps", "traffic_actual_mbps",
-        "available_at_utc", "packets_sent", "bytes_sent", "late_packets",
+        "packets_sent", "bytes_sent", "late_packets",
         "packets_received_cohort", "bytes_received", "packets_lost_cohort",
         "loss_ratio_cohort", "unique_seqs_received", "duplicate_or_retrans_packets",
         "seq_min", "seq_max", "delay_ms_mean", "delay_ms_p95", "delay_ms_max",
@@ -358,33 +599,38 @@ def main():
     )
 
     if args.traffic_url:
+        flush_traffic_outbox(
+            outbox,
+            args.traffic_url,
+            api_key=api_key,
+            timeout=args.timeout,
+            backoff_base=args.backoff,
+        )
         if not chunks:
             print("[!] Warning: skipping POST /v1/network/traffic because rows is empty", file=sys.stderr)
             return
         for chunk_idx, chunk in chunks:
-            chunk_bytes = json.dumps(
-                {"run_id": man["run_id"], "rows": chunk},
-                separators=(",", ":"),
-            ).encode("utf-8")
-            ok, status_code, detail = _post_with_retry(
-                url=args.traffic_url,
-                body_bytes=chunk_bytes,
+            if STOP:
+                break
+            batch_key = f"{man['run_id']}:traffic:{chunk_idx}"
+            payload = {"run_id": man["run_id"], "rows": chunk}
+            _send_or_queue_batch(
+                batch_key=batch_key,
+                payload=payload,
+                outbox=outbox,
+                traffic_url=args.traffic_url,
                 api_key=api_key,
                 timeout=args.timeout,
                 max_retries=args.retries,
                 backoff_base=args.backoff,
             )
-            if ok:
-                print(
-                    f"[+] POST /v1/network/traffic chunk {chunk_idx} ({len(chunk)} rows) "
-                    f"succeeded (status={status_code})"
-                )
-            else:
-                print(
-                    f"[!] Warning: failed to POST /v1/network/traffic chunk {chunk_idx} "
-                    f"(status={status_code}): {detail}",
-                    file=sys.stderr,
-                )
+
+        remaining = len(outbox.items())
+        if remaining:
+            print(
+                f"[!] Completed with {remaining} unacked TrafficBatch chunk(s) in {outbox_path}",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":

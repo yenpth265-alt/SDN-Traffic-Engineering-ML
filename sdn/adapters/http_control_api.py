@@ -844,6 +844,35 @@ class SDNNorthboundHTTPApp:
             "unverified_external_roles": unverified_external_roles,
             "blockers": full_system_blockers,
         }
+        if self._data_publisher is not None:
+            base["data_sync_gate"] = self._data_publisher.sync_gate_status(
+                self._config.default_run_id,
+                current_state_version=base.get("state_version"),
+                ovs_verified=bool(all_48_verified),
+                ovs_reconcile_required=bool(reconcile_required is True),
+            )
+        else:
+            base["data_sync_gate"] = {
+                "api_mode": "disabled",
+                "run_id": self._config.default_run_id,
+                "ovs_verified": bool(all_48_verified),
+                "ovs_reconcile_required": bool(reconcile_required is True),
+                "current_state_version": base.get("state_version"),
+                "data_acknowledged_state_version": None,
+                "routing_sync_pending": False,
+                "apply_audit_pending": False,
+                "pending_apply_audit_batches": [],
+                "data_sync_pending": False,
+                "routing_conflict_detected": False,
+                "data_reconcile_required": False,
+                "reconcile_required": bool(reconcile_required is True),
+                "optimization_tick_eligible": bool(all_48_verified) and not bool(reconcile_required is True),
+                "optimization_tick_block_reason": (
+                    None
+                    if (bool(all_48_verified) and not bool(reconcile_required is True))
+                    else ("OVS_RECONCILIATION_REQUIRED" if reconcile_required is True else "OVS_NOT_VERIFIED")
+                ),
+            }
         return self._json_response(start_response, "200 OK", base)
 
     def _handle_routing_state(
@@ -853,7 +882,15 @@ class SDNNorthboundHTTPApp:
     ) -> list[bytes]:
         run_id = self._query_param(query, "run_id", self._config.default_run_id) or self._config.default_run_id
         snap = self._state_manager.get_routing_state(run_id)
-        return self._json_response(start_response, "200 OK", snap.to_dict())
+        payload = snap.to_dict()
+        if self._data_publisher is not None and self._data_publisher.config.api_mode == "data_v1":
+            payload["data_sync_gate"] = self._data_publisher.sync_gate_status(
+                run_id,
+                current_state_version=snap.state_version,
+                ovs_verified=bool(snap.routing_state_complete),
+                ovs_reconcile_required=bool(snap.reconcile_required),
+            )
+        return self._json_response(start_response, "200 OK", payload)
 
     def _handle_routing_history(
         self,
@@ -1300,13 +1337,24 @@ class SDNNorthboundHTTPApp:
         if self._data_publisher is None:
             return
         try:
-            self._data_publisher.publish_apply_response(resp, deliver_now=False)
             snap = self._state_manager.get_routing_state(run_id)
-            self._data_publisher.publish_routing_state(snap, deliver_now=False)
+            if self._data_publisher.config.api_mode == "data_v1":
+                # Phase 8 Task B: Always enqueue RoutingState FIRST, then build/enqueue
+                # complete 48-flow ApplyResult (with durable pending-audit recovery if Data
+                # is temporarily unreachable) depending on RoutingState persistence ACK.
+                self._data_publisher.publish_routing_state(snap, deliver_now=False)
+                self._data_publisher.publish_apply_response_v1_runtime(
+                    resp,
+                    post_apply_routing_state=snap,
+                    deliver_now=False,
+                )
+            else:
+                self._data_publisher.publish_apply_response(resp, deliver_now=False)
+                self._data_publisher.publish_routing_state(snap, deliver_now=False)
             history = self._state_manager.get_routing_history(run_id)
             self._data_publisher.publish_routing_history(
                 run_id, snap.state_version, history, deliver_now=False
             )
         except Exception:
-            # Never fail or crash finalized apply due to Data publisher error
+            # Never fail or crash finalized OVS apply due to Data publisher error
             pass

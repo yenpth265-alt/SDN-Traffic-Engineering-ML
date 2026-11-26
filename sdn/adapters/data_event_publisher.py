@@ -38,8 +38,11 @@ from sdn.adapters.data_api_v1_adapter import (
     DATA_V1_ENDPOINT_ROUTING,
     DATA_V1_ENDPOINT_SNAPSHOTS,
     DataV1ContractBlockedError,
+    DataV1MappingError,
+    build_48_flow_apply_result_data_v1,
     build_data_v1_headers,
     compute_bytes_sha256,
+    fetch_decision_batch_from_data_v1,
     is_valid_data_v1_ack,
     map_apply_response_to_data_v1,
     map_routing_state_to_data_v1,
@@ -77,6 +80,7 @@ class DataPublisherConfig:
     api_mode: str = "legacy"  # "legacy" | "data_v1" (never default to data_v1 until team approval)
     api_key: Optional[str] = None  # Role SDN X-API-Key for data_v1 mode (never logged)
     snapshot_use_traffic_origin_bins: bool = True
+    max_decision_lookup_404_retries: int = 3
 
     def __post_init__(self) -> None:
         if self.api_mode not in ("legacy", "data_v1"):
@@ -200,17 +204,24 @@ class DataEventPublisher:
         sender_fn: Optional[SenderFn] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
         spawn_fn: Optional[Callable[[Callable[[], None]], Any]] = None,
+        decision_lookup_fn: Optional[Callable[[str, str], list[dict[str, Any]]]] = None,
     ) -> None:
         self._config = config or DataPublisherConfig()
         self._sender_fn: SenderFn = sender_fn or _default_http_sender
         self._sleep_fn: Callable[[float], None] = sleep_fn or _cooperative_sleep
         self._spawn_fn: Callable[[Callable[[], None]], Any] = spawn_fn or _spawn_background_worker
+        self._decision_lookup_fn = decision_lookup_fn
         self._lock = threading.RLock()
         self._records: dict[str, OutboxEventRecord] = {}
         self._order: list[str] = []
         self._in_flight_keys: set[str] = set()
+        self._pending_audits: dict[str, dict[str, Any]] = {}
+        self._durable_corruption_detected: bool = False
+        self._durable_corruption_errors: list[str] = []
         self._outbox_file: Optional[Path] = None
         self._acked_file: Optional[Path] = None
+        self._pending_audits_file: Optional[Path] = None
+        self._pending_audits_resolved_file: Optional[Path] = None
         self._stop_event = threading.Event()
         self._worker_running: bool = False
         self._worker_expected: bool = bool(self._config.auto_flush)
@@ -224,6 +235,8 @@ class DataEventPublisher:
             out_dir.mkdir(parents=True, exist_ok=True)
             self._outbox_file = out_dir / "outbox_events.jsonl"
             self._acked_file = out_dir / "outbox_acked.jsonl"
+            self._pending_audits_file = out_dir / "pending_apply_audits.jsonl"
+            self._pending_audits_resolved_file = out_dir / "pending_apply_audits_resolved.jsonl"
             self._load_durable_outbox()
 
         if self._config.auto_flush:
@@ -306,21 +319,28 @@ class DataEventPublisher:
     def config(self) -> DataPublisherConfig:
         return self._config
 
+    def _record_durable_corruption(self, filename: str, line_no: int, exc: Exception) -> None:
+        msg = f"DURABLE_OUTBOX_CORRUPT:{filename}:L{line_no}:{type(exc).__name__}: {exc}"
+        self._durable_corruption_detected = True
+        self._durable_corruption_errors.append(msg)
+        self._last_error = msg
+
     def _load_durable_outbox(self) -> None:
         acked_meta: dict[str, dict[str, Any]] = {}
         if self._acked_file is not None and self._acked_file.exists():
-            for line in self._acked_file.read_text(encoding="utf-8").splitlines():
+            for line_no, line in enumerate(self._acked_file.read_text(encoding="utf-8").splitlines(), start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     rec = json.loads(line)
                     acked_meta[str(rec["dedup_key"])] = rec
-                except Exception:
+                except Exception as exc:
+                    self._record_durable_corruption(self._acked_file.name, line_no, exc)
                     continue
 
         if self._outbox_file is not None and self._outbox_file.exists():
-            for line in self._outbox_file.read_text(encoding="utf-8").splitlines():
+            for line_no, line in enumerate(self._outbox_file.read_text(encoding="utf-8").splitlines(), start=1):
                 line = line.strip()
                 if not line:
                     continue
@@ -357,7 +377,43 @@ class DataEventPublisher:
                             or evt.acked_at_utc > self._last_successful_delivery_utc
                         ):
                             self._last_successful_delivery_utc = evt.acked_at_utc
-                except Exception:
+                except Exception as exc:
+                    self._record_durable_corruption(self._outbox_file.name, line_no, exc)
+                    continue
+
+        # Reload durable pending 48-flow ApplyResult audits (Task B restart recovery)
+        resolved_audits: set[str] = set()
+        if self._pending_audits_resolved_file is not None and self._pending_audits_resolved_file.exists():
+            for line_no, line in enumerate(
+                self._pending_audits_resolved_file.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    resolved_audits.add(str(json.loads(line)["dedup_key"]))
+                except Exception as exc:
+                    self._record_durable_corruption(self._pending_audits_resolved_file.name, line_no, exc)
+                    continue
+        if self._pending_audits_file is not None and self._pending_audits_file.exists():
+            for line_no, line in enumerate(
+                self._pending_audits_file.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    dk = str(rec["dedup_key"])
+                    _ = rec["run_id"]
+                    _ = rec["decision_batch_id"]
+                    _ = rec["apply_response"]
+                    _ = rec["routing_state"]
+                    if dk in resolved_audits or dk in self._records:
+                        continue
+                    self._pending_audits[dk] = rec
+                except Exception as exc:
+                    self._record_durable_corruption(self._pending_audits_file.name, line_no, exc)
                     continue
 
     def _append_jsonl(self, path: Optional[Path], obj: Mapping[str, Any]) -> None:
@@ -578,6 +634,180 @@ class DataEventPublisher:
             deliver_now=deliver_now,
         )
 
+    def _lookup_decision_rows(self, run_id: str, decision_batch_id: str) -> list[dict[str, Any]]:
+        if self._decision_lookup_fn is not None:
+            return self._decision_lookup_fn(run_id, decision_batch_id)
+        base_url = self._config.endpoint_base_url
+        if not base_url:
+            raise DataV1ContractBlockedError(
+                "CONTRACT_BLOCKED: DATA_ENDPOINT_NOT_CONFIGURED for DecisionBatch lookup."
+            )
+        return fetch_decision_batch_from_data_v1(
+            base_url,
+            run_id,
+            decision_batch_id,
+            api_key=self._config.api_key or self._config.auth_token,
+            timeout_s=float(self._config.timeout_s),
+        )
+
+    def _resolve_single_pending_audit(self, dedup_key: str) -> Optional[PublishResult]:
+        with self._lock:
+            pending = self._pending_audits.get(dedup_key)
+            if pending is None:
+                return None
+            if dedup_key in self._records:
+                self._pending_audits.pop(dedup_key, None)
+                return None
+            if pending.get("lookup_exhausted"):
+                # Bounded 404 retry policy: keep audit durably pending without hammering Data API.
+                return None
+            run_id = str(pending["run_id"])
+            batch_id = str(pending["decision_batch_id"])
+            resp_dict = dict(pending["apply_response"])
+            rs_dict = dict(pending["routing_state"])
+
+        try:
+            decision_rows = self._lookup_decision_rows(run_id, batch_id)
+            resp = ApplyResponse.from_dict(resp_dict, strict=False)
+            rs = RoutingStateSnapshot.from_dict(rs_dict, strict=False)
+            mapped = build_48_flow_apply_result_data_v1(
+                resp,
+                decision_rows=decision_rows,
+                routing_state=rs,
+            )
+        except (DataV1ContractBlockedError, DataV1MappingError, Exception) as exc:
+            raw_err = str(exc)
+            is_404 = ("HTTP 404" in raw_err) or ("404" in raw_err) or ("Unknown decision_batch_id" in raw_err)
+            with self._lock:
+                if dedup_key in self._pending_audits:
+                    p_rec = self._pending_audits[dedup_key]
+                    if is_404:
+                        n404 = int(p_rec.get("lookup_404_attempts", 0)) + 1
+                        p_rec["lookup_404_attempts"] = n404
+                        max_404 = max(1, int(self._config.max_decision_lookup_404_retries))
+                        if n404 >= max_404:
+                            p_rec["lookup_exhausted"] = True
+                            err_msg = f"DECISION_BATCH_404_RETRIES_EXHAUSTED({n404}/{max_404}): {raw_err}"
+                        else:
+                            err_msg = f"PENDING_DECISION_BATCH_404({n404}/{max_404}): {raw_err}"
+                    else:
+                        err_msg = f"PENDING_DECISION_BATCH_AUDIT:{type(exc).__name__}: {raw_err}"
+                    p_rec["last_error"] = err_msg
+                else:
+                    err_msg = f"PENDING_DECISION_BATCH_AUDIT:{type(exc).__name__}: {raw_err}"
+                self._last_error = err_msg
+            return None
+
+        dep_key = f"routing_state:{run_id}:v{int(resp.state_version)}"
+        pub_res = self._enqueue(
+            dedup_key=dedup_key,
+            event_type="ApplyResponse",
+            endpoint_path=DATA_V1_ENDPOINT_APPLY_RESULTS,
+            run_id=run_id,
+            payload=mapped,
+            deliver_now=False,
+            depends_on_dedup_key=dep_key,
+        )
+        with self._lock:
+            self._pending_audits.pop(dedup_key, None)
+            self._append_jsonl(
+                self._pending_audits_resolved_file,
+                {"dedup_key": dedup_key, "resolved_at_utc": _utc_now_rfc3339()},
+            )
+        return pub_res
+
+    def _resolve_all_pending_audits(self) -> int:
+        with self._lock:
+            keys = list(self._pending_audits.keys())
+        resolved = 0
+        for dk in keys:
+            if self._resolve_single_pending_audit(dk) is not None:
+                resolved += 1
+        return resolved
+
+    def publish_apply_response_v1_runtime(
+        self,
+        response: ApplyResponse,
+        *,
+        post_apply_routing_state: RoutingStateSnapshot,
+        deliver_now: bool = False,
+    ) -> PublishResult:
+        """
+        Phase 8 Task B: Complete runtime 48-flow ApplyResult publication pipeline.
+
+        - In `legacy` mode, delegates to `publish_apply_response(...)`.
+        - In `data_v1` mode:
+          1. Validates `post_apply_routing_state.state_version == response.state_version`.
+          2. Retrieves the registered 48-flow `DecisionBatch` from Data API (`GET /v1/runs/{run_id}/decisions/{batch_id}`).
+          3. Builds the exact 48-flow `ApplyResult` via `build_48_flow_apply_result_data_v1(...)`
+             and enqueues it with `depends_on_dedup_key = routing_state:{run_id}:v{state_version}`.
+          4. If Data is temporarily unreachable or `DecisionBatch` is not yet found, durably parks
+             `(response, post_apply_routing_state)` in `pending_apply_audits.jsonl` (surviving
+             controller restarts) so `flush_pending()` completes audit publication automatically
+             once Data recovers — NEVER fabricating 48 rows and NEVER failing the finalized OVS apply.
+        """
+        response.validate_contract()
+        if self._config.api_mode != "data_v1":
+            return self.publish_apply_response(response, deliver_now=deliver_now)
+
+        if int(post_apply_routing_state.state_version) != int(response.state_version):
+            raise DataV1MappingError(
+                f"Post-apply RoutingStateSnapshot state_version={post_apply_routing_state.state_version} "
+                f"does not match ApplyResponse state_version={response.state_version} for batch "
+                f"'{response.decision_batch_id}'."
+            )
+
+        dedup_key = f"apply_response:{response.run_id}:{response.decision_batch_id}"
+        with self._lock:
+            existing = self._records.get(dedup_key)
+            if existing is not None:
+                return PublishResult(
+                    dedup_key=dedup_key,
+                    event_type="ApplyResponse",
+                    status=existing.status,
+                    duplicate=True,
+                    attempts=existing.attempts,
+                    last_error=existing.last_error,
+                )
+            if dedup_key not in self._pending_audits:
+                audit_rec = {
+                    "dedup_key": dedup_key,
+                    "run_id": response.run_id,
+                    "decision_batch_id": response.decision_batch_id,
+                    "state_version": int(response.state_version),
+                    "enqueued_at_utc": _utc_now_rfc3339(),
+                    "apply_response": response.to_dict(),
+                    "routing_state": post_apply_routing_state.to_dict(),
+                    "last_error": None,
+                }
+                self._pending_audits[dedup_key] = audit_rec
+                self._append_jsonl(self._pending_audits_file, audit_rec)
+
+        resolved = self._resolve_single_pending_audit(dedup_key)
+        if resolved is not None:
+            if deliver_now or self._config.auto_flush:
+                updated = self._deliver_single(dedup_key)
+                return PublishResult(
+                    dedup_key=dedup_key,
+                    event_type="ApplyResponse",
+                    status=updated.status,
+                    duplicate=False,
+                    attempts=updated.attempts,
+                    last_error=updated.last_error,
+                )
+            return resolved
+
+        with self._lock:
+            pending_err = self._pending_audits.get(dedup_key, {}).get("last_error")
+        return PublishResult(
+            dedup_key=dedup_key,
+            event_type="ApplyResponse",
+            status=DeliveryStatus.PENDING_DELIVERY,
+            duplicate=False,
+            attempts=0,
+            last_error=pending_err,
+        )
+
     def publish_verification_evidence(
         self,
         run_id: str,
@@ -770,9 +1000,13 @@ class DataEventPublisher:
 
     def flush_pending(self) -> dict[str, int]:
         """
-        Attempt bounded delivery for all `PENDING_DELIVERY` outbox records, respecting
-        causal `depends_on_dedup_key` ordering (e.g., `RoutingState` ACK before `ApplyResult`).
+        Resolve any pending durable 48-flow audits and attempt bounded delivery for all
+        `PENDING_DELIVERY` outbox records, respecting causal `depends_on_dedup_key` ordering
+        (`RoutingState` ACK strictly before `ApplyResult`).
         """
+        if self._config.api_mode == "data_v1":
+            self._resolve_all_pending_audits()
+
         total_delivered = 0
         with self._lock:
             max_passes = max(1, len(self._order) + 1)
@@ -796,7 +1030,7 @@ class DataEventPublisher:
         with self._lock:
             still_pending = sum(
                 1 for k in self._order if self._records[k].status == DeliveryStatus.PENDING_DELIVERY
-            )
+            ) + len(self._pending_audits)
         return {"delivered": total_delivered, "pending": still_pending}
 
     def get_event(self, dedup_key: str) -> Optional[OutboxEventRecord]:
@@ -819,6 +1053,108 @@ class DataEventPublisher:
                 if self._records[k].status == DeliveryStatus.DELIVERED
             )
 
+    def sync_gate_status(
+        self,
+        run_id: str,
+        *,
+        current_state_version: Optional[int],
+        ovs_verified: bool = True,
+        ovs_reconcile_required: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Phase 8 Task D: Durable Data synchronization & optimization tick eligibility gate.
+
+        Computed strictly from persisted outbox records (`outbox_events.jsonl` + `outbox_acked.jsonl`)
+        and persisted pending 48-flow audits (`pending_apply_audits.jsonl`), so controller restarts
+        never produce false-positive eligibility.
+
+        Strictly separates:
+        - `ovs_verified` / `ovs_reconcile_required` (OVS data-plane truth)
+        - `data_acknowledged_state_version` / `data_sync_pending` / `data_reconcile_required` (Data persistence truth)
+        - `optimization_tick_eligible` / `optimization_tick_block_reason` (Runner gating decision)
+        """
+        with self._lock:
+            acked_versions: list[int] = []
+            routing_pending = False
+            routing_conflict = False
+            routing_conflict_error: Optional[str] = None
+            apply_outbox_pending = False
+            pending_apply_batches: list[str] = []
+
+            for rec in self._records.values():
+                if rec.run_id != run_id:
+                    continue
+                if rec.event_type == "RoutingStateSnapshot":
+                    sv_raw = rec.payload.get("state_version")
+                    sv_int = int(sv_raw) if isinstance(sv_raw, int) and not isinstance(sv_raw, bool) else None
+                    if rec.status == DeliveryStatus.DELIVERED:
+                        if sv_int is not None:
+                            acked_versions.append(sv_int)
+                    else:
+                        routing_pending = True
+                        err = rec.last_error or ""
+                        if any(err.startswith(code) for code in ("HTTP_401", "HTTP_403", "HTTP_409", "HTTP_422")):
+                            routing_conflict = True
+                            routing_conflict_error = err
+                elif rec.event_type == "ApplyResponse" and rec.status != DeliveryStatus.DELIVERED:
+                    apply_outbox_pending = True
+                    bid = rec.payload.get("decision_batch_id")
+                    if isinstance(bid, str):
+                        pending_apply_batches.append(bid)
+
+            for audit in self._pending_audits.values():
+                if audit.get("run_id") == run_id:
+                    apply_outbox_pending = True
+                    bid = audit.get("decision_batch_id")
+                    if isinstance(bid, str) and bid not in pending_apply_batches:
+                        pending_apply_batches.append(bid)
+
+            data_acked_sv: Optional[int] = max(acked_versions) if acked_versions else None
+            if current_state_version is not None:
+                if data_acked_sv is None or data_acked_sv < int(current_state_version):
+                    routing_pending = True
+
+            data_sync_pending = bool(routing_pending or apply_outbox_pending)
+            data_reconcile_required = bool(routing_conflict or self._durable_corruption_detected)
+            reconcile_required = bool(ovs_reconcile_required) or data_reconcile_required
+
+            block_reason: Optional[str] = None
+            if self._durable_corruption_detected:
+                block_reason = "DURABLE_OUTBOX_CORRUPTION_RECONCILIATION_REQUIRED"
+            elif not ovs_verified:
+                block_reason = "OVS_NOT_VERIFIED"
+            elif ovs_reconcile_required:
+                block_reason = "OVS_RECONCILIATION_REQUIRED"
+            elif routing_conflict:
+                block_reason = f"DATA_ROUTING_CONFLICT_RECONCILIATION_REQUIRED:{routing_conflict_error}"
+            elif not self._config.endpoint_base_url:
+                block_reason = "DATA_ENDPOINT_NOT_CONFIGURED"
+            elif current_state_version is None:
+                block_reason = "SDN_STATE_VERSION_UNAVAILABLE"
+            elif routing_pending:
+                block_reason = "DATA_ROUTING_SYNC_PENDING"
+            elif apply_outbox_pending:
+                block_reason = "DATA_APPLY_AUDIT_PENDING"
+
+            return {
+                "api_mode": self._config.api_mode,
+                "run_id": run_id,
+                "ovs_verified": bool(ovs_verified),
+                "ovs_reconcile_required": bool(ovs_reconcile_required),
+                "current_state_version": current_state_version,
+                "data_acknowledged_state_version": data_acked_sv,
+                "routing_sync_pending": bool(routing_pending),
+                "apply_audit_pending": bool(apply_outbox_pending),
+                "pending_apply_audit_batches": sorted(pending_apply_batches),
+                "data_sync_pending": data_sync_pending,
+                "durable_corruption_detected": bool(self._durable_corruption_detected),
+                "routing_conflict_detected": bool(routing_conflict),
+                "data_reconcile_required": data_reconcile_required,
+                "reconcile_required": reconcile_required,
+                "optimization_tick_eligible": block_reason is None,
+                "optimization_tick_block_reason": block_reason,
+            }
+
     def status_summary(self) -> dict[str, Any]:
         with self._lock:
             pending = sum(1 for r in self._records.values() if r.status == DeliveryStatus.PENDING_DELIVERY)
@@ -836,6 +1172,7 @@ class DataEventPublisher:
                 "total_events": len(self._records),
                 "delivered_count": delivered,
                 "pending_delivery_count": pending,
+                "pending_apply_audit_count": len(self._pending_audits),
                 "last_successful_delivery_utc": self._last_successful_delivery_utc,
                 "last_error": self._last_error,
             }

@@ -22,6 +22,7 @@ from sdn.adapters.data_api_v1_adapter import (
     DataV1MappingError,
     build_48_flow_apply_result_data_v1,
     build_data_v1_headers,
+    build_noop_48_flow_apply_result_data_v1,
     compute_bytes_sha256,
     compute_sdn_v14_content_hash,
     compute_warmup_bin_offset,

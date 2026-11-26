@@ -7,8 +7,14 @@
   - `458df93`: `DecisionBatch` / `ApplyResult` 48-flow validation & migration `004`
   - `8ee1782`: Network `DemandRelease` outbox/replay (`POST /v1/network/demand`)
   - `docs/architecture/Data_Integration_Contracts.md`
+- **Phase 8 Runtime 48-Flow Audit & Data Sync Gate:** See [SDN_PHASE8_RUNTIME_AUDIT_HANDOFF.md](file:///d:/PROGRAMMING%20FOLDER/SDN-Traffic-Engineering-ML/sdn/SDN_PHASE8_RUNTIME_AUDIT_HANDOFF.md) for the complete runtime `_publish_after_apply()` 48-flow pipeline (`publish_apply_response_v1_runtime`), `B=0` no-op helper (`build_noop_48_flow_apply_result_data_v1`), durable `pending_apply_audits.jsonl` restart recovery, and `data_sync_gate` exposed on `/health` and `/routing-state` (`155/155` Windows PASS).
 - **SDN Core Modified:** **NO** (0 lines changed in `sdn/controller/`, `sdn/flow_management/`, `sdn/route_verification/`, `sdn/monitoring/`, `sdn/schemas/`).
-- **Verification Status:** **`SDN_V14_ENVIRONMENT_BLOCKED`** (`152/152` Windows tests `PASS_CONTRACT_MOCK` / `MOCK_ONLY` for Data Pydantic; Ubuntu VM SSH unreachable on `127.0.0.1:2222`; no local PostgreSQL/FastAPI/Pydantic; live OVS & `TC-I01` remain **PENDING**).
+- **Verification Status (Phase 6 @ `8015f7d01c2eae9eee52282e4987807827ddfed6`):**
+  - Windows Regression: **`PASS_CONTRACT_MOCK`** (`152/152` PASS)
+  - Ubuntu Regression (`vboxuser`, Python `3.10.12`, OS-Ken `2.8.1`): **`PASS_UBUNTU_REGRESSION`** (`152/152` PASS in `70.06s`, `compileall` exit `0`)
+  - Ubuntu Live OVS S0 (OVS `2.17.12`, Mininet `2.3.0`): **`PASS_LIVE_OVS`** (6/6 switches, 48/48 flows `VERIFIED`, `pingall` `0.0%` loss, live `ovs-ofctl` counters)
+  - Real PostgreSQL + Data FastAPI (`001..004`): **`ENVIRONMENT_BLOCKED`** (no `psql`/`docker`/`psycopg2` on Windows or Ubuntu VM; CI workflow `.github/workflows/postgresql_interface_contracts.yml` available on GitHub Actions)
+  - Full Closed-Loop `TC-I01`: **`ENVIRONMENT_BLOCKED`** / **PENDING**
 
 ---
 
@@ -104,12 +110,12 @@
 
 | Check | Result | Scope / Evidence |
 |---|---|---|
-| `python -m compileall -q sdn/` | **PASS** | Windows `.venv` |
-| `pytest -q -p no:cacheprovider sdn/tests/` | **`152/152 PASS` (`PASS_CONTRACT_MOCK`)** | 142 baseline + 6 Phase 2 + 4 Phase 3 audit suites |
-| Data `SDNSnapshotV14` Pydantic direct check | **`MOCK_ONLY` (`ENVIRONMENT_BLOCKED`)** | Windows `.venv` has no `pydantic`/`fastapi`/`psycopg2` |
-| Live PostgreSQL + real Data FastAPI (`online_api.py` + `management_api.py`) | **`ENVIRONMENT_BLOCKED`** | No local `psql`/`docker`/`psycopg2` |
-| Ubuntu OS-Ken + Mininet + OVS regression / S0 smoke | **`ENVIRONMENT_BLOCKED` (`UBUNTU_REQUIRED`)** | `Ubuntu SDN` VM running (`GuestAdditionsRunLevel=1`), SSH `127.0.0.1:2222` returned `kex_exchange_identification: read: Unknown error` |
-| Closed-loop `TC-I01` (Network + Data + SDN + ML + Optimization + Runner) | **`PENDING`** | Requires Runner orchestrator + real PostgreSQL + live services |
+| Windows `compileall` + `pytest` | **`PASS_CONTRACT_MOCK`** | `152/152` PASS (`65.49s`) on Windows `.venv` |
+| Ubuntu `compileall` + `pytest` (`/tmp/sdn_v14_p6` @ `8015f7d`) | **`PASS_UBUNTU_REGRESSION`** | `152/152` PASS (`70.06s`), Python `3.10.12`, OS-Ken `2.8.1` |
+| Ubuntu Live OS-Ken + Mininet + OVS S0 + `P1→P2→P1` (`8015f7d`) | **`PASS_LIVE_OVS`** | `6/6` switches, `48/48` `VERIFIED`, `pingall` `0.0%` before & after; `0x103` `P1→P2` (`sv 2→3`, `634.09 ms`, `e1 output:4`, `c2 n_packets=10`) & `P2→P1` (`sv 3→4`, `652.29 ms`, `e1 output:3`, `47/47` unaffected `P1`); live `data_v1` outbox delivered `Snapshot` (`sha_match=true`) + `RoutingState` before `ApplyResult`; outage/restart test `["/v1/sdn/routing", "/v1/sdn/apply-results"]` |
+| Data `SDNSnapshotV14` Pydantic direct check | **`ENVIRONMENT_BLOCKED`** (`MOCK_ONLY`) | No `pydantic`/`fastapi`/`psycopg2` on Windows or Ubuntu VM |
+| Live PostgreSQL + real Data FastAPI (`001..004`) | **`ENVIRONMENT_BLOCKED`** | No `psql`/`docker` on Windows or Ubuntu VM; isolated SDN CI entrypoint added at [integration_postgres_v14.py](file:///d:/PROGRAMMING%20FOLDER/SDN-Traffic-Engineering-ML/sdn/tests/integration_postgres_v14.py) for GitHub Actions `.github/workflows/postgresql_interface_contracts.yml` (update SDN ref `ca405ec` → `8015f7d` + add `004_decision_tick_order.sql`) |
+| Closed-loop `TC-I01` (Network + Data + SDN + ML + Optimization + Runner) | **`ENVIRONMENT_BLOCKED`** | Requires Runner orchestrator + real PostgreSQL + live services |
 
 ### Phase 3 Confirmed Bugs & Minimal Fixes (SDN-Owned Only)
 1. **`FlowDecisionStatus.REJECTED` in `build_48_flow_apply_result_data_v1()`** ([data_api_v1_adapter.py](file:///d:/PROGRAMMING%20FOLDER/SDN-Traffic-Engineering-ML/sdn/adapters/data_api_v1_adapter.py)): Pre-write rejected batches (`DEADLINE_EXPIRED` / `VERSION_MISMATCH`) raised `DataV1MappingError` because Data's `ResultRow.status` only allows `APPLIED|KEPT|FAILED|ROLLED_BACK|UNKNOWN`. Fixed by mapping pre-write `REJECTED` → `"KEPT"` when verified `path_id == old_path_id` (preserving `reason`) or `"UNKNOWN"` if unverified.

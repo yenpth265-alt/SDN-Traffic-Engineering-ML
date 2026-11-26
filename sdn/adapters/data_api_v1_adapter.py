@@ -33,6 +33,7 @@ from sdn.controller.state_manager import parse_utc_timestamp
 from sdn.schemas.apply_models import ApplyResponse
 from sdn.schemas.snapshot_models import Snapshot
 from sdn.schemas.state_models import (
+    BatchStatus,
     FlowDecisionStatus,
     RoutingStateEntry,
     RoutingStateSnapshot,
@@ -610,6 +611,61 @@ def build_48_flow_apply_result_data_v1(
         "completed_at_utc": completed_at_utc,
         "rows": ordered_rows,
     }
+
+
+def build_noop_48_flow_apply_result_data_v1(
+    *,
+    run_id: str,
+    decision_batch_id: str,
+    decision_rows: Optional[Sequence[Mapping[str, Any]]],
+    routing_state: Optional[RoutingStateSnapshot],
+    completed_at_utc: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Task C (`B=0` no-op audit contract): Build a grounded 48-flow `ApplyResult` when
+    Optimization/Runner registered a 48-flow `DecisionBatch` with zero route changes
+    (`old_path_id == proposed_path_id` for all 48 flows) without sending an empty
+    `ApplyRequest` to SDN `/apply`.
+
+    - Never fabricates 48 rows if `decision_rows` or `routing_state` is missing.
+    - Rejects if any decision row actually proposes a route change (`proposed_path_id != old_path_id`).
+    - Sets `KEPT` only when `routing_state` confirms `VERIFIED` path == `old_path_id`
+      (without mutating `last_successful_change_at`); sets `UNKNOWN` if unverified.
+    """
+    if not decision_rows:
+        raise DataV1ContractBlockedError(
+            f"CONTRACT_BLOCKED: Registered 48-flow DecisionBatch rows are required for B=0 "
+            f"no-op audit '{decision_batch_id}'; SDN never fabricates 48 rows."
+        )
+    if routing_state is None or not routing_state.routing_state:
+        raise DataV1ContractBlockedError(
+            f"CONTRACT_BLOCKED: Verified RoutingStateSnapshot is required for B=0 no-op audit '{decision_batch_id}'."
+        )
+    for drow in decision_rows:
+        if drow.get("old_path_id") != drow.get("proposed_path_id"):
+            raise DataV1MappingError(
+                f"B=0 no-op audit rejected: DecisionBatch '{decision_batch_id}' proposes a route "
+                f"change for flow '{drow.get('flow_group_id')}' ({drow.get('old_path_id')} -> {drow.get('proposed_path_id')})."
+            )
+    ts = _format_utc(completed_at_utc) if completed_at_utc else _utc_now_rfc3339()
+    any_unverified = any(
+        e.verification_status != VerificationStatus.VERIFIED for e in routing_state.routing_state
+    )
+    noop_resp = ApplyResponse(
+        run_id=run_id,
+        decision_batch_id=decision_batch_id,
+        status=BatchStatus.INCONSISTENT if any_unverified else BatchStatus.APPLIED,
+        state_version=int(routing_state.state_version),
+        completed_at=ts,
+        results=(),
+        rule_count=0,
+        reason="ROUTING_STATE_NOT_VERIFIED" if any_unverified else None,
+    )
+    return build_48_flow_apply_result_data_v1(
+        noop_resp,
+        decision_rows=decision_rows,
+        routing_state=routing_state,
+    )
 
 
 def fetch_decision_batch_from_data_v1(

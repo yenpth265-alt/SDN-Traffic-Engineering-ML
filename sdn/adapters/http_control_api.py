@@ -313,6 +313,7 @@ class HTTPDemandReleaseProvider:
             and abs(existing.requested_mbps - candidate.requested_mbps) <= 1e-9
             and existing.window_start_utc == candidate.window_start_utc
             and existing.window_end_utc == candidate.window_end_utc
+            and existing.released_at_utc == candidate.released_at_utc
             and existing.flow_group_id == candidate.flow_group_id
             and existing.bin_index == candidate.bin_index
         )
@@ -560,19 +561,30 @@ class SDNNorthboundHTTPApp:
                 "503 Service Unavailable",
                 {"ack": False, "error": "DEMAND_PERSISTENCE_FAILED", "message": str(exc)},
             )
-        except (StateManagerError, KeyError) as exc:
-            return self._json_response(
-                start_response,
-                "404 Not Found",
-                {"error": "RUN_NOT_FOUND", "message": str(exc)},
-            )
-        except SnapshotCreationError as exc:
-            return self._json_response(
-                start_response,
-                "400 Bad Request",
-                {"error": "SNAPSHOT_CREATION_ERROR", "message": str(exc)},
-            )
         except Exception as exc:
+            if type(exc).__name__ == "DataDemandHistoryError":
+                return self._json_response(
+                    start_response,
+                    "503 Service Unavailable",
+                    {
+                        "error": "DATA_DEMAND_HISTORY_UNAVAILABLE",
+                        "reason_code": getattr(exc, "reason_code", "DATA_DEMAND_HISTORY_ERROR"),
+                        "http_status": getattr(exc, "http_status", None),
+                        "message": str(exc),
+                    },
+                )
+            if isinstance(exc, (StateManagerError, KeyError)):
+                return self._json_response(
+                    start_response,
+                    "404 Not Found",
+                    {"error": "RUN_NOT_FOUND", "message": str(exc)},
+                )
+            if isinstance(exc, SnapshotCreationError):
+                return self._json_response(
+                    start_response,
+                    "400 Bad Request",
+                    {"error": "SNAPSHOT_CREATION_ERROR", "message": str(exc)},
+                )
             return self._json_response(
                 start_response,
                 "500 Internal Server Error",
@@ -756,7 +768,7 @@ class SDNNorthboundHTTPApp:
             data_blockers.append("DATA_ENDPOINT_NOT_CONFIGURED")
         else:
             assert dp_summary is not None
-            if dp_summary.get("auto_flush") and not dp_summary.get("worker_running"):
+            if not dp_summary.get("worker_running"):
                 data_blockers.append("DATA_OUTBOX_WORKER_NOT_RUNNING")
             if int(dp_summary.get("pending_delivery_count") or 0) > 0 and dp_summary.get("last_error"):
                 data_blockers.append(f"DATA_DELIVERY_BACKLOG:{dp_summary['last_error']}")
@@ -832,6 +844,35 @@ class SDNNorthboundHTTPApp:
             "unverified_external_roles": unverified_external_roles,
             "blockers": full_system_blockers,
         }
+        if self._data_publisher is not None:
+            base["data_sync_gate"] = self._data_publisher.sync_gate_status(
+                self._config.default_run_id,
+                current_state_version=base.get("state_version"),
+                ovs_verified=bool(all_48_verified),
+                ovs_reconcile_required=bool(reconcile_required is True),
+            )
+        else:
+            base["data_sync_gate"] = {
+                "api_mode": "disabled",
+                "run_id": self._config.default_run_id,
+                "ovs_verified": bool(all_48_verified),
+                "ovs_reconcile_required": bool(reconcile_required is True),
+                "current_state_version": base.get("state_version"),
+                "data_acknowledged_state_version": None,
+                "routing_sync_pending": False,
+                "apply_audit_pending": False,
+                "pending_apply_audit_batches": [],
+                "data_sync_pending": False,
+                "routing_conflict_detected": False,
+                "data_reconcile_required": False,
+                "reconcile_required": bool(reconcile_required is True),
+                "optimization_tick_eligible": bool(all_48_verified) and not bool(reconcile_required is True),
+                "optimization_tick_block_reason": (
+                    None
+                    if (bool(all_48_verified) and not bool(reconcile_required is True))
+                    else ("OVS_RECONCILIATION_REQUIRED" if reconcile_required is True else "OVS_NOT_VERIFIED")
+                ),
+            }
         return self._json_response(start_response, "200 OK", base)
 
     def _handle_routing_state(
@@ -841,7 +882,15 @@ class SDNNorthboundHTTPApp:
     ) -> list[bytes]:
         run_id = self._query_param(query, "run_id", self._config.default_run_id) or self._config.default_run_id
         snap = self._state_manager.get_routing_state(run_id)
-        return self._json_response(start_response, "200 OK", snap.to_dict())
+        payload = snap.to_dict()
+        if self._data_publisher is not None and self._data_publisher.config.api_mode == "data_v1":
+            payload["data_sync_gate"] = self._data_publisher.sync_gate_status(
+                run_id,
+                current_state_version=snap.state_version,
+                ovs_verified=bool(snap.routing_state_complete),
+                ovs_reconcile_required=bool(snap.reconcile_required),
+            )
+        return self._json_response(start_response, "200 OK", payload)
 
     def _handle_routing_history(
         self,
@@ -869,6 +918,20 @@ class SDNNorthboundHTTPApp:
         body: dict[str, Any],
         start_response: Callable[[str, list[tuple[str, str]]], Any],
     ) -> list[bytes]:
+        if not hasattr(self._demand_provider, "ingest_release_payload"):
+            return self._json_response(
+                start_response,
+                "409 Conflict",
+                {
+                    "ack": False,
+                    "error": "DEMAND_PROVIDER_IS_DATA_V1_READ_ONLY",
+                    "message": (
+                        "SDN is configured to read demand history from Data API v1 "
+                        "(SDN_DEMAND_PROVIDER_MODE=data_v1); direct HTTP demand-release push "
+                        "is disabled to prevent mixing Data and local SQLite demand histories."
+                    ),
+                },
+            )
         receipt_utc = _utc_now_rfc3339()
         if "events" in body:
             raw_events = body["events"]
@@ -951,16 +1014,26 @@ class SDNNorthboundHTTPApp:
                     measurement_started_at_utc=validate_rfc3339_utc_timestamp(
                         raw_origins.get("measurement_started_at_utc"), "origin_refs.measurement_started_at_utc", normalize=True
                     ),
+                    warmup_s=int(raw_origins.get("warmup_s", 60)),
                     delta_s=int(raw_origins.get("delta_s", 1)),
                 ),
             )
 
-        snap = self._snapshot_creator.create_snapshot(
-            run_id=run_id,
-            cutoff=cutoff,
-            lookback_L=lookback_L,
-            snapshot_as_of_utc=snap_as_of,
-        )
+        if hasattr(self._demand_provider, "create_snapshot_via_data"):
+            snap = self._demand_provider.create_snapshot_via_data(
+                self._snapshot_creator,
+                run_id=run_id,
+                cutoff=cutoff,
+                lookback_L=lookback_L,
+                snapshot_as_of_utc=snap_as_of,
+            )
+        else:
+            snap = self._snapshot_creator.create_snapshot(
+                run_id=run_id,
+                cutoff=cutoff,
+                lookback_L=lookback_L,
+                snapshot_as_of_utc=snap_as_of,
+            )
         self._decision_handler.register_snapshot(snap)
         if self._data_publisher is not None:
             self._data_publisher.publish_snapshot(snap, deliver_now=False)
@@ -1264,13 +1337,24 @@ class SDNNorthboundHTTPApp:
         if self._data_publisher is None:
             return
         try:
-            self._data_publisher.publish_apply_response(resp, deliver_now=False)
             snap = self._state_manager.get_routing_state(run_id)
-            self._data_publisher.publish_routing_state(snap, deliver_now=False)
+            if self._data_publisher.config.api_mode == "data_v1":
+                # Phase 8 Task B: Always enqueue RoutingState FIRST, then build/enqueue
+                # complete 48-flow ApplyResult (with durable pending-audit recovery if Data
+                # is temporarily unreachable) depending on RoutingState persistence ACK.
+                self._data_publisher.publish_routing_state(snap, deliver_now=False)
+                self._data_publisher.publish_apply_response_v1_runtime(
+                    resp,
+                    post_apply_routing_state=snap,
+                    deliver_now=False,
+                )
+            else:
+                self._data_publisher.publish_apply_response(resp, deliver_now=False)
+                self._data_publisher.publish_routing_state(snap, deliver_now=False)
             history = self._state_manager.get_routing_history(run_id)
             self._data_publisher.publish_routing_history(
                 run_id, snap.state_version, history, deliver_now=False
             )
         except Exception:
-            # Never fail or crash finalized apply due to Data publisher error
+            # Never fail or crash finalized OVS apply due to Data publisher error
             pass

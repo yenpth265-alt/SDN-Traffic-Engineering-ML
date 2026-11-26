@@ -228,7 +228,7 @@ class TestOptimizationSDNContract(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertEqual(code2, "DATA_NOT_SYNCED")
 
-   def test_07_hold_down_only_on_verified_path_change(self) -> None:
+    def test_07_hold_down_only_on_verified_path_change(self) -> None:
         ctrl = OptimizationController(_base_config(budget_b=4, t_hold=60.0), topology_override=self.topo)
         first = ctrl.step(
             0.92,

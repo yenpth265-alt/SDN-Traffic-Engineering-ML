@@ -3,9 +3,10 @@ import json
 import os
 from typing import Any, Mapping, Sequence
 
+from optimization.input_validator import extract_forecast_series
+
 
 def _parse_token_list(raw_val: Any) -> list[str]:
-    """Chuyển đổi linh hoạt chuỗi JSON, chuỗi phân tách (;, ,, ->) hoặc list dict thành danh sách ID."""
     if raw_val is None:
         return []
     if isinstance(raw_val, list):
@@ -39,7 +40,6 @@ def _extract_links_from_item(
     valid_links: set[str],
     pair_to_link: Mapping[tuple[str, str], str],
 ) -> list[str]:
-    """Trích xuất danh sách link_id của một tuyến từ mọi tên trường có thể có."""
     preferred_link_keys = (
         "links",
         "link_ids",
@@ -58,7 +58,6 @@ def _extract_links_from_item(
             if tokens:
                 return tokens
 
-    # Quét toàn bộ các trường còn lại trong item nếu tên khóa khác quy ước trên
     for key, val in item.items():
         if key in ("flow_group_id", "path_id", "id", "name"):
             continue
@@ -66,7 +65,6 @@ def _extract_links_from_item(
         if tokens:
             return tokens
 
-    # Fallback: nếu tuyến lưu chuỗi nút (nodes/hops) thì ánh xạ từng cặp (u, v) sang link_id
     node_keys = ("nodes", "node_ids", "node_sequence", "path_nodes", "hops", "switches")
     for key in node_keys:
         if key in item:
@@ -108,7 +106,6 @@ def load_topology_from_configs(config_dir: str = "configs/network") -> dict[str,
         topology_version = str(bundle.get("topology_version", "1.0")).lstrip("v")
         topology_hash = bundle.get("topology_hash") or bundle.get("sha256")
 
-        # 1. Nạp 32 liên kết có hướng
         raw_links = bundle.get("links", [])
         link_items = raw_links.values() if isinstance(raw_links, Mapping) else raw_links
         for item in link_items:
@@ -126,7 +123,6 @@ def load_topology_from_configs(config_dir: str = "configs/network") -> dict[str,
 
         valid_links = set(E)
 
-        # 2. Nạp 48 nhóm luồng
         raw_fgs = bundle.get("flow_groups", [])
         fg_items = raw_fgs.values() if isinstance(raw_fgs, Mapping) else raw_fgs
         for item in fg_items:
@@ -134,7 +130,6 @@ def load_topology_from_configs(config_dir: str = "configs/network") -> dict[str,
             F.append(fg_id)
             P[fg_id] = []
 
-        # 3. Nạp 96 tuyến ứng viên từ topology_bundle.json
         raw_cps = bundle.get("candidate_paths", [])
         cp_items = raw_cps.values() if isinstance(raw_cps, Mapping) else raw_cps
         for item in cp_items:
@@ -146,7 +141,6 @@ def load_topology_from_configs(config_dir: str = "configs/network") -> dict[str,
             if links_on_path:
                 raw_path_links[(fg_id, path_id)] = links_on_path
 
-    # Bổ sung/đọc từ bộ CSV nếu chưa có bundle hoặc còn tuyến chưa ánh xạ đủ liên kết
     if not E:
         with open(os.path.join(config_dir, "links.csv"), mode="r", encoding="utf-8") as f_links:
             for row in csv.DictReader(f_links):
@@ -181,7 +175,6 @@ def load_topology_from_configs(config_dir: str = "configs/network") -> dict[str,
                     if links_on_path:
                         raw_path_links[(fg_id, path_id)] = links_on_path
 
-    # 4. Dựng ma trận chỉ thị 3 chiều a_fpe[f][p][e]
     a_fpe: dict[str, dict[str, dict[str, int]]] = {}
     for f in F:
         a_fpe[f] = {}
@@ -204,12 +197,15 @@ def load_topology_from_configs(config_dir: str = "configs/network") -> dict[str,
 
 
 def calculate_mean_demand(forecast_data: Mapping[str, Any], flow_groups: Sequence[str]) -> dict[str, float]:
-    """Tính nhu cầu trung bình b_f (Mbps) trên cửa sổ dự báo H* bước."""
-    pred_map = forecast_data.get("predictions", forecast_data)
+    """
+    Tính nhu cầu trung bình b_f (Mbps) trên cửa sổ dự báo H bước.
+    Theo A07: epsilon đã được ML áp dụng đúng 1 lần trước khi xuất ForecastBatch READY,
+    Optimization không cộng thêm epsilon.
+    """
+    series_map = extract_forecast_series(forecast_data)
     b_f: dict[str, float] = {}
     for f in flow_groups:
-        rec = pred_map[f]
-        h_values = rec["predicted_mbps_array"] if isinstance(rec, Mapping) else rec
+        h_values = series_map[f]
         b_f[f] = sum(float(v) for v in h_values) / len(h_values)
     return b_f
 
@@ -220,10 +216,6 @@ def evaluate_routing_utilization(
     routes: Mapping[str, Mapping[str, Any]],
     default_ce: float = 100.0,
 ) -> float:
-    """
-    Tính mức sử dụng liên kết cực đại U trên tải dự báo b_f cho phương án định tuyến hiện tại.
-    Dùng làm mốc J_old chuẩn xác khi so sánh Hysteresis với nghiệm MILP J_new.
-    """
     E = topology["E"]
     C_map = topology.get("C", {})
     a_fpe = topology["a_fpe"]

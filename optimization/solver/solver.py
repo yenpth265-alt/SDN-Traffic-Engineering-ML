@@ -4,7 +4,6 @@ import pulp
 
 
 def _build_solver(time_limit_s: float):
-    """Khởi tạo bộ giải PuLP nếu môi trường có sẵn (PuLP 2.x/3.x CBC hoặc PuLP 4.x + HiGHS)."""
     if hasattr(pulp, "PULP_CBC_CMD"):
         return pulp.PULP_CBC_CMD(timeLimit=time_limit_s, msg=False)
 
@@ -74,10 +73,6 @@ def _solve_exact_branch_and_bound(
     start_time: float,
     time_limit_s: float,
 ) -> tuple[str, float, float, dict[str, int], dict[str, dict[str, int]], float]:
-    """
-    Bộ giải nhánh-và-cận (Exact Branch-and-Bound) tìm nghiệm tối ưu toàn cục cho bài toán MILP:
-    min U + lambda * sum(y_f) với ràng buộc R1, R3, R4, R5 (sum y_f <= B), R6 (hold-down).
-    """
     F: list[str] = list(topology["F"])
     P: Mapping[str, list[str]] = topology["P"]
     E: list[str] = list(topology["E"])
@@ -87,7 +82,7 @@ def _solve_exact_branch_and_bound(
     k_e = topology.get("k_e", {})
 
     B = int(config.get("B", 4))
-    lam = float(config.get("lambda_weight", 0.01))
+    lam_unit = float(config.get("lambda_weight", 0.01)) / max(1, len(F))
     locked_set = set(locked_groups)
 
     num_e = len(E)
@@ -95,7 +90,6 @@ def _solve_exact_branch_and_bound(
     cap = [float(C_map.get(e, default_ce)) for e in E]
     k_vec = [float(k_e.get(e, 1.0)) for e in E]
 
-    # Cấu hình tuyến ban đầu của từng nhóm luồng
     cur_path: dict[str, str] = {}
     loads = [0.0] * num_e
     flow_path_weights: dict[str, dict[str, list[tuple[int, float]]]] = {}
@@ -126,11 +120,9 @@ def _solve_exact_branch_and_bound(
         return m
 
     best_U = calc_u(loads)
-    best_changes = 0
     best_J = best_U
     best_choice: dict[str, str] = dict(cur_path)
 
-    # Danh sách ứng viên được phép đổi tuyến (không bị hold-down và có >= 2 tuyến)
     candidates: list[tuple[float, str, str, list[str]]] = []
     for f in F:
         if f in locked_set:
@@ -138,14 +130,12 @@ def _solve_exact_branch_and_bound(
         alt_paths = [p for p in P[f] if p != cur_path[f]]
         if not alt_paths:
             continue
-        # Ưu tiên duyệt các luồng đang đè nặng lên các liên kết tải cao nhất
         impact = max((loads[i] / cap[i] for i, _ in flow_path_weights[f][cur_path[f]] if cap[i] > 0), default=0.0)
         candidates.append((impact, f, cur_path[f], alt_paths))
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     n_cand = len(candidates)
 
-    # Mức giảm tải tối đa mỗi bước đổi tuyến có thể mang lại trên từng liên kết e (dùng để cắt nhánh)
     max_drop_on_link = [[0.0] * n_cand for _ in range(num_e)]
     for c_idx, (_, f, p0, alt_paths) in enumerate(candidates):
         w0 = dict(flow_path_weights[f][p0])
@@ -164,7 +154,7 @@ def _solve_exact_branch_and_bound(
     timed_out = False
 
     def dfs(pos: int, used: int) -> None:
-        nonlocal best_U, best_changes, best_J, best_choice, timed_out
+        nonlocal best_U, best_J, best_choice, timed_out
         if timed_out:
             return
         if (time.time() - start_time) > time_limit_s:
@@ -172,10 +162,9 @@ def _solve_exact_branch_and_bound(
             return
 
         u_now = calc_u(loads)
-        j_now = u_now + lam * used
+        j_now = u_now + lam_unit * used
         if j_now < best_J - 1e-12:
             best_U = u_now
-            best_changes = used
             best_J = j_now
             best_choice = dict(cur_choice)
 
@@ -183,7 +172,6 @@ def _solve_exact_branch_and_bound(
         if rem_budget <= 0 or pos >= n_cand:
             return
 
-        # Cận dưới của hàm mục tiêu từ vị trí pos trở đi
         lb_u = 0.0
         for i in range(num_e):
             if cap[i] <= 0:
@@ -194,13 +182,12 @@ def _solve_exact_branch_and_bound(
             if min_u_i > lb_u:
                 lb_u = min_u_i
 
-        if lb_u + lam * (used + 1) >= best_J - 1e-12:
+        if lb_u + lam_unit * (used + 1) >= best_J - 1e-12:
             return
 
         _, f, p0, alt_paths = candidates[pos]
         w0 = flow_path_weights[f][p0]
 
-        # Nhánh 1: Đổi luồng f sang tuyến ứng viên p_alt
         for p_alt in alt_paths:
             w_alt = flow_path_weights[f][p_alt]
             for i, w in w0:
@@ -217,7 +204,6 @@ def _solve_exact_branch_and_bound(
             for i, w in w0:
                 loads[i] += w
 
-        # Nhánh 2: Giữ nguyên luồng f
         dfs(pos + 1, used)
 
     dfs(0, 0)
@@ -243,7 +229,6 @@ def solve_model(
     locked_groups: set[str] | list[str] | tuple[str, ...] | None = None,
     config: Mapping[str, Any] | None = None,
 ):
-    """Gọi bộ giải MILP qua PuLP (nếu có solver) và tự động fallback sang Branch-and-Bound chính xác."""
     start_time = time.time()
     time_limit_s = max(0.05, float(deadline_ms) / 1000.0)
 

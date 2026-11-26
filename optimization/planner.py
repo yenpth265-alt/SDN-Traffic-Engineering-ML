@@ -1,7 +1,9 @@
+import inspect
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from optimization.config_loader import compute_config_hash
 from optimization.input_validator import (
     normalize_routing_entries,
     validate_forecast,
@@ -13,10 +15,36 @@ from optimization.load_estimator import (
     load_topology_from_configs,
 )
 from optimization.milp.model import build_milp
-from optimization.result_serializer import build_optimization_result, serialize_apply_request
+from optimization.result_serializer import (
+    _to_rfc3339_utc,
+    resolve_apply_deadline_utc,
+    resolve_decision_batch_id,
+    serialize_apply_request,
+    serialize_decision_batch,
+)
 from optimization.routing_policies.solution_validator import check_hysteresis, get_locked_groups
 from optimization.routing_policies.trigger import check_trigger
 from optimization.solver.solver import solve_model
+
+
+def _resolve_locked_groups(
+    routes: Mapping[str, Mapping[str, Any]],
+    t_hold: float,
+    now_utc: datetime,
+    hold_down_overrides: Mapping[str, Any] | None = None,
+) -> set[str]:
+    effective_routes = {fg: dict(info) for fg, info in routes.items()}
+    if hold_down_overrides:
+        for fg, ts_val in hold_down_overrides.items():
+            if fg in effective_routes and ts_val:
+                effective_routes[fg]["last_successful_change_at"] = ts_val
+
+    sig = inspect.signature(get_locked_groups)
+    if "now_utc" in sig.parameters:
+        locked = get_locked_groups(effective_routes, t_hold, now_utc=now_utc)
+    else:
+        locked = get_locked_groups(effective_routes, t_hold)
+    return set(locked)
 
 
 def run_planner(
@@ -26,6 +54,10 @@ def run_planner(
     config: Mapping[str, Any],
     topology_override: Mapping[str, Any] | None = None,
     now_utc: datetime | None = None,
+    decision_batch_id: str | None = None,
+    apply_deadline_utc: str | None = None,
+    hold_down_overrides: Mapping[str, Any] | None = None,
+    tick_id: int | str | None = None,
 ) -> dict[str, Any]:
     topology = (
         dict(topology_override)
@@ -35,27 +67,34 @@ def run_planner(
     if not topology:
         return {"status": "ERROR", "reason": "Topology data missing"}
 
-    # Đồng bộ topology_version & topology_hash từ topology_bundle.json sang config nếu thiếu
     merged_config = dict(config)
     merged_config.setdefault("topology_version", topology.get("topology_version", "1.0"))
     if topology.get("topology_hash") and not merged_config.get("topology_hash"):
         merged_config["topology_hash"] = topology["topology_hash"]
+    if not merged_config.get("config_hash"):
+        merged_config["config_hash"] = compute_config_hash(merged_config)
 
+    ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
+    effective_tick_id = tick_id if tick_id is not None else forecast_data.get("tick_id")
     F = topology["F"]
     routes = normalize_routing_entries(routing_state)
 
-    # 1. Kiểm tra routing state trước (chặn UNKNOWN / INCONSISTENT / IN_FLIGHT / sai path)
+    # 1. Data Sync Gate & kiểm tra RoutingState (chặn DATA_NOT_SYNCED / STATE_UNKNOWN / IN_FLIGHT)
     state_ok, state_status, state_msg = validate_routing_state(routing_state, F, topology["P"])
     if not state_ok:
         return {"status": state_status, "reason": state_msg}
 
-    # 2. Kiểm tra dữ liệu dự báo hợp lệ & quỹ thời gian trước apply_deadline_utc
+    # 2. Kiểm tra ForecastBatch READY, đủ 48 x H dòng, integer offsets & quỹ thời gian apply_deadline_utc
+    effective_deadline = resolve_apply_deadline_utc(
+        forecast_data, merged_config, ref_now, override_deadline=apply_deadline_utc
+    )
     fc_ok, fc_status, fc_msg = validate_forecast(
         forecast_data,
         F,
         deadline_ms=int(merged_config.get("deadline_ms", 200)),
         apply_guard_ms=int(merged_config.get("apply_guard_ms", 200)),
-        now_utc=now_utc,
+        now_utc=ref_now,
+        apply_deadline_utc=effective_deadline,
     )
     if not fc_ok:
         return {"status": fc_status, "reason": fc_msg}
@@ -64,72 +103,175 @@ def run_planner(
     if not check_trigger(U_current_history, float(merged_config["TH"]), int(merged_config["N"])):
         return {"status": "NO_TRIGGER"}
 
-    # 4. Tính nhu cầu trung bình b_f và đánh giá U_old (= J_old) của tuyến hiện tại trên tải dự báo
+    # 4. Chuẩn bị dữ liệu tải dự báo, ID batch dùng chung và các luồng đang Hold-down
     b_f = calculate_mean_demand(forecast_data, F)
     default_ce = float(merged_config.get("C_e", 100.0))
     U_old = evaluate_routing_utilization(topology, b_f, routes, default_ce=default_ce)
     J_old = U_old
 
-    # Nếu trên cửa sổ dự báo H*, tải cực đại của tuyến hiện tại đã dưới ngưỡng TH thì giữ nguyên
-    if U_old <= float(merged_config["TH"]):
-        return {
+    state_ver = int(routing_state.get("state_version", routing_state.get("routing_version", 1)))
+    run_id = str(forecast_data.get("run_id") or routing_state.get("run_id") or "run_default")
+    batch_id = resolve_decision_batch_id(decision_batch_id, run_id, ref_now, tick_id=effective_tick_id)
+    locked_groups = _resolve_locked_groups(
+        routes=routes,
+        t_hold=float(merged_config["T_hold"]),
+        now_utc=ref_now,
+        hold_down_overrides=hold_down_overrides,
+    )
+
+    current_selected = {
+        f: str(routes[f].get("current_path") or routes[f].get("actual_path_id")) for f in F
+    }
+
+    def _build_kept_result(
+        reason_code: str,
+        solver_status: str = "NotRun",
+        u_after: float | None = None,
+        j_after: float | None = None,
+        solve_ms: float = 0.0,
+    ) -> dict[str, Any]:
+        u_fin = U_old if u_after is None else u_after
+        j_fin = J_old if j_after is None else j_after
+        decision_batch = serialize_decision_batch(
+            decision_batch_id=batch_id,
+            topology=topology,
+            routing_state=routes,
+            selected_paths=current_selected,
+            locked_groups=locked_groups,
+            b_f=b_f,
+            forecast_data=forecast_data,
+            state_version=state_ver,
+            config=merged_config,
+            apply_deadline_utc=effective_deadline,
+            solver_metrics={
+                "status": solver_status,
+                "U_before": round(U_old, 6),
+                "U_after": round(u_fin, 6),
+                "J_before": round(J_old, 6),
+                "J_after": round(j_fin, 6),
+                "solve_ms": round(solve_ms, 3),
+            },
+            reason=reason_code,
+            tick_id=effective_tick_id,
+            now_utc=ref_now,
+        )
+        out: dict[str, Any] = {
             "status": "KEPT",
-            "reason": "FORECAST_BELOW_THRESHOLD",
+            "reason": reason_code,
             "U_old": round(U_old, 4),
+            "decision_batch": decision_batch,
+            "apply_request": None,
         }
+        if u_after is not None:
+            out["U_new"] = round(u_after, 4)
+            out["J_old"] = round(J_old, 4)
+            out["J_new"] = round(j_fin, 4)
+        return out
 
-    # 5. Xác định các nhóm luồng đang chịu Hold-down
-    locked_groups = get_locked_groups(routes, float(merged_config["T_hold"]), now_utc=now_utc)
+    # 5. Nếu tải dự báo dưới ngưỡng TH hoặc ngân sách B=0 -> xuất DecisionBatch 48 dòng KEPT, không gửi ApplyRequest
+    if U_old <= float(merged_config["TH"]):
+        return _build_kept_result("FORECAST_BELOW_THRESHOLD")
 
-    # 6. Xây dựng & Giải mô hình MILP
+    if int(merged_config.get("B", 4)) <= 0:
+        return _build_kept_result("BUDGET_ZERO")
+
+    # 6. Xây dựng & Giải mô hình MILP (kèm fallback Branch-and-Bound chính xác)
     prob, x, y, U = build_milp(topology, b_f, locked_groups, routes, merged_config)
     status, U_new, J_new, y_vals, x_vals, solve_ms = solve_model(
-        prob, x, y, U, F, topology["P"], int(merged_config["deadline_ms"])
+        prob,
+        x,
+        y,
+        U,
+        F,
+        topology["P"],
+        int(merged_config["deadline_ms"]),
+        topology=topology,
+        b_f=b_f,
+        routing_state=routes,
+        locked_groups=locked_groups,
+        config=merged_config,
     )
 
     if status not in ["Optimal", "Feasible"]:
-        return {"status": "KEPT", "reason": f"Solver status: {status}"}
+        return _build_kept_result(f"Solver status: {status}", solver_status=status, solve_ms=solve_ms)
 
     # 7. Kiểm định ngưỡng cải thiện Hysteresis (h)
     n_changes = sum(y_vals.values())
     if not check_hysteresis(J_old, J_new, n_changes, float(merged_config["h"])):
-        return {
-            "status": "KEPT",
-            "reason": "NO_IMPROVEMENT",
-            "U_old": round(U_old, 4),
-            "U_new": round(U_new, 4),
-            "J_old": round(J_old, 4),
-            "J_new": round(J_new, 4),
-        }
+        return _build_kept_result(
+            "NO_IMPROVEMENT",
+            solver_status=status,
+            u_after=U_new,
+            j_after=J_new,
+            solve_ms=solve_ms,
+        )
 
-    # 8. Tạo OptimizationResult và đóng gói ApplyRequest chuẩn SDN v1.4
-    opt_result = build_optimization_result(
-        topology,
-        forecast_data,
-        routing_state,
-        merged_config,
-        U_old,
-        U_new,
-        J_old,
-        J_new,
-        status,
-        solve_ms,
-        x_vals,
-        y_vals,
+    # 8. Trích xuất tuyến tối ưu cho đủ 48 luồng và đóng gói DecisionBatch (48 dòng) + ApplyRequest (tối đa B dòng)
+    selected_paths: dict[str, str] = {}
+    for f in F:
+        chosen = current_selected[f]
+        for p, val in x_vals.get(f, {}).items():
+            if int(round(val)) == 1:
+                chosen = p
+                break
+        selected_paths[f] = chosen
+
+    decision_batch = serialize_decision_batch(
+        decision_batch_id=batch_id,
+        topology=topology,
+        routing_state=routes,
+        selected_paths=selected_paths,
+        locked_groups=locked_groups,
+        b_f=b_f,
+        forecast_data=forecast_data,
+        state_version=state_ver,
+        config=merged_config,
+        apply_deadline_utc=effective_deadline,
+        solver_metrics={
+            "status": status,
+            "U_before": round(U_old, 6),
+            "U_after": round(U_new, 6),
+            "J_before": round(J_old, 6),
+            "J_after": round(J_new, 6),
+            "solve_ms": round(solve_ms, 3),
+        },
+        reason="REROUTED",
+        tick_id=effective_tick_id,
+        now_utc=ref_now,
     )
-    apply_req = serialize_apply_request(opt_result, forecast_data, merged_config)
+
+    apply_req = serialize_apply_request(
+        decision_batch_id=batch_id,
+        decision_rows=decision_batch["decision_rows"],
+        forecast_data=forecast_data,
+        state_version=state_ver,
+        config=merged_config,
+        apply_deadline_utc=effective_deadline,
+        topology=topology,
+        now_utc=ref_now,
+    )
+
+    if apply_req is None:
+        return _build_kept_result(
+            "NO_EFFECTIVE_CHANGE",
+            solver_status=status,
+            u_after=U_new,
+            j_after=J_new,
+            solve_ms=solve_ms,
+        )
 
     return {
         "status": "APPLY_REQUESTED",
-        "optimization_result": opt_result,
+        "decision_batch": decision_batch,
         "apply_request": apply_req,
     }
 
 
 class OptimizationController:
     """
-    Wrapper có trạng thái cho Runner/Orchestrator: tự lưu cửa sổ lịch sử U_current_history
-    và tự reset chuỗi trigger khi dữ liệu bị gián đoạn/stale.
+    Wrapper có trạng thái cho Runner/Orchestrator:
+    - Quản lý cửa sổ trigger N tick và tạm dừng khi Data chưa ACK (DATA_NOT_SYNCED).
+    - Nhận ApplyResponse từ SDN để chỉ cập nhật hold-down T_hold cho các luồng đổi đường thành công (VERIFIED).
     """
 
     def __init__(self, config: Mapping[str, Any], topology_override: Mapping[str, Any] | None = None) -> None:
@@ -141,6 +283,7 @@ class OptimizationController:
         )
         n_win = max(1, int(self.config.get("N", 3)))
         self._u_history: deque[float] = deque(maxlen=n_win)
+        self._hold_down_overrides: dict[str, str] = {}
 
     def step(
         self,
@@ -148,6 +291,9 @@ class OptimizationController:
         forecast_data: Mapping[str, Any],
         routing_state: Mapping[str, Any],
         now_utc: datetime | None = None,
+        decision_batch_id: str | None = None,
+        apply_deadline_utc: str | None = None,
+        tick_id: int | str | None = None,
     ) -> dict[str, Any]:
         self._u_history.append(float(u_current))
         res = run_planner(
@@ -157,8 +303,91 @@ class OptimizationController:
             config=self.config,
             topology_override=self.topology,
             now_utc=now_utc,
+            decision_batch_id=decision_batch_id,
+            apply_deadline_utc=apply_deadline_utc,
+            hold_down_overrides=self._hold_down_overrides,
+            tick_id=tick_id,
         )
-        # Nếu trạng thái mạng không xác định hoặc dữ liệu quá hạn -> xóa lịch sử trigger để tránh kích hoạt giả
-        if res["status"] in ("STATE_UNKNOWN", "STATE_INCOMPLETE", "DATA_STALE", "FORECAST_INVALID"):
+        if res["status"] in ("DATA_NOT_SYNCED", "SKIPPED_IN_FLIGHT"):
+            if self._u_history:
+                self._u_history.pop()
+        elif res["status"] in (
+            "STATE_UNKNOWN",
+            "STATE_INCOMPLETE",
+            "DATA_STALE",
+            "FORECAST_INVALID",
+            "FORECAST_NOT_READY",
+            "INVALID_FORECAST_OFFSET",
+        ):
             self._u_history.clear()
         return res
+
+    def ingest_apply_result(
+        self,
+        apply_result: Mapping[str, Any],
+        now_utc: datetime | None = None,
+    ) -> dict[str, list[str]]:
+        ts_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
+        batch_status = str(apply_result.get("status", "")).upper()
+        batch_completed_at = apply_result.get("completed_at")
+
+        rows = (
+            apply_result.get("results")
+            or apply_result.get("flow_results")
+            or apply_result.get("decision_rows")
+            or apply_result.get("changes")
+            or []
+        )
+
+        locked_updated: list[str] = []
+        unverified_flows: list[str] = []
+
+        for item in rows:
+            fg = str(item.get("flow_group_id", "")).strip()
+            if not fg:
+                continue
+            old_p = item.get("old_path_id") or item.get("old_path")
+            new_p = (
+                item.get("actual_path_id")
+                or item.get("new_path_id")
+                or item.get("proposed_path_id")
+                or item.get("new_path")
+            )
+            flow_status = str(item.get("status", "")).upper()
+            ver_status = str(item.get("verification_status") or flow_status).upper()
+
+            if flow_status in ("UNKNOWN", "FAILED", "INCONSISTENT") or ver_status in (
+                "UNKNOWN",
+                "FAILED",
+                "UNVERIFIED",
+            ):
+                unverified_flows.append(fg)
+                continue
+
+            if batch_status in ("REJECTED", "FAILED", "INCONSISTENT", "ROLLED_BACK"):
+                continue
+
+            actually_changed = bool(
+                item.get("changed", old_p is not None and new_p is not None and str(old_p) != str(new_p))
+            )
+            if actually_changed and ver_status == "VERIFIED" and flow_status in ("", "APPLIED", "VERIFIED"):
+                verified_ts = str(
+                    item.get("verified_at_utc")
+                    or item.get("applied_at")
+                    or batch_completed_at
+                    or _to_rfc3339_utc(ts_now)
+                )
+                self._hold_down_overrides[fg] = verified_ts
+                locked_updated.append(fg)
+
+        if (
+            apply_result.get("reconcile_required") is True
+            or batch_status in ("INCONSISTENT", "PARTIAL", "FAILED")
+            or unverified_flows
+        ):
+            self._u_history.clear()
+
+        return {
+            "locked_updated": locked_updated,
+            "unverified_flows": unverified_flows,
+        }

@@ -19,13 +19,13 @@ def _build_topology(num_flows: int = 48) -> dict[str, Any]:
     flows = [f"0x{100 + i:03x}" for i in range(num_flows)]
     paths = {fg: [f"p_{fg}_a", f"p_{fg}_b"] for fg in flows}
     links = {
-        "l_a": {"capacity_mbps": 400.0},
-        "l_b": {"capacity_mbps": 1500.0},
+        "l_a": {"capacity_mbps": 500.0},
+        "l_b": {"capacity_mbps": 2000.0},
     }
     path_links: dict[str, list[str]] = {}
-    for idx, fg in enumerate(flows):
-        path_links[f"p_{fg}_a"] = ["l_a"] if idx % 2 == 0 else ["l_b"]
-        path_links[f"p_{fg}_b"] = ["l_b"] if idx % 2 == 0 else ["l_a"]
+    for fg in flows:
+        path_links[f"p_{fg}_a"] = ["l_a"]
+        path_links[f"p_{fg}_b"] = ["l_b"]
 
     a_fpe: dict[str, dict[str, dict[str, int]]] = {}
     for fg in flows:
@@ -115,7 +115,7 @@ def _base_config(budget_b: int = 4, t_hold: float = 30.0) -> dict[str, Any]:
         "B": budget_b,
         "T_hold": t_hold,
         "h": 0.0,
-        "lambda_weight": 0.001,
+        "lambda_weight": 0.0,
         "deadline_ms": 200,
         "apply_guard_ms": 200,
         "C_e": 1000.0,
@@ -228,7 +228,7 @@ class TestOptimizationSDNContract(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertEqual(code2, "DATA_NOT_SYNCED")
 
-    def test_07_hold_down_only_on_verified_path_change(self) -> None:
+   def test_07_hold_down_only_on_verified_path_change(self) -> None:
         ctrl = OptimizationController(_base_config(budget_b=4, t_hold=60.0), topology_override=self.topo)
         first = ctrl.step(
             0.92,
@@ -245,19 +245,37 @@ class TestOptimizationSDNContract(unittest.TestCase):
         old_p = first["apply_request"]["changes"][0]["old_path_id"]
         new_p = first["apply_request"]["changes"][0]["new_path_id"]
 
+        results_48 = []
+        for fg in self.topo["F"]:
+            cur_p = str(self.rs["routes"][fg]["current_path"])
+            if fg == changed_fg:
+                results_48.append(
+                    {
+                        "flow_group_id": fg,
+                        "old_path_id": old_p,
+                        "actual_path_id": new_p,
+                        "changed": True,
+                        "status": "APPLIED",
+                        "verification_status": "VERIFIED",
+                        "verified_at_utc": self.tick_at,
+                    }
+                )
+            else:
+                results_48.append(
+                    {
+                        "flow_group_id": fg,
+                        "old_path_id": cur_p,
+                        "actual_path_id": cur_p,
+                        "changed": False,
+                        "status": "KEPT",
+                        "verification_status": "VERIFIED",
+                        "verified_at_utc": self.tick_at,
+                    }
+                )
+
         apply_res = {
             "status": "APPLIED",
-            "results": [
-                {
-                    "flow_group_id": changed_fg,
-                    "old_path_id": old_p,
-                    "actual_path_id": new_p,
-                    "changed": True,
-                    "status": "APPLIED",
-                    "verification_status": "VERIFIED",
-                    "verified_at_utc": self.tick_at,
-                }
-            ],
+            "results": results_48,
         }
         pub_rs = _build_routing_state(self.topo, eligible=True)
         pub_rs["routes"][changed_fg]["current_path"] = new_p

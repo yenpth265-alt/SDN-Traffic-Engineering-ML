@@ -73,19 +73,29 @@ def extract_forecast_series(forecast_data: Mapping[str, Any]) -> dict[str, list[
 
 
 def check_data_sync_gate(routing_state: Mapping[str, Any]) -> tuple[bool, str, str]:
-    """Chặn mở tick mới khi Data chưa ACK RoutingState, giữ nguyên VERIFIED của các luồng OVS."""
+    """
+    Bắt buộc data_sync_gate.optimization_tick_eligible == True.
+    Thiếu field, false, hoặc Data chưa ACK RoutingState/ApplyResult đều chặn tick.
+    """
     gate = routing_state.get("data_sync_gate")
-    if isinstance(gate, Mapping):
-        if (
-            gate.get("synced") is False
-            or gate.get("is_synced") is False
-            or gate.get("allowed") is False
-            or gate.get("can_open_tick") is False
-        ):
-            return False, "DATA_NOT_SYNCED", f"SDN data_sync_gate chặn mở tick mới: {dict(gate)}"
-        pending = gate.get("pending_count", 0)
-        if isinstance(pending, int) and not isinstance(pending, bool) and pending > 0:
-            return False, "DATA_NOT_SYNCED", f"SDN data_sync_gate còn {pending} bản ghi chờ Data ACK"
+    if not isinstance(gate, Mapping) or gate.get("optimization_tick_eligible") is not True:
+        return (
+            False,
+            "DATA_NOT_SYNCED",
+            f"data_sync_gate.optimization_tick_eligible phải là True (nhận được: {gate!r})",
+        )
+
+    if (
+        gate.get("synced") is False
+        or gate.get("is_synced") is False
+        or gate.get("allowed") is False
+        or gate.get("can_open_tick") is False
+    ):
+        return False, "DATA_NOT_SYNCED", f"SDN data_sync_gate chặn mở tick mới: {dict(gate)}"
+
+    pending = gate.get("pending_count", 0)
+    if isinstance(pending, int) and not isinstance(pending, bool) and pending > 0:
+        return False, "DATA_NOT_SYNCED", f"SDN data_sync_gate còn {pending} bản ghi chờ Data ACK"
 
     if (
         routing_state.get("data_synced") is False

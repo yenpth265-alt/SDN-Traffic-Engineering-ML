@@ -1136,6 +1136,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```[cite: 4]
-
-Nếu bạn cũng muốn cập nhật tương tự cho `telemetry_collector.py` (ưu tiên đọc `traffic_started_at_utc` hoặc mốc gốc tương ứng khi tính `t0`) hoặc cần hỗ trợ gì thêm cho giai đoạn chốt G0/G1, cứ bảo mình nhé.

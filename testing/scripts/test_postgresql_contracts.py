@@ -52,7 +52,7 @@ class PostgreSQLContracts(unittest.TestCase):
         cls.addClassCleanup(keys.stop)
         ready = cls.client.get("/health/ready")
         if ready.status_code != 200:
-            raise RuntimeError(f"Run the suite against PostgreSQL with schema revisions 1–3: {ready.text}")
+            raise RuntimeError(f"Run the suite against PostgreSQL with schema revisions 1–4: {ready.text}")
         with transaction() as cursor:
             cursor.execute("SELECT current_setting('server_version') AS version")
             print(f"PostgreSQL {cursor.fetchone()['version']}", flush=True)

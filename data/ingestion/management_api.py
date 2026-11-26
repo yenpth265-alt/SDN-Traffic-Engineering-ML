@@ -1,7 +1,7 @@
 """Provisional run management and decision audit API. Does not control switches."""
 import json
 import psycopg2
-from datetime import timedelta
+from datetime import timedelta, timezone
 from hashlib import sha256
 from typing import Annotated, Literal
 
@@ -175,18 +175,45 @@ def record_decision(cursor, run, payload):
         route = routes.get(row.flow_group_id)
         if not route or route["verification_status"] != "VERIFIED" or route["path_id"] != row.old_path_id:
             raise store.Conflict("old_path_id differs from verified snapshot routing")
+
+    result = None
+    if all(row.old_path_id == row.proposed_path_id for row in payload.rows):
+        result = ApplyResult(
+            run_id=payload.run_id,
+            decision_batch_id=payload.decision_batch_id,
+            response_status="APPLIED",
+            response_state_version=payload.expected_state_version,
+            completed_at_utc=run["now"].astimezone(timezone.utc).isoformat(),
+            rows=[
+                ResultRow(
+                    flow_group_id=row.flow_group_id,
+                    actual_path_id=row.old_path_id,
+                    status="KEPT",
+                    verified_at_utc=routes[row.flow_group_id]["confirmed_at_utc"].astimezone(timezone.utc).isoformat(),
+                )
+                for row in sorted(payload.rows, key=lambda row: row.flow_group_id)
+            ],
+        )
+
     store.insert_once(cursor, "control_ticks", dict(run_id=payload.run_id, tick_id=payload.tick_id,
         tick_at_utc=payload.tick_at_utc, snapshot_id=payload.snapshot_id,
         forecast_batch_id=payload.forecast_batch_id, status="DECIDED", reason=None), ("run_id", "tick_id"))
-    store.insert_once(cursor, "decision_batches", dict(run_id=payload.run_id,
+    batch = dict(run_id=payload.run_id,
         decision_batch_id=payload.decision_batch_id, tick_id=payload.tick_id, snapshot_id=payload.snapshot_id,
         expected_state_version=payload.expected_state_version, optimizer_result=encoded(payload.optimizer_result),
-        request_payload=raw, request_hash=sha256(raw).hexdigest(), apply_deadline_utc=payload.apply_deadline_utc),
-        ("run_id", "decision_batch_id"))
+        request_payload=raw, request_hash=sha256(raw).hexdigest(), apply_deadline_utc=payload.apply_deadline_utc)
+    if result is not None:
+        batch.update(response_payload=encoded(result.model_dump(mode="json")),
+                     response_status=result.response_status, response_state_version=result.response_state_version,
+                     completed_at_utc=result.completed_at_utc)
+    store.insert_once(cursor, "decision_batches", batch, ("run_id", "decision_batch_id"))
+    kept_rows = {row.flow_group_id: row for row in result.rows} if result is not None else {}
     for row in payload.rows:
-        store.insert_once(cursor, "routing_decisions", dict(row.model_dump(), run_id=payload.run_id,
-            topology_id=run["topology_id"], decision_batch_id=payload.decision_batch_id),
-            ("run_id", "decision_batch_id", "flow_group_id"))
+        decision = dict(row.model_dump(), run_id=payload.run_id,
+                        topology_id=run["topology_id"], decision_batch_id=payload.decision_batch_id)
+        if kept := kept_rows.get(row.flow_group_id):
+            decision.update(kept.model_dump())
+        store.insert_once(cursor, "routing_decisions", decision, ("run_id", "decision_batch_id", "flow_group_id"))
     return {"inserted": 1}
 
 

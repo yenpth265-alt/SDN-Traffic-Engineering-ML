@@ -30,7 +30,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       SDN_DATABASE_URL: postgresql://sdn_qa:local_qa@127.0.0.1:5432/sdn_qa
-      PYTHONPATH: ${{ github.workspace }}/producer_src/ml:${{ github.workspace }}/producer_src/optimization:${{ github.workspace }}/producer_src/sdn
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/producer_src/ml:${{ github.workspace }}/producer_src/optimization:${{ github.workspace }}/producer_src/sdn
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
@@ -50,9 +50,11 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: ca405ecf6f6f595df979656d490e96e2fdce3cb8
+          ref: 2ec0a583d6482d1ebcb749167d4fafeb22a8ec5e
           path: producer_src/sdn
-          sparse-checkout: sdn
+          sparse-checkout: |
+            sdn
+            configs/network
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -65,9 +67,26 @@ jobs:
           psql "$SDN_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
             -f data/schemas/schema_postgresql_dbeaver.sql \
             -f data/schemas/002_online_routing.sql \
-            -f data/schemas/003_forecast_measurement_origin.sql
+            -f data/schemas/003_forecast_measurement_origin.sql \
+            -f data/schemas/004_decision_tick_order.sql
           psql "$SDN_DATABASE_URL" -X -v ON_ERROR_STOP=1 -c 'SELECT version FROM public.schema_migrations ORDER BY version'
       - name: Run PostgreSQL contract tests
         run: |
           python -m unittest -v data.ingestion.test_management_api \
             data.ingestion.test_online_ingestion testing.scripts.test_postgresql_contracts
+      - name: Verify SDN v1.4 fixtures
+        if: ${{ !cancelled() }}
+        run: python producer_src/sdn/sdn/fixtures/data_v14/verify_contract_fixtures.py --verify
+      - name: Run SDN v1.4 PostgreSQL integration with zero skips
+        if: ${{ !cancelled() }}
+        run: |
+          python - <<'PY'
+          import unittest
+
+          suite = unittest.defaultTestLoader.loadTestsFromName("sdn.tests.integration_postgres_v14")
+          if not suite.countTestCases():
+              raise SystemExit("No SDN PostgreSQL integration tests discovered")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.testsRun or result.skipped or not result.wasSuccessful():
+              raise SystemExit("SDN PostgreSQL integration must pass with zero skips")
+          PY

@@ -309,6 +309,7 @@ def ingest_snapshot(cursor, run, message, raw, digest):
         raise Conflict("Snapshot routing rows must match its run and state_version")
     routes = {
         row.flow_group_id: {
+            "flow_group_id": row.flow_group_id,
             "path_id": row.path_id,
             "confirmed_at_utc": row.confirmed_at,
             "verification_status": row.verification_status,

@@ -468,4 +468,6 @@ def get_ready_forecast(cursor, run, batch_id):
         SELECT * FROM public.predictions WHERE run_id=%s AND issued_at=%s
         ORDER BY flow_group_id, forecast_start
     """, (run["run_id"], batch["issued_at"]))
-    return dict(batch, rows=[dict(row) for row in cursor])
+    # This endpoint only reads from ready_forecast_batches, so a returned
+    # batch has passed Data's completeness checks and can be marked READY.
+    return dict(batch, status="READY", rows=[dict(row) for row in cursor])

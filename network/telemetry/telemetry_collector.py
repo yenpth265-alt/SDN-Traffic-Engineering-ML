@@ -6,7 +6,7 @@ computes port_tx_mbps for all 32 directed links (marking the 16 fabric links),
 writes `link_samples.csv`, and emits `LinkSampleBatch` JSONL/HTTP events.
 
 Usage:
-    python3 telemetry_collector.py --manifest run_manifest.json --config-dir artifacts/network
+    python3 telemetry_collector.py --manifest run_manifest.json --config-dir configs/network
     python3 telemetry_collector.py --manifest run_manifest.json --dry-run   # test without OVS
 """
 
@@ -138,11 +138,90 @@ def _post_batch_with_retry(
     return False, None, last_err
 
 
+class TelemetryOutbox:
+    """CF-32: Persistent ACK-tracked outbox for LinkSampleBatch replay across outages/restarts."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._pending: dict[str, dict] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+        with open(self.path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                op = rec.get("op")
+                bid = rec.get("batch_id")
+                if op == "add" and bid and isinstance(rec.get("payload"), dict):
+                    self._pending[bid] = rec["payload"]
+                elif op == "ack" and bid:
+                    self._pending.pop(bid, None)
+
+    def _append(self, rec: dict) -> None:
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            f.flush()
+
+    def add_if_missing(self, batch_id: str, payload: dict) -> None:
+        if batch_id not in self._pending:
+            self._pending[batch_id] = payload
+            self._append({"op": "add", "batch_id": batch_id, "payload": payload})
+
+    def ack(self, batch_id: str) -> None:
+        if batch_id in self._pending:
+            self._pending.pop(batch_id, None)
+            self._append({"op": "ack", "batch_id": batch_id})
+
+    def items(self) -> list[tuple[str, dict]]:
+        return list(self._pending.items())
+
+
+def flush_telemetry_outbox(
+    outbox: TelemetryOutbox,
+    telemetry_url: str | None,
+    *,
+    api_key: str | None = None,
+    timeout: float = 1.0,
+    backoff_base: float = 0.15,
+) -> None:
+    if not telemetry_url:
+        return
+    for idx, (batch_id, payload) in enumerate(outbox.items()):
+        if STOP:
+            break
+        body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ok, status_code, detail = _post_batch_with_retry(
+            url=telemetry_url,
+            body_bytes=body_bytes,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=0,
+            backoff_base=backoff_base,
+        )
+        if ok:
+            outbox.ack(batch_id)
+            print(f"[+] Replayed LinkSampleBatch {batch_id} (status={status_code})")
+        else:
+            print(f"[!] Telemetry outbox still pending for {batch_id} (status={status_code}): {detail}", file=sys.stderr)
+            time.sleep(min(1.0, backoff_base * (2 ** min(idx, 4))))
+            break
+
+
 def emit_batch_event(
     batch_event: dict,
     jsonl_fp=None,
     telemetry_url: str | None = None,
     *,
+    outbox: TelemetryOutbox | None = None,
     api_key: str | None = None,
     timeout: float = 1.0,
     max_retries: int = 3,
@@ -152,6 +231,7 @@ def emit_batch_event(
     if jsonl_fp is not None:
         jsonl_fp.write(payload + "\n")
         jsonl_fp.flush()
+    batch_id = batch_event["batch_id"]
     if telemetry_url:
         ok, status_code, detail = _post_batch_with_retry(
             url=telemetry_url,
@@ -161,9 +241,14 @@ def emit_batch_event(
             max_retries=max_retries,
             backoff_base=backoff_base,
         )
-        if not ok:
+        if ok:
+            if outbox is not None:
+                outbox.ack(batch_id)
+        else:
+            if outbox is not None:
+                outbox.add_if_missing(batch_id, batch_event)
             print(
-                f"[!] Warning: failed to POST LinkSampleBatch {batch_event['batch_id']} "
+                f"[!] Warning: failed to POST LinkSampleBatch {batch_id} "
                 f"(status={status_code}): {detail}",
                 file=sys.stderr,
             )
@@ -202,7 +287,7 @@ def _default_missing_sample(reason: str) -> tuple[int, dict]:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", required=True, help="Path to run_manifest.json")
-    ap.add_argument("--config-dir", default="artifacts/network", help="Directory containing links.csv")
+    ap.add_argument("--config-dir", default="configs/network", help="Directory containing links.csv")
     ap.add_argument("--outdir", default=None, help="Output directory (default: results/<run_id>)")
     ap.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)")
     ap.add_argument("--telemetry-url", default=None, help="Optional HTTP endpoint to push LinkSampleBatch events")
@@ -248,6 +333,15 @@ def main():
 
     csv_path = os.path.join(outdir, "link_samples.csv")
     jsonl_path = os.path.join(outdir, "link_samples.jsonl")
+    outbox = TelemetryOutbox(os.path.join(outdir, "telemetry_outbox.jsonl"))
+    if args.telemetry_url:
+        flush_telemetry_outbox(
+            outbox,
+            args.telemetry_url,
+            api_key=api_key,
+            timeout=args.telemetry_timeout,
+            backoff_base=args.telemetry_backoff,
+        )
 
     with open(csv_path, "w", encoding="utf-8", newline="") as fcsv, \
          open(jsonl_path, "w", encoding="utf-8") as fjson:
@@ -256,7 +350,7 @@ def main():
             "time_offset_s", "sampled_at_utc", "link_id", "from_node", "to_node",
             "measure_switch", "measure_port", "is_fabric", "capacity_mbps",
             "tx_bytes_total", "delta_bytes", "delta_t_s", "port_tx_mbps",
-            "utilization", "tx_drops_delta", "counter_status"
+            "utilization", "tx_drops_delta", "counter_status", "is_valid"
         ])
 
         for bin_idx in range(total_bins):
@@ -315,16 +409,18 @@ def main():
                 tx_mbps_val = _optional_float(delta_info.get("port_tx_mbps"), is_valid_measurement)
                 util_val = _optional_float(delta_info.get("utilization"), is_valid_measurement)
 
+                # CF-33: Keep missing values empty in CSV (matching JSON null) + explicit is_valid mask
                 writer.writerow([
                     bin_idx, sampled_at_utc, lid, sw, lk["to_node"],
                     sw, port, lk["is_fabric"], lk["capacity_mbps"],
-                    tx_bytes_total,
-                    delta_bytes_val if delta_bytes_val is not None else 0,
-                    delta_t_val if delta_t_val is not None else 0.0,
-                    tx_mbps_val if tx_mbps_val is not None else 0.0,
-                    util_val if util_val is not None else 0.0,
-                    drops_val if drops_val is not None else 0,
+                    tx_bytes_total if tx_bytes_total is not None else "",
+                    delta_bytes_val if delta_bytes_val is not None else "",
+                    delta_t_val if delta_t_val is not None else "",
+                    tx_mbps_val if tx_mbps_val is not None else "",
+                    util_val if util_val is not None else "",
+                    drops_val if drops_val is not None else "",
                     status_str,
+                    int(is_valid_measurement),
                 ])
 
                 if isinstance(port, int) and port > 0:
@@ -365,6 +461,7 @@ def main():
                 batch_event,
                 jsonl_fp=fjson,
                 telemetry_url=args.telemetry_url,
+                outbox=outbox,
                 api_key=api_key,
                 timeout=args.telemetry_timeout,
                 max_retries=args.telemetry_retries,

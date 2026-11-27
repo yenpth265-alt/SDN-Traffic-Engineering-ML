@@ -322,7 +322,7 @@ def main():
     ap.add_argument("--manifest", required=True, help="Path to run_manifest.json")
     ap.add_argument("--schedule", required=True, help="Path to demand_plan.csv")
     ap.add_argument("--schedule-id", default=None, help="Schedule ID filter (e.g., S1_seed01); falls back to manifest")
-    ap.add_argument("--config-dir", default="config", help="Directory containing flow_groups.csv")
+    ap.add_argument("--config-dir", default="configs/network", help="Directory containing flow_groups.csv")
     ap.add_argument("--outdir", default=None, help="Output directory (default: results/<run_id>)")
     ap.add_argument("--payload-size", type=int, default=1000, help="UDP payload size in bytes (default: 1000)")
     ap.add_argument("--flow-group", default=None, help="Optional single flow_group_id (e.g., 0x103) for testing")

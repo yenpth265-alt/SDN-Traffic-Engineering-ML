@@ -46,7 +46,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", required=True, help="Destination host, e.g., h5, or 'all'")
     ap.add_argument("--manifest", required=True, help="Path to run_manifest.json")
-    ap.add_argument("--config-dir", default="config", help="Directory containing flow_groups.csv")
+    ap.add_argument("--config-dir", default="configs/network", help="Directory containing flow_groups.csv")
     ap.add_argument("--outdir", default=None, help="Output directory (default: results/<run_id>)")
     ap.add_argument("--bind-ip", default="0.0.0.0", help="IP address to bind UDP sockets")
     ap.add_argument("--grace", type=float, default=2.0, help="Extra seconds to wait after drain phase")

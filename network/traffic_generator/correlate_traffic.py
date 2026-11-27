@@ -399,21 +399,23 @@ def _resolve_recv_metrics(
     *,
     has_any_recv_source: bool,
 ) -> tuple[int | None, int | None]:
-    if bysend_info is not None and bysend_info.get("packets_received") is not None:
-        recv_pkts: int | None = int(bysend_info["packets_received"])
-    elif seq_info is not None:
-        recv_pkts = int(seq_info["unique_seqs_received"])
-    elif has_any_recv_source:
-        recv_pkts = None
-    else:
-        recv_pkts = 0
+    # CF-29: Missing receiver logs -> None (never confuse missing evidence with observed 0)
+    if not has_any_recv_source:
+        return None, None
 
+    # CF-30: Prefer unique sequence count from packet log to avoid duplicate/retrans inflation
+    if seq_info is not None and seq_info.get("unique_seqs_received") is not None:
+        recv_pkts: int | None = int(seq_info["unique_seqs_received"])
+    elif bysend_info is not None and bysend_info.get("packets_received") is not None:
+        recv_pkts = int(bysend_info["packets_received"])
+    else:
+        recv_pkts = None
+
+    # CF-31: Keep bytes_received as None when byte counter is missing (do not coerce to 0)
     if bysend_info is not None and bysend_info.get("bytes_received") is not None:
         recv_bytes: int | None = int(bysend_info["bytes_received"])
-    elif recv_pkts is None:
-        recv_bytes = None
     else:
-        recv_bytes = 0
+        recv_bytes = None
 
     return recv_pkts, recv_bytes
 
@@ -469,19 +471,19 @@ def build_correlated_rows(
             has_any_recv_source=has_any_recv_source,
         )
 
+        # CF-29: Missing sender logs -> None instead of fabricating 0
         if sent.get("has_sent_log"):
             pkts_sent: int | None = sent.get("packets_sent")
             bytes_sent: int | None = sent.get("bytes_sent")
             late_pkts: int | None = sent.get("late_packets")
-        elif not sent_map:
-            pkts_sent, bytes_sent, late_pkts = 0, 0, 0
         else:
             pkts_sent, bytes_sent, late_pkts = None, None, None
 
         actual_mbps = round((recv_bytes * 8.0) / 1e6, 6) if recv_bytes is not None else None
-        if pkts_sent is not None and recv_pkts is not None:
-            lost_cohort: int | None = max(0, pkts_sent - recv_pkts)
-            loss_ratio: float | None = round(lost_cohort / pkts_sent, 6) if pkts_sent > 0 else 0.0
+        # CF-30: Denominator == 0 -> loss_ratio is None (N/A), never 0.0
+        if pkts_sent is not None and recv_pkts is not None and pkts_sent > 0:
+            lost_cohort: int | None = pkts_sent - recv_pkts
+            loss_ratio: float | None = round(lost_cohort / pkts_sent, 6)
         else:
             lost_cohort = None
             loss_ratio = None

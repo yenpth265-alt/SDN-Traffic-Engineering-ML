@@ -124,7 +124,7 @@ class OptimizationServiceClient:
         )
         return body
 
-   def poll_apply_status(
+    def poll_apply_status(
         self,
         decision_batch_id: str,
         status_endpoint: str | None = None,

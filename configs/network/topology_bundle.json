@@ -1,10 +1,10 @@
 {
   "schema_version": "1.0",
   "producer": "network",
-  "produced_at_utc": "2026-11-13T16:09:45Z",
+  "produced_at_utc": "2026-11-27T14:12:19Z",
   "topology_version": "v1.0",
   "topology_hash": "ec6c6969019b1c36744339fb54f0f608c95402ae972859b30710dc44b5dc3956",
-  "ovs_port_mapping_verified": true,
+  "ovs_port_mapping_verified": false,
   "summary": {
     "host_count": 8,
     "switch_count": 6,

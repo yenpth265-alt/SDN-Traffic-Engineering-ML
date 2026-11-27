@@ -1,7 +1,8 @@
 # SDN v1.4 Cross-Role Integration Profile & QA G1/G2 Handoff Runbook
 
 - **SDN Branch:** `feature/sdn-data-contract-v14` (Phase 13 baseline `2ec0a583d6482d1ebcb749167d4fafeb22a8ec5e` already merged into `main`)
-- **Data / Main Baseline:** `origin/main` @ `b6ebec73f904e1d2418b7c5724afc86da193a4ee`
+- **Data / Main Baseline:** `origin/main` @ `f6195ad64c95c5750c47056e314eba2371a9b07a`
+- **Preflight & Runner Readiness Script (CF-27):** `python sdn/scripts/preflight_and_launch_v14.py --check-data-health --wait-ready`
 - **Scope:** Production/Integration `data_v1` profile for SDN Controller (legacy `http_sqlite` mode remains the backward-compatible default for standalone testing).
 
 ---
@@ -63,12 +64,11 @@ When `SDN_STRICT_INTEGRATION_PROFILE=1`, `S0ControllerOrchestrator` refuses to s
 
 ## 4. Confirmed Cross-Role Contract Findings (External Owners — Do Not Patch in SDN)
 
-Audited against `origin/main` (`b6ebec73f904e1d2418b7c5724afc86da193a4ee`), `origin/feat/optimization-g0` (`903cb0da09f8f5afa268141507816e9627032b07`), and `origin/feat/ml-offline-data-v14` (`c551911b4f95f00f7051fed03a3d715a05847193`):
+Audited against `origin/main` (`f6195ad64c95c5750c47056e314eba2371a9b07a`), `origin/feat/optimization-g0` (`029380a`), and `origin/feat/ml-offline-data-v14` (`c551911b4f95f00f7051fed03a3d715a05847193`):
 
-1. **Optimization (`DecisionBatch` strict Data schema):** `data/ingestion/management_api.py` enforces strict `Decision` (10 top-level fields) and `DecisionRow` (3 fields: `flow_group_id`, `old_path_id`, `proposed_path_id`) with `extra="forbid"`. Current `feat/optimization-g0` fixtures (`decision_batch_48_flows.json`, `decision_batch_b0_kept.json`) emit 29 top-level keys and 9 per-row keys; extra metadata must be placed inside `optimizer_result` only.
-2. **Optimization (`tick_id` type):** `Decision.tick_id` in Data API is a non-empty string (`ID`), whereas `feat/optimization-g0` fixtures emit integer `tick_id` (`100`, `101`). Optimization must serialize `tick_id` as a string.
-3. **Optimization (`data_sync_gate.optimization_tick_eligible`):** `optimization/service_client.py` must explicitly inspect SDN `GET /health` or `GET /routing-state` -> `data_sync_gate.optimization_tick_eligible` and skip/defer optimization ticks whenever `false`.
-4. **Optimization (no silent `> B` truncation):** Optimizer/serializer must never silently truncate more than `B` flow changes; infeasible or over-budget plans must be rejected/audited explicitly rather than sliced.
-5. **Runner / Optimization (register `DecisionBatch` before SDN `/apply`):** `POST /v1/optimization/decisions` must receive persistence ACK (`200`) from Data **before** calling SDN `POST /apply` with that `decision_batch_id` so SDN's post-apply `ApplyResult` audit lookup never hits `404`.
-6. **Optimization / Data / Runner (`B = 0` no-op audit policy):** When `changed_flows == 0` (`old_path_id == proposed_path_id` for all 48 flows), follow the approved no-op audit policy (Data auto-records 48 `KEPT` rows on `POST /v1/optimization/decisions` and SDN is not called with an empty `ApplyRequest`, or SDN uses `build_noop_48_flow_apply_result_data_v1` if explicitly audited).
-7. **ML (`origin/feat/ml-offline-data-v14`):** `ml/inference/online.py` is aligned with SDN canonical `{"sdn": <SDNSnapshotV14>}` (`unwrap_snapshot`) and `X-Content-SHA256` verification via `hmac.compare_digest`.
+1. **Network (`configs/network/topology_bundle.json` on `main` @ `c6ac4c2`):** `topology_version` was edited from `"1.0"` to `"v1.0"` without recomputing `topology_hash` (`2fa43f87...` stored vs `ec6c6969...` computed by `network/topology/exporter.py`). CSV catalogs (`flow_groups.csv`, `candidate_paths.csv`, `links.csv`, `initial_paths.csv`) are unchanged and consistent. Network owner must either revert `topology_version` to `"1.0"` (zero hash churn) or re-export with `exporter.py` and propagate the new hash.
+2. **Optimization (`origin/feat/optimization-g0` @ `029380a`):**
+   - **Resolved in `029380a`:** New wire fixtures (`optimization/fixtures/decision_batch_wire_reroute.json`, `decision_batch_wire_zero_b.json`) match Data's strict 10-field `Decision` + 3-field `DecisionRow` schema with `tick_id: str`, and `service_client.py` posts `DecisionBatch` before `/apply` and follows `poll_url` with `run_id`.
+   - **Remaining:** (a) Legacy fixtures under `optimization/fixtures/sdn_v14/decision_batch_*.json` still carry 29 top-level keys, 9 per-row keys, and integer `tick_id`; (b) `optimization/fixtures/apply_request_reroute.json` is JSON `null`; (c) `service_client.py` does not yet gate ticks on SDN `data_sync_gate.optimization_tick_eligible == True` (and should check `job_state` alongside HTTP `202` when polling `/apply-status`).
+3. **Runner:** Must run `sdn/scripts/preflight_and_launch_v14.py --check-data-health --wait-ready` (CF-27) before opening ticks, and must ensure `POST /v1/optimization/decisions` receives Data ACK (`200`) before SDN `POST /apply`.
+4. **ML (`origin/feat/ml-offline-data-v14` @ `c551911b`):** Aligned with SDN canonical `{"sdn": <SDNSnapshotV14>}` (`unwrap_snapshot`) and `X-Content-SHA256` verification via `hmac.compare_digest`. CF-21 `L=30` (`48 x 30 = 1,440` genuine observations) is covered by `sdn/tests/test_cf21_ml_l30_snapshot.py` and `sdn/tests/integration_postgres_v14.py::test_cf21_ml_l30_snapshot_48x30_1440_observations`.

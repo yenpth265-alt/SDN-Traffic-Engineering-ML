@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,7 +58,7 @@ from sdn.flow_management.switch_driver import InMemorySwitchDriver
 from sdn.monitoring.snapshot_creator import SnapshotCreator
 from sdn.route_verification.rule_verifier import RuleVerifier
 from sdn.schemas.apply_models import ApplyFlowResult, ApplyResponse
-from sdn.schemas.snapshot_models import OriginRefs
+from sdn.schemas.snapshot_models import OriginRefs, SnapshotQualityStatus
 from sdn.schemas.state_models import (
     BatchStatus,
     FlowDecisionStatus,
@@ -186,13 +187,35 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
         resp = self._client.post(path, content=raw, headers=headers)
         return int(resp.status_code), resp.text
 
+    def _align_fresh_cutoff(self, meas_start: datetime) -> tuple[int, datetime]:
+        """
+        Return `(cutoff_offset_s, w_end)` aligned to the latest completed 1s measurement bin
+        relative to PostgreSQL `clock_timestamp()`, waiting briefly if >0.45s into the current
+        second so subsequent 48-flow demand ingestion finishes well within `T_stale = 2.0s`.
+        """
+        with self._transaction() as cursor:
+            cursor.execute("SELECT clock_timestamp() AS now")
+            now_dt = cursor.fetchone()["now"]
+        elapsed = (now_dt - meas_start).total_seconds()
+        subsec = elapsed - int(elapsed)
+        if subsec > 0.45:
+            time.sleep(min(0.6, 1.02 - subsec))
+            with self._transaction() as cursor:
+                cursor.execute("SELECT clock_timestamp() AS now")
+                now_dt = cursor.fetchone()["now"]
+            elapsed = (now_dt - meas_start).total_seconds()
+        cutoff = max(1, int(elapsed))
+        w_end = meas_start + timedelta(seconds=cutoff)
+        return cutoff, w_end
+
     def test_end_to_end_contracts_1_2_3_against_real_postgres(self) -> None:
         run_id = f"sdn-pg-v14-{uuid4().hex[:12]}"
         with self._transaction() as cursor:
             cursor.execute("SELECT clock_timestamp() AS now")
             db_now = cursor.fetchone()["now"]
 
-        # Anchor origins safely in the past relative to DB clock_timestamp()
+        # Anchor origins in the past relative to DB clock_timestamp(); cutoff will be aligned
+        # to the latest completed 1s bin after RoutingState v1 ACK so Snapshot is genuinely VALID.
         meas_start = (db_now - timedelta(seconds=10)).replace(microsecond=0)
         traffic_start = meas_start - timedelta(seconds=60)
         run_start = traffic_start - timedelta(seconds=5)
@@ -214,28 +237,11 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
                 "config_version": "1.0",
                 "config_hash": "sdn_config_v1_hash",
                 "lookback_bins": 1,
-                "git_commit": "8015f7d01c2eae9eee52282e4987807827ddfed6",
+                "git_commit": "cc202c9e6317cec448f33245ec76e27410810dc4",
                 "manifest": {"suite": "sdn_pg_v14"},
             },
         )
         self.assertEqual(reg.status_code, 200, reg.text)
-
-        # Contract 1: Network DemandRelease -> Data PG -> SDN DataAPIDemandHistoryProvider
-        w_start = meas_start
-        w_end = meas_start + timedelta(seconds=1)
-        for fg in self._topo.get_all_flow_groups():
-            ev = {
-                "run_id": run_id,
-                "flow_group_id": fg.flow_group_id,
-                "bin_index": 60,  # traffic-origin bin 60 == measurement-origin bin 0
-                "window_start_utc": _fmt_utc_sec(w_start),
-                "window_end_utc": _fmt_utc_sec(w_end),
-                "requested_mbps": 2.5,
-                "released_at_utc": _fmt_utc_sec(w_end),
-                "event_id": f"net:{run_id}:{fg.flow_group_id}:60",
-            }
-            r_dem = self._client.post("/v1/network/demand", headers={"X-API-Key": "qa-network"}, json=ev)
-            self.assertEqual(r_dem.status_code, 200, r_dem.text)
 
         # Bootstrap SDN RoutingState v1 -> publish RoutingState v1 to real Data API -> confirm ACK
         drv = InMemorySwitchDriver(self._topo)
@@ -261,10 +267,29 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
             r_rt1 = pub.publish_routing_state(rs_v1, deliver_now=True)
             self.assertEqual(r_rt1.status, DeliveryStatus.DELIVERED, r_rt1.last_error)
 
-            # Query fresh DB clock_timestamp() AFTER RoutingState v1 persistence ACK so both
-            # demand_observations.available_at_utc <= snapshot_as_of_utc AND
-            # routing_versions(v1).available_at_utc <= snapshot_as_of_utc hold causally,
-            # while preserving the original history_cutoff_utc (w_end, cutoff=1).
+            # Contract 1: Align cutoff to the latest completed 1s measurement bin (fresh within T_stale=2.0s)
+            # and ingest all 48 genuine Network DemandRelease observations for [cutoff-1, cutoff).
+            cutoff, w_end = self._align_fresh_cutoff(meas_start)
+            w_start = w_end - timedelta(seconds=1)
+            traffic_bin_idx = 60 + (cutoff - 1)
+            for fg in self._topo.get_all_flow_groups():
+                ev = {
+                    "run_id": run_id,
+                    "flow_group_id": fg.flow_group_id,
+                    "bin_index": traffic_bin_idx,
+                    "window_start_utc": _fmt_utc_sec(w_start),
+                    "window_end_utc": _fmt_utc_sec(w_end),
+                    "requested_mbps": 2.5,
+                    "released_at_utc": _fmt_utc_sec(w_end),
+                    "event_id": f"net:{run_id}:{fg.flow_group_id}:{traffic_bin_idx}",
+                }
+                r_dem = self._client.post("/v1/network/demand", headers={"X-API-Key": "qa-network"}, json=ev)
+                self.assertEqual(r_dem.status_code, 200, r_dem.text)
+
+            # Query fresh DB clock_timestamp() AFTER BOTH RoutingState v1 ACK AND demand ingestion
+            # so routing_versions(v1).available_at_utc <= snapshot_as_of_utc,
+            # demand_observations.available_at_utc <= snapshot_as_of_utc, AND
+            # (snapshot_as_of_utc - history_cutoff_utc) <= T_stale (2.0s).
             with self._transaction() as cursor:
                 cursor.execute("SELECT clock_timestamp() AS now")
                 as_of_dt = cursor.fetchone()["now"]
@@ -285,7 +310,7 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
             )
             self.assertEqual(len(fetched), 48)
 
-            # Contract 2: Build canonical Snapshot v1.4 -> POST exact bytes + X-Content-SHA256 -> GET byte/hash parity
+            # Contract 2: Build canonical Snapshot v1.4 -> assert VALID -> POST exact bytes + X-Content-SHA256 -> GET parity
             sc = SnapshotCreator(self._topo, sm, provider)
             origins = OriginRefs(
                 run_started_at_utc=_fmt_utc_sec(run_start),
@@ -297,13 +322,20 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
             snap = provider.create_snapshot_via_data(
                 sc,
                 run_id=run_id,
-                cutoff=1,
+                cutoff=cutoff,
                 lookback_L=1,
                 snapshot_as_of_utc=_fmt_utc(as_of_dt),
                 origin_refs=origins,
             )
             self.assertEqual(snap.history_cutoff_utc, _fmt_utc_sec(w_end))
             self.assertEqual(snap.snapshot_as_of_utc, _fmt_utc(as_of_dt))
+            self.assertEqual(
+                snap.quality_status,
+                SnapshotQualityStatus.VALID,
+                f"Expected VALID snapshot, got {snap.quality_status} (reason={snap.reason}, "
+                f"cutoff={snap.history_cutoff_utc}, as_of={snap.snapshot_as_of_utc})",
+            )
+            self.assertIsNone(snap.reason)
             _, expected_snap_bytes, expected_snap_sha = map_snapshot_to_data_v1(snap)
 
             r_sn = pub.publish_snapshot(snap, deliver_now=True)
@@ -483,6 +515,326 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
                 )
                 counts = {r["status"]: r["n"] for r in cursor.fetchall()}
                 self.assertEqual(counts, {"APPLIED": 1, "KEPT": 47})
+
+    def test_stale_snapshot_rejected_for_optimization_decision(self) -> None:
+        """
+        CF-28 Negative Test:
+        Intentionally construct a Snapshot whose `history_cutoff_utc` is > T_stale (2.0s)
+        older than `snapshot_as_of_utc` (`quality_status=STALE`, `reason=DATA_STALE`).
+        Verify Data accepts and preserves exact bytes/SHA-256 on `/v1/sdn/snapshots`,
+        and REJECTS (`409 Conflict`) any `/v1/optimization/decisions` referencing it.
+        """
+        run_id = f"sdn-pg-stale-{uuid4().hex[:12]}"
+        with self._transaction() as cursor:
+            cursor.execute("SELECT clock_timestamp() AS now")
+            db_now = cursor.fetchone()["now"]
+
+        meas_start = (db_now - timedelta(seconds=12)).replace(microsecond=0)
+        traffic_start = meas_start - timedelta(seconds=60)
+        run_start = traffic_start - timedelta(seconds=5)
+
+        reg = self._client.post(
+            "/v1/runs",
+            headers={"X-API-Key": "qa-runner"},
+            json={
+                "run_id": run_id,
+                "topology_id": self._topology_id,
+                "mode": "live",
+                "method_id": "M0",
+                "run_started_at_utc": _fmt_utc_sec(run_start),
+                "traffic_started_at_utc": _fmt_utc_sec(traffic_start),
+                "measurement_started_at_utc": _fmt_utc_sec(meas_start),
+                "warmup_s": 60,
+                "measurement_s": 360,
+                "schema_version": "1.0",
+                "config_version": "1.0",
+                "config_hash": "sdn_config_v1_hash",
+                "lookback_bins": 1,
+                "git_commit": "cc202c9e6317cec448f33245ec76e27410810dc4",
+                "manifest": {"suite": "sdn_pg_v14_stale_negative"},
+            },
+        )
+        self.assertEqual(reg.status_code, 200, reg.text)
+
+        # Ingest bin 0 (meas_start..meas_start+1s -> ~11s old -> intentionally STALE!)
+        w_start = meas_start
+        w_end = meas_start + timedelta(seconds=1)
+        for fg in self._topo.get_all_flow_groups():
+            r_dem = self._client.post(
+                "/v1/network/demand",
+                headers={"X-API-Key": "qa-network"},
+                json={
+                    "run_id": run_id,
+                    "flow_group_id": fg.flow_group_id,
+                    "bin_index": 60,
+                    "window_start_utc": _fmt_utc_sec(w_start),
+                    "window_end_utc": _fmt_utc_sec(w_end),
+                    "requested_mbps": 2.5,
+                    "released_at_utc": _fmt_utc_sec(w_end),
+                    "event_id": f"net:{run_id}:{fg.flow_group_id}:60",
+                },
+            )
+            self.assertEqual(r_dem.status_code, 200, r_dem.text)
+
+        drv = InMemorySwitchDriver(self._topo)
+        comp = RouteCompiler(self._topo, FlowMatcher(self._topo))
+        inst = RuleInstaller(comp, drv, RuleVerifier(comp, drv))
+        sm = StateManager(self._topo)
+        boot_ts = _fmt_utc_sec(run_start + timedelta(seconds=1))
+        evs = inst.bootstrap_initial_paths(run_id, boot_ts)
+        sm.initialize_run(run_id, boot_ts, verification_evidences=evs)
+        rs_v1 = sm.get_routing_state(run_id)
+
+        with tempfile.TemporaryDirectory() as td:
+            pub = DataEventPublisher(
+                DataPublisherConfig(
+                    endpoint_base_url="http://testserver",
+                    outbox_dir=Path(td),
+                    api_mode="data_v1",
+                    api_key="qa-sdn",
+                    max_retries=1,
+                ),
+                sender_fn=self._testclient_post,
+            )
+            r_rt1 = pub.publish_routing_state(rs_v1, deliver_now=True)
+            self.assertEqual(r_rt1.status, DeliveryStatus.DELIVERED, r_rt1.last_error)
+
+            with self._transaction() as cursor:
+                cursor.execute("SELECT clock_timestamp() AS now")
+                as_of_dt = cursor.fetchone()["now"]
+
+            provider = DataAPIDemandHistoryProvider(
+                DataDemandHistoryConfig(
+                    endpoint_base_url="http://testserver",
+                    api_key="qa-sdn",
+                    timeout_s=5.0,
+                ),
+                http_get_fn=self._testclient_get,
+            )
+            sc = SnapshotCreator(self._topo, sm, provider)
+            origins = OriginRefs(
+                run_started_at_utc=_fmt_utc_sec(run_start),
+                traffic_started_at_utc=_fmt_utc_sec(traffic_start),
+                measurement_started_at_utc=_fmt_utc_sec(meas_start),
+                warmup_s=60,
+                delta_s=1,
+            )
+            snap = provider.create_snapshot_via_data(
+                sc,
+                run_id=run_id,
+                cutoff=1,
+                lookback_L=1,
+                snapshot_as_of_utc=_fmt_utc(as_of_dt),
+                origin_refs=origins,
+            )
+            self.assertEqual(snap.quality_status, SnapshotQualityStatus.STALE)
+            self.assertEqual(snap.reason, "DATA_STALE")
+
+            _, expected_bytes, expected_sha = map_snapshot_to_data_v1(snap)
+            r_sn = pub.publish_snapshot(snap, deliver_now=True)
+            self.assertEqual(r_sn.status, DeliveryStatus.DELIVERED, r_sn.last_error)
+
+            got = self._client.get(
+                f"/v1/runs/{run_id}/snapshots/{snap.snapshot_id}",
+                headers={"X-API-Key": "qa-reader"},
+            )
+            self.assertEqual(got.status_code, 200, got.text)
+            self.assertEqual(got.content, expected_bytes)
+            self.assertEqual(got.headers["X-Content-SHA256"], expected_sha)
+
+            with self._transaction() as cursor:
+                cursor.execute("SELECT clock_timestamp() AS now")
+                tick_dt = cursor.fetchone()["now"]
+
+            dec_rows = [
+                {
+                    "flow_group_id": fg.flow_group_id,
+                    "old_path_id": f"{fg.flow_group_id}_P1",
+                    "proposed_path_id": "0x103_P2" if fg.flow_group_id == "0x103" else f"{fg.flow_group_id}_P1",
+                }
+                for fg in self._topo.get_all_flow_groups()
+            ]
+            r_dec = self._client.post(
+                "/v1/optimization/decisions",
+                headers={"X-API-Key": "qa-optimization"},
+                json={
+                    "run_id": run_id,
+                    "decision_batch_id": f"stale-batch-{uuid4().hex[:8]}",
+                    "tick_id": f"tick-stale-{uuid4().hex[:8]}",
+                    "tick_at_utc": _fmt_utc(tick_dt),
+                    "snapshot_id": snap.snapshot_id,
+                    "forecast_batch_id": None,
+                    "expected_state_version": rs_v1.state_version,
+                    "apply_deadline_utc": _fmt_utc(tick_dt + timedelta(seconds=30)),
+                    "optimizer_result": {"changed": 1},
+                    "rows": dec_rows,
+                },
+            )
+            self.assertEqual(r_dec.status_code, 409, f"Expected 409 on STALE snapshot decision, got {r_dec.status_code}: {r_dec.text}")
+            self.assertIn("VALID", r_dec.text)
+
+    def test_cf21_ml_l30_snapshot_48x30_1440_observations(self) -> None:
+        """
+        CF-21 Real PostgreSQL Integration Test for ML L=30 Model:
+        - lookback_L = 30, cutoff >= 30 measurement bins
+        - 48 canonical flow groups x 30 bins = 1,440 genuine non-padded demand observations
+        - 48 VERIFIED routing paths
+        - Retrieved via real Data API `/v1/runs/{run_id}/demand`, published via `/v1/sdn/snapshots`,
+          and verified for VALID status + exact canonical byte/X-Content-SHA256 parity.
+        """
+        run_id = f"sdn-pg-l30-{uuid4().hex[:12]}"
+        with self._transaction() as cursor:
+            cursor.execute("SELECT clock_timestamp() AS now")
+            db_now = cursor.fetchone()["now"]
+
+        meas_start = (db_now - timedelta(seconds=32)).replace(microsecond=0)
+        traffic_start = meas_start - timedelta(seconds=60)
+        run_start = traffic_start - timedelta(seconds=5)
+
+        reg = self._client.post(
+            "/v1/runs",
+            headers={"X-API-Key": "qa-runner"},
+            json={
+                "run_id": run_id,
+                "topology_id": self._topology_id,
+                "mode": "live",
+                "method_id": "M0",
+                "run_started_at_utc": _fmt_utc_sec(run_start),
+                "traffic_started_at_utc": _fmt_utc_sec(traffic_start),
+                "measurement_started_at_utc": _fmt_utc_sec(meas_start),
+                "warmup_s": 60,
+                "measurement_s": 360,
+                "schema_version": "1.0",
+                "config_version": "1.0",
+                "config_hash": "sdn_config_v1_hash",
+                "lookback_bins": 30,
+                "git_commit": "cc202c9e6317cec448f33245ec76e27410810dc4",
+                "manifest": {"suite": "sdn_pg_v14_cf21_l30"},
+            },
+        )
+        self.assertEqual(reg.status_code, 200, reg.text)
+
+        drv = InMemorySwitchDriver(self._topo)
+        comp = RouteCompiler(self._topo, FlowMatcher(self._topo))
+        inst = RuleInstaller(comp, drv, RuleVerifier(comp, drv))
+        sm = StateManager(self._topo)
+        boot_ts = _fmt_utc_sec(run_start + timedelta(seconds=1))
+        evs = inst.bootstrap_initial_paths(run_id, boot_ts)
+        sm.initialize_run(run_id, boot_ts, verification_evidences=evs)
+        rs_v1 = sm.get_routing_state(run_id)
+
+        with tempfile.TemporaryDirectory() as td:
+            pub = DataEventPublisher(
+                DataPublisherConfig(
+                    endpoint_base_url="http://testserver",
+                    outbox_dir=Path(td),
+                    api_mode="data_v1",
+                    api_key="qa-sdn",
+                    max_retries=1,
+                ),
+                sender_fn=self._testclient_post,
+            )
+            r_rt1 = pub.publish_routing_state(rs_v1, deliver_now=True)
+            self.assertEqual(r_rt1.status, DeliveryStatus.DELIVERED, r_rt1.last_error)
+
+            fgs = self._topo.get_all_flow_groups()
+
+            def _ingest_bin(meas_bin: int) -> None:
+                ws = meas_start + timedelta(seconds=meas_bin)
+                we = meas_start + timedelta(seconds=meas_bin + 1)
+                t_bin = 60 + meas_bin
+                for idx, fg in enumerate(fgs):
+                    val = round(1.5 + (idx * 0.05) + (meas_bin * 0.02), 4)
+                    r_dem = self._client.post(
+                        "/v1/network/demand",
+                        headers={"X-API-Key": "qa-network"},
+                        json={
+                            "run_id": run_id,
+                            "flow_group_id": fg.flow_group_id,
+                            "bin_index": t_bin,
+                            "window_start_utc": _fmt_utc_sec(ws),
+                            "window_end_utc": _fmt_utc_sec(we),
+                            "requested_mbps": val,
+                            "released_at_utc": _fmt_utc_sec(we),
+                            "event_id": f"net:{run_id}:{fg.flow_group_id}:{t_bin}",
+                        },
+                    )
+                    self.assertEqual(r_dem.status_code, 200, r_dem.text)
+
+            # Ingest initial 30 bins (0..29), then catch up to latest completed bin so cutoff >= 30 is VALID (<= T_stale)
+            for b in range(30):
+                _ingest_bin(b)
+            next_bin = 30
+            cutoff, w_end = self._align_fresh_cutoff(meas_start)
+            while next_bin < cutoff:
+                _ingest_bin(next_bin)
+                next_bin += 1
+            # Re-check if clock ticked during catch-up; ingest final bin if needed
+            with self._transaction() as cursor:
+                cursor.execute("SELECT clock_timestamp() AS now")
+                as_of_dt = cursor.fetchone()["now"]
+            if (as_of_dt - w_end).total_seconds() > 1.5:
+                cutoff, w_end = self._align_fresh_cutoff(meas_start)
+                while next_bin < cutoff:
+                    _ingest_bin(next_bin)
+                    next_bin += 1
+                with self._transaction() as cursor:
+                    cursor.execute("SELECT clock_timestamp() AS now")
+                    as_of_dt = cursor.fetchone()["now"]
+
+            self.assertGreaterEqual(cutoff, 30)
+            provider = DataAPIDemandHistoryProvider(
+                DataDemandHistoryConfig(
+                    endpoint_base_url="http://testserver",
+                    api_key="qa-sdn",
+                    timeout_s=10.0,
+                ),
+                http_get_fn=self._testclient_get,
+            )
+            fetched = provider.fetch_demand_history(
+                run_id,
+                history_cutoff_utc=_fmt_utc_sec(w_end),
+                snapshot_as_of_utc=_fmt_utc(as_of_dt),
+                lookback_L=30,
+            )
+            self.assertEqual(len(fetched), 48 * 30)
+
+            sc = SnapshotCreator(self._topo, sm, provider)
+            origins = OriginRefs(
+                run_started_at_utc=_fmt_utc_sec(run_start),
+                traffic_started_at_utc=_fmt_utc_sec(traffic_start),
+                measurement_started_at_utc=_fmt_utc_sec(meas_start),
+                warmup_s=60,
+                delta_s=1,
+            )
+            snap = provider.create_snapshot_via_data(
+                sc,
+                run_id=run_id,
+                cutoff=cutoff,
+                lookback_L=30,
+                snapshot_as_of_utc=_fmt_utc(as_of_dt),
+                origin_refs=origins,
+            )
+            self.assertEqual(snap.lookback_L, 30)
+            self.assertGreaterEqual(snap.cutoff_offset_s, 30)
+            self.assertEqual(snap.expected_bin_count, 1440)
+            self.assertEqual(snap.valid_bin_count, 1440)
+            self.assertEqual(len(snap.history), 1440)
+            self.assertEqual(len(snap.routing_state), 48)
+            self.assertTrue(all(item.valid and item.requested_mbps is not None and item.requested_mbps > 0.0 for item in snap.history))
+            self.assertEqual(snap.quality_status, SnapshotQualityStatus.VALID, f"reason={snap.reason}")
+
+            _, expected_bytes, expected_sha = map_snapshot_to_data_v1(snap)
+            r_sn = pub.publish_snapshot(snap, deliver_now=True)
+            self.assertEqual(r_sn.status, DeliveryStatus.DELIVERED, r_sn.last_error)
+
+            got = self._client.get(
+                f"/v1/runs/{run_id}/snapshots/{snap.snapshot_id}",
+                headers={"X-API-Key": "qa-reader"},
+            )
+            self.assertEqual(got.status_code, 200, got.text)
+            self.assertEqual(got.content, expected_bytes)
+            self.assertEqual(got.headers["X-Content-SHA256"], expected_sha)
 
 
 if __name__ == "__main__":

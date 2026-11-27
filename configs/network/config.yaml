@@ -1,6 +1,6 @@
 topology: leaf-spine
 config_version: v1.0
-config_hash: 94b0faeea10d8fc4f4a075efc1d31986c12bfc2014b8b126464808184a976212
+network_config_hash: 7d1c31a7e4d8ec6e7a4a7807521a9f473644381cf84caa2fc577b998bd344258
 arp_policy: static_entry_no_flood
 switches:
   edge:

@@ -145,3 +145,32 @@ def compute_config_hash(
     if short_len is not None and short_len > 0:
         digest = digest[:short_len]
     return f"{prefix}{digest}"
+
+DEFAULT_LOCKED_CONFIG_FILES: tuple[str, ...] = (
+    "configs/network/config.yaml",
+    "configs/network/links.csv",
+    "configs/network/flow_groups.csv",
+)
+
+
+def populate_run_config_hash(
+    manifest: dict,
+    base_dir: str | os.PathLike | None = None,
+    config_paths: list[str | os.PathLike] | tuple[str | os.PathLike, ...] | None = None,
+) -> str:
+    """Computes and sets 64-hex run config_hash from locked config files + static manifest."""
+    root = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
+    candidates = list(config_paths) if config_paths is not None else list(DEFAULT_LOCKED_CONFIG_FILES)
+    existing_paths = [
+        p for p in candidates
+        if (Path(p) if Path(p).is_absolute() else (root / p)).exists()
+    ]
+    digest = compute_config_hash(
+        config_paths=existing_paths,
+        manifest=manifest,
+        base_dir=root,
+        prefix="",
+    )
+    manifest["config_hash"] = digest
+    return digest
+

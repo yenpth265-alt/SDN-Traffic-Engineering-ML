@@ -3,6 +3,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from optimization.input_validator import resolve_flow_path_id
+
 try:
     from sdn.schemas.apply_models import compute_apply_payload_hash as _sdn_compute_hash
 except ImportError:
@@ -43,15 +45,9 @@ def _resolve_forecast_batch_id(forecast_data: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _extract_decision_batch_bounds(
-    forecast_data: Mapping[str, Any], now_utc: datetime
-) -> tuple[int | str, int | str]:
-    f_start = forecast_data.get("forecast_start")
-    if f_start is None:
-        f_start = forecast_data.get("forecast_start_utc")
-    f_end = forecast_data.get("forecast_end")
-    if f_end is None:
-        f_end = forecast_data.get("forecast_end_utc")
+def _extract_decision_batch_bounds(forecast_data: Mapping[str, Any], now_utc: datetime) -> tuple[int | str, int | str]:
+    f_start = forecast_data.get("forecast_start") if "forecast_start" in forecast_data else forecast_data.get("forecast_start_utc")
+    f_end = forecast_data.get("forecast_end") if "forecast_end" in forecast_data else forecast_data.get("forecast_end_utc")
 
     if (
         isinstance(f_start, int)
@@ -66,10 +62,7 @@ def _extract_decision_batch_bounds(
     return s_str, e_str
 
 
-def _extract_apply_request_utc_bounds(
-    forecast_data: Mapping[str, Any], now_utc: datetime
-) -> tuple[str, str]:
-    """Quy đổi bin dự báo qua measurement_started_at_utc sang RFC3339 UTC cho ApplyRequest."""
+def _extract_apply_request_utc_bounds(forecast_data: Mapping[str, Any], now_utc: datetime) -> tuple[str, str]:
     s_utc = forecast_data.get("forecast_start_utc")
     e_utc = forecast_data.get("forecast_end_utc")
     if isinstance(s_utc, str) and s_utc.strip() and isinstance(e_utc, str) and e_utc.strip():
@@ -80,10 +73,7 @@ def _extract_apply_request_utc_bounds(
     if isinstance(f_start, str) and f_start.strip() and isinstance(f_end, str) and f_end.strip():
         return f_start.strip(), f_end.strip()
 
-    origin_refs = forecast_data.get("origin_refs")
-    if not isinstance(origin_refs, Mapping):
-        origin_refs = {}
-
+    origin_refs = forecast_data.get("origin_refs") if isinstance(forecast_data.get("origin_refs"), Mapping) else {}
     delta_s = float(forecast_data.get("delta_s") or origin_refs.get("delta_s") or 1.0)
     if delta_s <= 0:
         delta_s = 1.0
@@ -94,15 +84,11 @@ def _extract_apply_request_utc_bounds(
         and isinstance(f_end, int)
         and not isinstance(f_end, bool)
     ):
-        meas_start = _parse_optional_utc(
-            forecast_data.get("measurement_started_at_utc")
-            or origin_refs.get("measurement_started_at_utc")
-        )
+        meas_start = _parse_optional_utc(forecast_data.get("measurement_started_at_utc") or origin_refs.get("measurement_started_at_utc"))
         if meas_start is not None:
-            dt_s = meas_start + timedelta(seconds=f_start * delta_s)
-            dt_e = meas_start + timedelta(seconds=f_end * delta_s)
-            return _to_rfc3339_utc(dt_s), _to_rfc3339_utc(dt_e)
-
+            return _to_rfc3339_utc(meas_start + timedelta(seconds=f_start * delta_s)), _to_rfc3339_utc(
+                meas_start + timedelta(seconds=f_end * delta_s)
+            )
         span_bins = max(1, f_end - f_start)
         base_dt = _parse_optional_utc(forecast_data.get("snapshot_as_of_utc")) or now_utc
         return _to_rfc3339_utc(base_dt), _to_rfc3339_utc(base_dt + timedelta(seconds=span_bins * delta_s))
@@ -184,11 +170,7 @@ def bind_decision_batch_id(plan_result: dict[str, Any], decision_batch_id: str) 
 
 
 def build_decision_wire_payload(decision_batch: Mapping[str, Any]) -> dict[str, Any]:
-    """Wire payload strict cho POST /v1/optimization/decisions (khớp extra='forbid')."""
-    raw_rows = decision_batch.get("rows")
-    if raw_rows is None:
-        raw_rows = decision_batch.get("decision_rows", ())
-
+    raw_rows = decision_batch.get("rows") if "rows" in decision_batch else decision_batch.get("decision_rows", ())
     wire_rows = [
         {
             "flow_group_id": str(r["flow_group_id"]),
@@ -200,12 +182,10 @@ def build_decision_wire_payload(decision_batch: Mapping[str, Any]) -> dict[str, 
 
     tick_raw = decision_batch.get("tick_id")
     tick_id_str = str(tick_raw).strip() if tick_raw is not None and str(tick_raw).strip() else "tick_default"
-
     opt_res = decision_batch.get("optimizer_result")
     wire_opt = dict(opt_res) if isinstance(opt_res, Mapping) else {}
-
     fb_id = decision_batch.get("forecast_batch_id")
-    fb_id_str = str(fb_id).strip() if fb_id is not None and str(fb_id).strip() else ""
+    fb_id_val = str(fb_id).strip() if fb_id is not None and str(fb_id).strip() else None
 
     return {
         "run_id": str(decision_batch["run_id"]),
@@ -213,7 +193,7 @@ def build_decision_wire_payload(decision_batch: Mapping[str, Any]) -> dict[str, 
         "tick_id": tick_id_str,
         "tick_at_utc": str(decision_batch["tick_at_utc"]),
         "snapshot_id": str(decision_batch["snapshot_id"]),
-        "forecast_batch_id": fb_id_str,
+        "forecast_batch_id": fb_id_val,
         "expected_state_version": int(decision_batch["expected_state_version"]),
         "apply_deadline_utc": str(decision_batch["apply_deadline_utc"]),
         "optimizer_result": wire_opt,
@@ -239,7 +219,6 @@ def serialize_decision_batch(
     tick_at_utc: str | None = None,
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
-    """Đóng gói đủ 48 flow cho DecisionBatch nội bộ (dùng build_decision_wire_payload khi gửi Data)."""
     ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
     resolved_tick_at = (
         str(tick_at_utc).strip()
@@ -259,7 +238,7 @@ def serialize_decision_batch(
     changed_count = 0
 
     for fg in topology["F"]:
-        old_p = str(routing_state[fg].get("current_path") or routing_state[fg].get("actual_path_id"))
+        old_p = str(resolve_flow_path_id(routing_state[fg]) or "")
         new_p = str(selected_paths.get(fg, old_p))
         is_changed = new_p != old_p
         if is_changed:
@@ -351,7 +330,6 @@ def serialize_apply_request(
     topology: Mapping[str, Any] | None = None,
     now_utc: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """Chỉ xuất 1..B luồng đổi đường cho SDN; trả về None nếu B=0 hoặc 0 thay đổi."""
     max_b = int(config.get("B", 4))
     if max_b <= 0:
         return None

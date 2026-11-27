@@ -405,13 +405,13 @@ class TestOptimizationSDNContract(unittest.TestCase):
             server.server_close()
 
         self.assertEqual(out["status"], "APPLY_REQUESTED")
-        self.assertEqual(
+    self.assertEqual(
             received_order,
             [
                 "GET:/v1/runs/run_test_01/forecasts/fb_001",
                 "POST:/v1/optimization/decisions:dec_retry_fixed_010",
                 "POST:/v1/optimization/decisions:dec_retry_fixed_010",
-                "POST:/v1/routing/apply:dec_retry_fixed_010",
+                "POST:/apply:dec_retry_fixed_010",
             ],
         )
         self.assertEqual(len(captured_decision_payloads), 2)

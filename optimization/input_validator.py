@@ -3,8 +3,16 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 
+def resolve_flow_path_id(flow_state: Mapping[str, Any]) -> str | None:
+    """Đọc tuyến hiện tại từ path_id (SDN canonical) hoặc current_path / actual_path_id."""
+    for key in ("path_id", "current_path", "actual_path_id"):
+        val = flow_state.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return None
+
+
 def resolve_forecast_batch_id(forecast_data: Mapping[str, Any]) -> str | None:
-    """Ưu tiên forecast_batch_id, fallback sang batch_id."""
     for key in ("forecast_batch_id", "batch_id"):
         val = forecast_data.get(key)
         if val is not None and str(val).strip():
@@ -26,64 +34,81 @@ def normalize_routing_entries(routing_state: Mapping[str, Any]) -> dict[str, dic
     }
 
 
-def extract_forecast_series(forecast_data: Mapping[str, Any]) -> dict[str, list[Any]]:
+def _extract_row_bin_offset(row: Mapping[str, Any], fg: str) -> int:
+    offset_raw: Any = None
+    for key in ("forecast_start", "offset", "step", "horizon_step"):
+        if key in row and row[key] is not None:
+            offset_raw = row[key]
+            break
+
+    if offset_raw is None or isinstance(offset_raw, bool) or not isinstance(offset_raw, int):
+        raise ValueError(f"Forecast row cho flow {fg} thiếu hoặc sai kiểu bin integer: {offset_raw!r}")
+
+    if "forecast_end" in row and row["forecast_end"] is not None:
+        end_raw = row["forecast_end"]
+        if isinstance(end_raw, bool) or not isinstance(end_raw, int) or end_raw <= offset_raw:
+            raise ValueError(f"Forecast row cho flow {fg} có forecast_end không hợp lệ")
+
+    return offset_raw
+
+
+def extract_forecast_with_offsets(
+    forecast_data: Mapping[str, Any],
+) -> tuple[dict[str, list[Any]], dict[str, tuple[int, ...]]]:
     raw = forecast_data.get("rows")
     if raw is None:
         raw = forecast_data.get("predictions", forecast_data)
 
     if isinstance(raw, list):
         grouped: dict[str, dict[int, Any]] = {}
-        for idx, row in enumerate(raw):
+        for row in raw:
             if not isinstance(row, Mapping) or "flow_group_id" not in row:
                 continue
             fg = str(row["flow_group_id"])
-            offset_raw = row.get("offset", row.get("step", row.get("horizon_step", idx)))
-            if isinstance(offset_raw, bool) or not isinstance(offset_raw, int):
-                raise ValueError(f"Forecast row offset phải là số nguyên (int), nhận được: {offset_raw!r}")
+            offset_val = _extract_row_bin_offset(row, fg)
             by_bin = grouped.setdefault(fg, {})
-            if offset_raw in by_bin:
-                raise ValueError(f"Trùng bin/offset {offset_raw} cho flow {fg}")
-            val = row.get("predicted_mbps", row.get("demand_mbps", row.get("value")))
-            by_bin[offset_raw] = val
+            if offset_val in by_bin:
+                raise ValueError(f"Trùng bin/offset {offset_val} cho flow {fg}")
+            by_bin[offset_val] = row.get("predicted_mbps", row.get("demand_mbps", row.get("value")))
 
         series_map: dict[str, list[Any]] = {}
+        offset_map: dict[str, tuple[int, ...]] = {}
         for fg, by_bin in grouped.items():
             offsets = sorted(by_bin.keys())
             for i in range(1, len(offsets)):
                 if offsets[i] != offsets[i - 1] + 1:
-                    raise ValueError(
-                        f"Bin dự báo không liên tiếp cho flow {fg}: {offsets[i - 1]} -> {offsets[i]}"
-                    )
+                    raise ValueError(f"Bin dự báo không liên tiếp cho flow {fg}: {offsets[i - 1]} -> {offsets[i]}")
+            offset_map[fg] = tuple(offsets)
             series_map[fg] = [by_bin[off] for off in offsets]
-        return series_map
+        return series_map, offset_map
 
     if isinstance(raw, Mapping):
         out: dict[str, list[Any]] = {}
+        offset_map = {}
         for fg, rec in raw.items():
             if isinstance(rec, Mapping):
-                arr = rec.get("predicted_mbps_array")
-                if arr is None:
-                    arr = rec.get("values")
-                out[str(fg)] = list(arr) if isinstance(arr, Sequence) and not isinstance(arr, (str, bytes)) else []
+                arr = rec.get("predicted_mbps_array") if "predicted_mbps_array" in rec else rec.get("values")
+                vals = list(arr) if isinstance(arr, Sequence) and not isinstance(arr, (str, bytes)) else []
+                out[str(fg)] = vals
+                offset_map[str(fg)] = tuple(range(len(vals)))
             elif isinstance(rec, Sequence) and not isinstance(rec, (str, bytes)):
-                out[str(fg)] = list(rec)
-        return out
+                vals = list(rec)
+                out[str(fg)] = vals
+                offset_map[str(fg)] = tuple(range(len(vals)))
+        return out, offset_map
 
-    return {}
+    return {}, {}
+
+
+def extract_forecast_series(forecast_data: Mapping[str, Any]) -> dict[str, list[Any]]:
+    series_map, _ = extract_forecast_with_offsets(forecast_data)
+    return series_map
 
 
 def check_data_sync_gate(routing_state: Mapping[str, Any]) -> tuple[bool, str, str]:
-    """
-    Bắt buộc data_sync_gate.optimization_tick_eligible == True.
-    Thiếu field, false, hoặc Data chưa ACK RoutingState/ApplyResult đều chặn tick.
-    """
     gate = routing_state.get("data_sync_gate")
     if not isinstance(gate, Mapping) or gate.get("optimization_tick_eligible") is not True:
-        return (
-            False,
-            "DATA_NOT_SYNCED",
-            f"data_sync_gate.optimization_tick_eligible phải là True (nhận được: {gate!r})",
-        )
+        return False, "DATA_NOT_SYNCED", f"data_sync_gate.optimization_tick_eligible phải là True ({gate!r})"
 
     if (
         gate.get("synced") is False
@@ -102,26 +127,11 @@ def check_data_sync_gate(routing_state: Mapping[str, Any]) -> tuple[bool, str, s
         or routing_state.get("routing_state_synced") is False
         or routing_state.get("data_acked") is False
     ):
-        return False, "DATA_NOT_SYNCED", "RoutingState chưa được Data ACK (data_synced=False)"
+        return False, "DATA_NOT_SYNCED", "RoutingState chưa được Data ACK"
 
     sync_status = str(routing_state.get("sync_status", "")).upper()
     if sync_status in ("PENDING", "UNSYNCED", "SYNCING", "OUTBOX_PENDING", "FAILED"):
         return False, "DATA_NOT_SYNCED", f"Data outbox sync_status={sync_status}"
-
-    cur_ver = routing_state.get("state_version", routing_state.get("routing_version"))
-    acked_ver = routing_state.get("acked_routing_version", routing_state.get("data_acked_version"))
-    if (
-        cur_ver is not None
-        and acked_ver is not None
-        and not isinstance(cur_ver, bool)
-        and not isinstance(acked_ver, bool)
-        and int(acked_ver) < int(cur_ver)
-    ):
-        return (
-            False,
-            "DATA_NOT_SYNCED",
-            f"Data mới ACK version {acked_ver}, chưa đồng bộ version hiện tại {cur_ver}",
-        )
 
     return True, "OK", ""
 
@@ -142,7 +152,7 @@ def validate_routing_state(
         return False, sync_code, sync_msg
 
     if routing_state.get("reconcile_required", False):
-        return False, "STATE_UNKNOWN", "SDN yêu cầu reconcile bảng luồng (reconcile_required=True)"
+        return False, "STATE_UNKNOWN", "SDN yêu cầu reconcile bảng luồng"
 
     if "routing_state_complete" in routing_state and not routing_state["routing_state_complete"]:
         return False, "STATE_INCOMPLETE", "SDN chưa hoàn tất thu thập trạng thái 48 luồng"
@@ -150,7 +160,7 @@ def validate_routing_state(
     state_ver = routing_state.get("state_version", routing_state.get("routing_version"))
     if state_ver is not None:
         if isinstance(state_ver, bool) or not isinstance(state_ver, int) or state_ver < 1:
-            return False, "INVALID_STATE_VERSION", f"state_version/routing_version không hợp lệ: {state_ver!r}"
+            return False, "INVALID_STATE_VERSION", f"state_version không hợp lệ: {state_ver!r}"
 
     routes = normalize_routing_entries(routing_state)
     for f in flow_groups:
@@ -166,7 +176,7 @@ def validate_routing_state(
             return False, "STATE_UNKNOWN", f"Missing verification_status/status for flow {f}"
 
         status_val = str(raw_status).strip().upper()
-        cur_path = flow_state.get("current_path") or flow_state.get("actual_path_id")
+        cur_path = resolve_flow_path_id(flow_state)
         if status_val != "VERIFIED" or not cur_path:
             return False, "STATE_UNKNOWN", f"Unverified routing state ({status_val}) for flow {f}"
 
@@ -178,7 +188,7 @@ def validate_routing_state(
 
 def _validate_window_bounds(f_start_raw: Any, f_end_raw: Any) -> tuple[bool, str, str]:
     if isinstance(f_start_raw, float) or isinstance(f_end_raw, float):
-        return False, "INVALID_FORECAST_OFFSET", "forecast_start/forecast_end phải là số nguyên (int), không chấp nhận float"
+        return False, "INVALID_FORECAST_OFFSET", "forecast_start/forecast_end phải là số nguyên (int)"
 
     if (
         isinstance(f_start_raw, int)
@@ -187,7 +197,7 @@ def _validate_window_bounds(f_start_raw: Any, f_end_raw: Any) -> tuple[bool, str
         and not isinstance(f_end_raw, bool)
     ):
         if f_end_raw <= f_start_raw:
-            return False, "INVALID_FORECAST_WINDOW", "forecast_end offset phải lớn hơn forecast_start offset"
+            return False, "INVALID_FORECAST_WINDOW", "forecast_end phải lớn hơn forecast_start"
         return True, "OK", ""
 
     if isinstance(f_start_raw, str) and isinstance(f_end_raw, str):
@@ -209,19 +219,20 @@ def validate_forecast(
     apply_guard_ms: int = 200,
     now_utc: datetime | None = None,
     apply_deadline_utc: str | None = None,
+    expected_horizon: int | None = None,
 ) -> tuple[bool, str, str]:
     batch_status = forecast_data.get("status")
     if batch_status is None or not str(batch_status).strip() or str(batch_status).strip().upper() != "READY":
         return False, "FORECAST_NOT_READY", f"ForecastBatch chưa sẵn sàng (status={batch_status})"
 
     try:
-        series_map = extract_forecast_series(forecast_data)
+        series_map, offset_map = extract_forecast_with_offsets(forecast_data)
     except ValueError as exc:
         msg = str(exc)
         code = "INVALID_FORECAST_WINDOW" if "không liên tiếp" in msg else "INVALID_FORECAST_OFFSET"
         return False, code, msg
 
-    expected_h: int | None = None
+    expected_offsets: tuple[int, ...] | None = None
     for f in flow_groups:
         if f not in series_map:
             return False, "FORECAST_INVALID", f"Missing forecast data for flow {f}"
@@ -230,14 +241,18 @@ def validate_forecast(
         if not arr:
             return False, "FORECAST_INVALID", f"Empty forecast array for flow {f}"
 
-        if expected_h is None:
-            expected_h = len(arr)
-        elif len(arr) != expected_h:
-            return (
-                False,
-                "FORECAST_INVALID",
-                f"Không đồng nhất horizon H cho flow {f}: {len(arr)} != {expected_h}",
-            )
+        flow_offsets = offset_map.get(f, ())
+        if expected_offsets is None:
+            expected_offsets = flow_offsets
+            if (
+                expected_horizon is not None
+                and not isinstance(expected_horizon, bool)
+                and int(expected_horizon) > 0
+                and len(expected_offsets) != int(expected_horizon)
+            ):
+                return False, "FORECAST_INVALID", f"Horizon H không khớp ({len(expected_offsets)} != {int(expected_horizon)})"
+        elif flow_offsets != expected_offsets:
+            return False, "FORECAST_INVALID", f"Tập bin dự báo không đồng nhất cho flow {f}"
 
         for val in arr:
             if (
@@ -248,12 +263,8 @@ def validate_forecast(
             ):
                 return False, "FORECAST_INVALID", f"Invalid predicted_mbps value for flow {f}: {val!r}"
 
-    f_start_raw = forecast_data.get("forecast_start")
-    if f_start_raw is None:
-        f_start_raw = forecast_data.get("forecast_start_utc")
-    f_end_raw = forecast_data.get("forecast_end")
-    if f_end_raw is None:
-        f_end_raw = forecast_data.get("forecast_end_utc")
+    f_start_raw = forecast_data.get("forecast_start") if "forecast_start" in forecast_data else forecast_data.get("forecast_start_utc")
+    f_end_raw = forecast_data.get("forecast_end") if "forecast_end" in forecast_data else forecast_data.get("forecast_end_utc")
 
     if f_start_raw is not None and f_end_raw is not None:
         win_ok, win_code, win_msg = _validate_window_bounds(f_start_raw, f_end_raw)
@@ -268,10 +279,6 @@ def validate_forecast(
         ref_now = now_utc if now_utc is not None else datetime.now(timezone.utc)
         remaining_ms = (dt_deadline - ref_now).total_seconds() * 1000.0
         if remaining_ms < (deadline_ms + apply_guard_ms):
-            return (
-                False,
-                "DATA_STALE",
-                f"Quỹ thời gian còn lại ({remaining_ms:.1f}ms) nhỏ hơn {deadline_ms + apply_guard_ms}ms",
-            )
+            return False, "DATA_STALE", f"Quỹ thời gian còn lại ({remaining_ms:.1f}ms) nhỏ hơn {deadline_ms + apply_guard_ms}ms"
 
     return True, "OK", ""

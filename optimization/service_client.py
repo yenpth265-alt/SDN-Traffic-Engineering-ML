@@ -124,14 +124,35 @@ class OptimizationServiceClient:
         )
         return body
 
-    def poll_apply_status(self, decision_batch_id: str, status_endpoint: str | None = None) -> dict[str, Any]:
-        base_ep = status_endpoint or self.sdn_status_endpoint
+   def poll_apply_status(
+        self,
+        decision_batch_id: str,
+        status_endpoint: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        base_ep = (status_endpoint or self.sdn_status_endpoint).strip()
+        safe_id = urllib.parse.quote(str(decision_batch_id).strip(), safe="")
+        safe_run = urllib.parse.quote(str(run_id).strip(), safe="") if run_id and str(run_id).strip() else ""
+
+        if "{run_id}" in base_ep or "{decision_batch_id}" in base_ep:
+            base_ep = base_ep.format(run_id=safe_run, decision_batch_id=safe_id)
+
         if base_ep.startswith("http://") or base_ep.startswith("https://"):
             url = base_ep
         else:
-            sep = "&" if "?" in base_ep else "?"
-            safe_id = urllib.parse.quote(str(decision_batch_id).strip(), safe="")
-            url = f"{self.sdn_base_url}{base_ep}{sep}decision_batch_id={safe_id}"
+            path_prefix = base_ep if base_ep.startswith("/") else f"/{base_ep}"
+            url = f"{self.sdn_base_url}{path_prefix}"
+
+        parsed = urllib.parse.urlsplit(url)
+        query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+        if safe_run and "run_id" not in query_params and safe_run not in parsed.path:
+            query_params["run_id"] = str(run_id).strip()
+        if "decision_batch_id" not in query_params and safe_id not in parsed.path:
+            query_params["decision_batch_id"] = str(decision_batch_id).strip()
+
+        url = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query_params), parsed.fragment)
+        )
 
         last_body: dict[str, Any] = {"status": "PENDING", "decision_batch_id": decision_batch_id}
         for _ in range(self.apply_max_polls):
@@ -160,8 +181,17 @@ class OptimizationServiceClient:
         )
         st = str(body.get("status", "")).upper()
         if code == 202 or st in _INTERIM_APPLY_STATUSES:
-            poll_target = body.get("status_url") or status_endpoint or self.sdn_status_endpoint
-            return self.poll_apply_status(str(apply_request["decision_batch_id"]), str(poll_target))
+            poll_target = (
+                body.get("poll_url")
+                or body.get("status_url")
+                or status_endpoint
+                or self.sdn_status_endpoint
+            )
+            return self.poll_apply_status(
+                decision_batch_id=str(apply_request["decision_batch_id"]),
+                status_endpoint=str(poll_target),
+                run_id=str(apply_request.get("run_id") or "") or None,
+            )
         return body
 
     def execute_tick(

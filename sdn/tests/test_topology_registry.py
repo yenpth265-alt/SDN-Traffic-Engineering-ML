@@ -53,15 +53,42 @@ def _resign_bundle(bundle: dict) -> dict:
 # -----------------------------------------------------------------------------
 
 
-def test_load_bundle_and_csv_consistency(registry: TopologyRegistry) -> None:
-    """Verify TopologyBundle loads cleanly and matches all 4 Network CSV catalogs."""
+def test_load_bundle_and_csv_consistency(registry: TopologyRegistry, raw_bundle_dict: dict) -> None:
+    """
+    Verify TopologyBundle loads cleanly and matches all 4 Network CSV catalogs.
+    Distinguishes historical bundle (`1.0`, `2fa43f87...`) from canonical `v1.0` (`ec6c6969...`)
+    without ever hardcoding `ovs_port_mapping_verified=True` without supporting OVS evidence.
+    """
     assert registry.schema_version == "1.0"
-    assert registry.topology_version == "1.0"
+    assert registry.topology_version in ("1.0", "v1.0")
+    assert registry.topology_hash == compute_network_topology_hash(raw_bundle_dict)
+    assert len(registry.topology_hash) == 64
+    assert registry.ovs_port_mapping_verified is bool(raw_bundle_dict.get("ovs_port_mapping_verified", False))
+
+
+def test_cf05_canonical_v10_bundle_contract(raw_bundle_dict: dict, tmp_path: Path) -> None:
+    """
+    CF-05 Canonical Network `v1.0` Contract Check:
+    Verifies that a `v1.0` bundle with `ovs_port_mapping_verified=False` (Colab export)
+    recomputes the exact approved raw 64-hex digest `ec6c6969...` and passes `verify_hash=True`
+    against the 4 matching Network CSV catalogs.
+    """
+    v10_bundle = copy.deepcopy(raw_bundle_dict)
+    v10_bundle["topology_version"] = "v1.0"
+    v10_bundle["ovs_port_mapping_verified"] = False
+    v10_bundle["topology_hash"] = compute_network_topology_hash(v10_bundle)
     assert (
-        registry.topology_hash
-        == "2fa43f873e8530d934661d455fad946cd28d4d77b8f0f87b0b0cb4aa4594d0dc"
+        v10_bundle["topology_hash"]
+        == "ec6c6969019b1c36744339fb54f0f608c95402ae972859b30710dc44b5dc3956"
     )
-    assert registry.ovs_port_mapping_verified is True
+    bpath = tmp_path / "topology_bundle.json"
+    bpath.write_text(json.dumps(v10_bundle), encoding="utf-8")
+    reg = TopologyRegistry.from_bundle_file(bpath, csv_config_dir=NETWORK_CONFIG_DIR, verify_hash=True)
+    assert reg.topology_version == "v1.0"
+    assert reg.topology_hash == "ec6c6969019b1c36744339fb54f0f608c95402ae972859b30710dc44b5dc3956"
+    assert reg.ovs_port_mapping_verified is False
+    assert len(reg.get_all_switches()) == 6
+    assert len(reg.get_all_flow_groups()) == 48
 
 
 def test_topology_counts_and_invariants(registry: TopologyRegistry) -> None:

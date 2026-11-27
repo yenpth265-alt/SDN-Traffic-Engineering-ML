@@ -569,8 +569,8 @@ def test_p5_03_end_to_end_12_step_lifecycle_across_multiple_ticks(
 ) -> None:
     run_id = "run_e2e_lifecycle"
 
-    # Step 1: Load official topology from Network catalog
-    assert topology.topology_version == "1.0"
+    # Step 1: Load official topology from Network catalog (supports historical 1.0 & canonical v1.0)
+    assert topology.topology_version in ("1.0", "v1.0")
     assert len(topology.get_all_flow_groups()) == 48
 
     # Step 2 & Step 3: Initialize run & bootstrap 48 flows on P1 with simulated verification evidence

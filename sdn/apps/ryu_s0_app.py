@@ -174,12 +174,23 @@ class S0AppConfig:
                 return None
             return raw.strip()
 
+        topo_bundle_raw = _env_opt_str("SDN_TOPOLOGY_BUNDLE_PATH")
+        csv_dir_raw = _env_opt_str("SDN_CSV_CONFIG_DIR")
         idem_raw = _env_opt_str("SDN_IDEMPOTENCY_DB_PATH")
         demand_db_raw = _env_opt_str("SDN_DEMAND_DB_PATH")
         demand_ret_raw = _env_opt_str("SDN_DEMAND_RETENTION_BINS")
         outbox_raw = _env_opt_str("SDN_DATA_OUTBOX_DIR")
 
+        eff_bundle_path = Path(topo_bundle_raw) if topo_bundle_raw else Path("configs/network/topology_bundle.json")
+        eff_csv_dir = (
+            Path(csv_dir_raw)
+            if csv_dir_raw
+            else (eff_bundle_path.parent if topo_bundle_raw else Path("configs/network"))
+        )
+
         return cls(
+            topology_bundle_path=eff_bundle_path,
+            csv_config_dir=eff_csv_dir,
             run_id=os.environ.get("SDN_RUN_ID", "s0_live_run").strip() or "s0_live_run",
             preinstall_both_downstream_branches=_env_bool("SDN_PREINSTALL_BOTH_DOWNSTREAM", True),
             enable_intra_edge_l3=_env_bool("SDN_ENABLE_INTRA_EDGE_L3", False),

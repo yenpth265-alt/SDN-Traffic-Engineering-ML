@@ -68,8 +68,14 @@ from sdn.schemas.state_models import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TOPOLOGY_BUNDLE_PATH = REPO_ROOT / "configs" / "network" / "topology_bundle.json"
-CATALOG_DIR = REPO_ROOT / "configs" / "network"
+TOPOLOGY_BUNDLE_PATH = Path(
+    os.environ.get("SDN_TOPOLOGY_BUNDLE_PATH")
+    or str(REPO_ROOT / "configs" / "network" / "topology_bundle.json")
+)
+CATALOG_DIR = Path(
+    os.environ.get("SDN_CSV_CONFIG_DIR")
+    or str(TOPOLOGY_BUNDLE_PATH.parent)
+)
 ROLES = ("RUNNER", "NETWORK", "SDN", "ML", "OPTIMIZATION", "READER")
 
 

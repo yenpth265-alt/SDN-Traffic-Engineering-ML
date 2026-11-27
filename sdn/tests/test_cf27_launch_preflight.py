@@ -80,6 +80,34 @@ def test_cf27_preflight_fail_closed_and_no_secret_leak(tmp_path: Path) -> None:
     )
     assert ok_with_data["data_health"]["http_status"] == 200
 
+    # CF-05 Canonical v1.0 bundle override via SDN_TOPOLOGY_BUNDLE_PATH + SDN_CSV_CONFIG_DIR
+    import copy
+    from sdn.controller.topology_registry import compute_network_topology_hash
+
+    repo_root = Path(__file__).resolve().parents[2]
+    v10_bundle = copy.deepcopy(
+        json.loads((repo_root / "configs" / "network" / "topology_bundle.json").read_text(encoding="utf-8"))
+    )
+    v10_bundle["topology_version"] = "v1.0"
+    v10_bundle["ovs_port_mapping_verified"] = False
+    v10_bundle["topology_hash"] = compute_network_topology_hash(v10_bundle)
+    v10_path = tmp_path / "topology_bundle_v10.json"
+    v10_path.write_text(json.dumps(v10_bundle), encoding="utf-8")
+
+    env_v10 = dict(
+        env,
+        SDN_TOPOLOGY_BUNDLE_PATH=str(v10_path),
+        SDN_CSV_CONFIG_DIR=str(repo_root / "configs" / "network"),
+    )
+    rep_v10 = run_preflight(
+        env_v10,
+        expected_topology_version="v1.0",
+        expected_topology_hash="ec6c6969019b1c36744339fb54f0f608c95402ae972859b30710dc44b5dc3956",
+    )
+    assert rep_v10["preflight_ok"] is True
+    assert rep_v10["topology_version"] == "v1.0"
+    assert rep_v10["topology_hash"] == "ec6c6969019b1c36744339fb54f0f608c95402ae972859b30710dc44b5dc3956"
+
 
 def test_cf27_wait_for_sdn_readiness_enforces_6_switches_48_verified_and_sync_gate() -> None:
     polls = {"n": 0}

@@ -1,0 +1,272 @@
+{
+  "run_id": "run_g0_fixture",
+  "decision_batch_id": "dec_fixture_reroute_001",
+  "tick_id": "tick_001",
+  "tick_at_utc": "2026-11-26T14:00:00Z",
+  "snapshot_id": "snap_001",
+  "forecast_batch_id": "fc_batch_001",
+  "expected_state_version": 5,
+  "apply_deadline_utc": "2026-11-26T14:00:05Z",
+  "optimizer_result": {
+    "decision_status": "APPLY_REQUESTED",
+    "reason": "REROUTED",
+    "total_flows": 48,
+    "changed_flows_count": 4,
+    "solver_status": "Optimal",
+    "max_utilization_before": 2.533333,
+    "max_utilization_after": 1.333333,
+    "objective_before": 2.533333,
+    "objective_after": 1.333417,
+    "solve_ms": 30.81,
+    "topology_version": "1.0",
+    "topology_hash": "sha256:topo_v1_0_fixture",
+    "config_version": "1.0",
+    "config_hash": "sha256:1fcd04aa072584f9b067e76b870f5c40f716081eb2b5569e5019caf3a1e21388",
+    "snapshot_as_of_utc": "2026-11-26T14:00:00Z",
+    "history_cutoff_utc": "2026-11-26T13:59:00Z",
+    "forecast_start": 0,
+    "forecast_end": 1
+  },
+  "rows": [
+    {
+      "flow_group_id": "0x064",
+      "old_path_id": "p_0x064_a",
+      "proposed_path_id": "p_0x064_b"
+    },
+    {
+      "flow_group_id": "0x065",
+      "old_path_id": "p_0x065_a",
+      "proposed_path_id": "p_0x065_a"
+    },
+    {
+      "flow_group_id": "0x066",
+      "old_path_id": "p_0x066_a",
+      "proposed_path_id": "p_0x066_b"
+    },
+    {
+      "flow_group_id": "0x067",
+      "old_path_id": "p_0x067_a",
+      "proposed_path_id": "p_0x067_a"
+    },
+    {
+      "flow_group_id": "0x068",
+      "old_path_id": "p_0x068_a",
+      "proposed_path_id": "p_0x068_b"
+    },
+    {
+      "flow_group_id": "0x069",
+      "old_path_id": "p_0x069_a",
+      "proposed_path_id": "p_0x069_a"
+    },
+    {
+      "flow_group_id": "0x06a",
+      "old_path_id": "p_0x06a_a",
+      "proposed_path_id": "p_0x06a_b"
+    },
+    {
+      "flow_group_id": "0x06b",
+      "old_path_id": "p_0x06b_a",
+      "proposed_path_id": "p_0x06b_a"
+    },
+    {
+      "flow_group_id": "0x06c",
+      "old_path_id": "p_0x06c_a",
+      "proposed_path_id": "p_0x06c_a"
+    },
+    {
+      "flow_group_id": "0x06d",
+      "old_path_id": "p_0x06d_a",
+      "proposed_path_id": "p_0x06d_a"
+    },
+    {
+      "flow_group_id": "0x06e",
+      "old_path_id": "p_0x06e_a",
+      "proposed_path_id": "p_0x06e_a"
+    },
+    {
+      "flow_group_id": "0x06f",
+      "old_path_id": "p_0x06f_a",
+      "proposed_path_id": "p_0x06f_a"
+    },
+    {
+      "flow_group_id": "0x070",
+      "old_path_id": "p_0x070_a",
+      "proposed_path_id": "p_0x070_a"
+    },
+    {
+      "flow_group_id": "0x071",
+      "old_path_id": "p_0x071_a",
+      "proposed_path_id": "p_0x071_a"
+    },
+    {
+      "flow_group_id": "0x072",
+      "old_path_id": "p_0x072_a",
+      "proposed_path_id": "p_0x072_a"
+    },
+    {
+      "flow_group_id": "0x073",
+      "old_path_id": "p_0x073_a",
+      "proposed_path_id": "p_0x073_a"
+    },
+    {
+      "flow_group_id": "0x074",
+      "old_path_id": "p_0x074_a",
+      "proposed_path_id": "p_0x074_a"
+    },
+    {
+      "flow_group_id": "0x075",
+      "old_path_id": "p_0x075_a",
+      "proposed_path_id": "p_0x075_a"
+    },
+    {
+      "flow_group_id": "0x076",
+      "old_path_id": "p_0x076_a",
+      "proposed_path_id": "p_0x076_a"
+    },
+    {
+      "flow_group_id": "0x077",
+      "old_path_id": "p_0x077_a",
+      "proposed_path_id": "p_0x077_a"
+    },
+    {
+      "flow_group_id": "0x078",
+      "old_path_id": "p_0x078_a",
+      "proposed_path_id": "p_0x078_a"
+    },
+    {
+      "flow_group_id": "0x079",
+      "old_path_id": "p_0x079_a",
+      "proposed_path_id": "p_0x079_a"
+    },
+    {
+      "flow_group_id": "0x07a",
+      "old_path_id": "p_0x07a_a",
+      "proposed_path_id": "p_0x07a_a"
+    },
+    {
+      "flow_group_id": "0x07b",
+      "old_path_id": "p_0x07b_a",
+      "proposed_path_id": "p_0x07b_a"
+    },
+    {
+      "flow_group_id": "0x07c",
+      "old_path_id": "p_0x07c_a",
+      "proposed_path_id": "p_0x07c_a"
+    },
+    {
+      "flow_group_id": "0x07d",
+      "old_path_id": "p_0x07d_a",
+      "proposed_path_id": "p_0x07d_a"
+    },
+    {
+      "flow_group_id": "0x07e",
+      "old_path_id": "p_0x07e_a",
+      "proposed_path_id": "p_0x07e_a"
+    },
+    {
+      "flow_group_id": "0x07f",
+      "old_path_id": "p_0x07f_a",
+      "proposed_path_id": "p_0x07f_a"
+    },
+    {
+      "flow_group_id": "0x080",
+      "old_path_id": "p_0x080_a",
+      "proposed_path_id": "p_0x080_a"
+    },
+    {
+      "flow_group_id": "0x081",
+      "old_path_id": "p_0x081_a",
+      "proposed_path_id": "p_0x081_a"
+    },
+    {
+      "flow_group_id": "0x082",
+      "old_path_id": "p_0x082_a",
+      "proposed_path_id": "p_0x082_a"
+    },
+    {
+      "flow_group_id": "0x083",
+      "old_path_id": "p_0x083_a",
+      "proposed_path_id": "p_0x083_a"
+    },
+    {
+      "flow_group_id": "0x084",
+      "old_path_id": "p_0x084_a",
+      "proposed_path_id": "p_0x084_a"
+    },
+    {
+      "flow_group_id": "0x085",
+      "old_path_id": "p_0x085_a",
+      "proposed_path_id": "p_0x085_a"
+    },
+    {
+      "flow_group_id": "0x086",
+      "old_path_id": "p_0x086_a",
+      "proposed_path_id": "p_0x086_a"
+    },
+    {
+      "flow_group_id": "0x087",
+      "old_path_id": "p_0x087_a",
+      "proposed_path_id": "p_0x087_a"
+    },
+    {
+      "flow_group_id": "0x088",
+      "old_path_id": "p_0x088_a",
+      "proposed_path_id": "p_0x088_a"
+    },
+    {
+      "flow_group_id": "0x089",
+      "old_path_id": "p_0x089_a",
+      "proposed_path_id": "p_0x089_a"
+    },
+    {
+      "flow_group_id": "0x08a",
+      "old_path_id": "p_0x08a_a",
+      "proposed_path_id": "p_0x08a_a"
+    },
+    {
+      "flow_group_id": "0x08b",
+      "old_path_id": "p_0x08b_a",
+      "proposed_path_id": "p_0x08b_a"
+    },
+    {
+      "flow_group_id": "0x08c",
+      "old_path_id": "p_0x08c_a",
+      "proposed_path_id": "p_0x08c_a"
+    },
+    {
+      "flow_group_id": "0x08d",
+      "old_path_id": "p_0x08d_a",
+      "proposed_path_id": "p_0x08d_a"
+    },
+    {
+      "flow_group_id": "0x08e",
+      "old_path_id": "p_0x08e_a",
+      "proposed_path_id": "p_0x08e_a"
+    },
+    {
+      "flow_group_id": "0x08f",
+      "old_path_id": "p_0x08f_a",
+      "proposed_path_id": "p_0x08f_a"
+    },
+    {
+      "flow_group_id": "0x090",
+      "old_path_id": "p_0x090_a",
+      "proposed_path_id": "p_0x090_a"
+    },
+    {
+      "flow_group_id": "0x091",
+      "old_path_id": "p_0x091_a",
+      "proposed_path_id": "p_0x091_a"
+    },
+    {
+      "flow_group_id": "0x092",
+      "old_path_id": "p_0x092_a",
+      "proposed_path_id": "p_0x092_a"
+    },
+    {
+      "flow_group_id": "0x093",
+      "old_path_id": "p_0x093_a",
+      "proposed_path_id": "p_0x093_a"
+    }
+  ]
+}

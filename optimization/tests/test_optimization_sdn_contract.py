@@ -1,12 +1,14 @@
 ﻿import json
+import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from optimization.input_validator import validate_forecast, validate_routing_state
-from optimization.planner import OptimizationController, run_planner
+from optimization.planner import OptimizationController, run_planner, validate_post_solve_solution
 from optimization.result_serializer import (
     bind_decision_batch_id,
     build_decision_wire_payload,
@@ -35,11 +37,12 @@ def _build_topology(num_flows: int = 48) -> dict[str, Any]:
             a_fpe[fg][p] = {e: (1 if e in active_links else 0) for e in links}
 
     return {
-        "topology_version": "topo_v1_4",
-        "topology_hash": "hash_topo_v1_4",
+        "topology_version": "1.0",
+        "topology_hash": "sha256:hash_topo_v1_0",
         "F": flows,
         "P": paths,
         "E": list(links.keys()),
+        "C": {"l_a": 500.0, "l_b": 2000.0},
         "links": links,
         "path_links": path_links,
         "a_fpe": a_fpe,
@@ -51,12 +54,14 @@ def _build_routing_state(
     eligible: bool = True,
     include_gate: bool = True,
     state_version: int = 1,
+    use_canonical_path_id: bool = False,
 ) -> dict[str, Any]:
     routes: dict[str, Any] = {}
+    path_key = "path_id" if use_canonical_path_id else "current_path"
     for fg in topology["F"]:
         routes[fg] = {
             "flow_group_id": fg,
-            "current_path": topology["P"][fg][0],
+            path_key: topology["P"][fg][0],
             "verification_status": "VERIFIED",
         }
     state: dict[str, Any] = {
@@ -76,11 +81,12 @@ def _build_routing_state(
 
 def _build_forecast(
     topology: dict[str, Any],
-    h_bins: int = 3,
+    h_bins: int = 1,
     high_demand_count: int = 8,
     forecast_start: int = 0,
-    forecast_end: int = 1,
+    forecast_end: int | None = None,
 ) -> dict[str, Any]:
+    resolved_end = (forecast_start + h_bins) if forecast_end is None else forecast_end
     rows = []
     for idx, fg in enumerate(topology["F"]):
         demand = 120.0 if idx < high_demand_count else 20.0
@@ -99,17 +105,18 @@ def _build_forecast(
         "snapshot_as_of_utc": "2026-11-26T14:00:00Z",
         "history_cutoff_utc": "2026-11-26T13:59:00Z",
         "measurement_started_at_utc": "2026-11-26T14:00:00Z",
-        "delta_s": 1.0,
+        "delta_s": 10.0,
         "forecast_start": forecast_start,
-        "forecast_end": forecast_end,
+        "forecast_end": resolved_end,
         "status": "READY",
         "rows": rows,
     }
 
 
-def _base_config(budget_b: int = 4, t_hold: float = 30.0) -> dict[str, Any]:
+def _base_config(budget_b: int = 4, t_hold: float = 30.0, horizon_h: int = 1) -> dict[str, Any]:
     return {
-        "config_version": "cfg_v1_4",
+        "config_version": "1.0",
+        "H": horizon_h,
         "TH": 0.5,
         "N": 1,
         "B": budget_b,
@@ -129,10 +136,10 @@ class TestOptimizationSDNContract(unittest.TestCase):
     def setUp(self) -> None:
         self.topo = _build_topology(48)
         self.rs = _build_routing_state(self.topo, eligible=True)
-        self.fc = _build_forecast(self.topo, h_bins=3, high_demand_count=8)
+        self.fc = _build_forecast(self.topo, h_bins=1, high_demand_count=8)
         self.now = datetime(2026, 11, 26, 14, 0, 0, tzinfo=timezone.utc)
         self.tick_at = "2026-11-26T14:00:00Z"
-        self.deadline = "2026-11-26T14:00:10Z"
+        self.deadline = "2026-11-26T14:00:05Z"
 
     def test_01_topology_mapping_counts(self) -> None:
         self.assertEqual(len(self.topo["F"]), 48)
@@ -455,6 +462,340 @@ class TestOptimizationSDNContract(unittest.TestCase):
                 topology=self.topo,
                 now_utc=self.now,
             )
+
+    def test_12_cf09_forecast_without_status_field_accepted(self) -> None:
+        fc_no_status = dict(self.fc)
+        del fc_no_status["status"]
+        ok, code, _ = validate_forecast(
+            fc_no_status,
+            self.topo["F"],
+            now_utc=self.now,
+            apply_deadline_utc=self.deadline,
+            expected_horizon=1,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(code, "OK")
+
+        fc_pending = dict(self.fc)
+        fc_pending["status"] = "PENDING"
+        ok_p, code_p, _ = validate_forecast(
+            fc_pending,
+            self.topo["F"],
+            now_utc=self.now,
+            apply_deadline_utc=self.deadline,
+            expected_horizon=1,
+        )
+        self.assertFalse(ok_p)
+        self.assertEqual(code_p, "FORECAST_NOT_READY")
+
+    def test_13_cf10_sdn_canonical_path_id_across_full_pipeline(self) -> None:
+        sdn_rs = _build_routing_state(self.topo, eligible=True, use_canonical_path_id=True)
+        res = run_planner(
+            self.fc,
+            sdn_rs,
+            [0.92],
+            _base_config(budget_b=4),
+            topology_override=self.topo,
+            now_utc=self.now,
+            decision_batch_id="dec_013",
+            apply_deadline_utc=self.deadline,
+            tick_id="tick_013",
+            tick_at_utc=self.tick_at,
+        )
+        self.assertEqual(res["status"], "APPLY_REQUESTED")
+
+    def test_14_cf11_context_binding_and_required_state_version(self) -> None:
+        wrong_run_fc = dict(self.fc)
+        wrong_run_fc["run_id"] = "run_other_99"
+        res_run = run_planner(
+            wrong_run_fc,
+            self.rs,
+            [0.92],
+            _base_config(budget_b=4),
+            topology_override=self.topo,
+            now_utc=self.now,
+            apply_deadline_utc=self.deadline,
+            tick_at_utc=self.tick_at,
+        )
+        self.assertEqual(res_run["status"], "CONTEXT_MISMATCH")
+
+        wrong_hash_rs = dict(self.rs)
+        wrong_hash_rs["topology_hash"] = "sha256:stale_topo_hash"
+        res_hash = run_planner(
+            self.fc,
+            wrong_hash_rs,
+            [0.92],
+            _base_config(budget_b=4),
+            topology_override=self.topo,
+            now_utc=self.now,
+            apply_deadline_utc=self.deadline,
+            tick_at_utc=self.tick_at,
+        )
+        self.assertEqual(res_hash["status"], "CONTEXT_MISMATCH")
+
+        no_ver_rs = dict(self.rs)
+        del no_ver_rs["state_version"]
+        ok_v, code_v, _ = validate_routing_state(no_ver_rs, self.topo["F"], self.topo["P"])
+        self.assertFalse(ok_v)
+        self.assertEqual(code_v, "INVALID_STATE_VERSION")
+
+    def test_15_cf12_enforce_locked_horizon_h1(self) -> None:
+        fc_h3 = _build_forecast(self.topo, h_bins=3, high_demand_count=8)
+        res = run_planner(
+            fc_h3,
+            self.rs,
+            [0.92],
+            _base_config(budget_b=4, horizon_h=1),
+            topology_override=self.topo,
+            now_utc=self.now,
+            apply_deadline_utc=self.deadline,
+            tick_at_utc=self.tick_at,
+        )
+        self.assertEqual(res["status"], "FORECAST_INVALID")
+
+    def test_16_cf13_cf14_invalid_timestamp_and_missing_online_context(self) -> None:
+        res_bad_ts = run_planner(
+            self.fc,
+            self.rs,
+            [0.92],
+            _base_config(budget_b=4),
+            topology_override=self.topo,
+            now_utc=self.now,
+            apply_deadline_utc="not-a-valid-timestamp",
+            tick_at_utc=self.tick_at,
+        )
+        self.assertEqual(res_bad_ts["status"], "INVALID_TIMESTAMP")
+
+        res_no_deadline = run_planner(
+            self.fc,
+            self.rs,
+            [0.92],
+            _base_config(budget_b=4),
+            topology_override=self.topo,
+            now_utc=self.now,
+            tick_at_utc=self.tick_at,
+        )
+        self.assertEqual(res_no_deadline["status"], "MISSING_CONTEXT")
+
+        res_late_deadline = run_planner(
+            self.fc,
+            self.rs,
+            [0.92],
+            _base_config(budget_b=4),
+            topology_override=self.topo,
+            now_utc=self.now,
+            apply_deadline_utc="2026-11-26T14:00:20Z",
+            tick_at_utc=self.tick_at,
+        )
+        self.assertEqual(res_late_deadline["status"], "INVALID_DEADLINE")
+
+    def test_17_cf15_post_solve_validator_blocks_budget_violation(self) -> None:
+        current_sel = {fg: self.topo["P"][fg][0] for fg in self.topo["F"]}
+        x_vals: dict[str, dict[str, int]] = {}
+        y_vals: dict[str, int] = {}
+        for idx, fg in enumerate(self.topo["F"]):
+            if idx < 3:
+                x_vals[fg] = {self.topo["P"][fg][0]: 0, self.topo["P"][fg][1]: 1}
+                y_vals[fg] = 1
+            else:
+                x_vals[fg] = {self.topo["P"][fg][0]: 1, self.topo["P"][fg][1]: 0}
+                y_vals[fg] = 0
+
+        b_f = {fg: 20.0 for fg in self.topo["F"]}
+        ok, msg, _ = validate_post_solve_solution(
+            topology=self.topo,
+            b_f=b_f,
+            current_selected=current_sel,
+            x_vals=x_vals,
+            y_vals=y_vals,
+            locked_groups=set(),
+            config=_base_config(budget_b=2),
+            U_reported=0.5,
+            J_reported=0.5,
+            apply_deadline_utc=self.deadline,
+            now_utc=self.now,
+        )
+        self.assertFalse(ok)
+        self.assertIn("ngân sách B=2", msg)
+
+    def test_18_cf16_audit_records_emitted_on_no_trigger_and_skip(self) -> None:
+        ctrl = OptimizationController(_base_config(budget_b=4), topology_override=self.topo)
+        r1 = ctrl.step(
+            0.20,
+            self.fc,
+            self.rs,
+            now_utc=self.now,
+            tick_id="tick_no_trig",
+            tick_at_utc=self.tick_at,
+            apply_deadline_utc=self.deadline,
+        )
+        self.assertEqual(r1["status"], "NO_TRIGGER")
+
+        ineligible_rs = _build_routing_state(self.topo, eligible=False)
+        r2 = ctrl.step(
+            0.95,
+            self.fc,
+            ineligible_rs,
+            now_utc=self.now,
+            tick_id="tick_skip",
+            tick_at_utc=self.tick_at,
+            apply_deadline_utc=self.deadline,
+        )
+        self.assertEqual(r2["status"], "DATA_NOT_SYNCED")
+
+        audits = ctrl.get_audit_records()
+        self.assertEqual(len(audits), 2)
+        self.assertEqual([a["status"] for a in audits], ["NO_TRIGGER", "DATA_NOT_SYNCED"])
+
+    def test_19_cf17_cf18_poll_url_with_run_id_and_restart_recovery(self) -> None:
+        get_paths: list[str] = []
+        poll_attempt = 0
+
+        custom_fc = _build_forecast(self.topo, h_bins=1, high_demand_count=8)
+        custom_fc["run_id"] = "run_custom_99"
+        custom_rs = _build_routing_state(self.topo, eligible=True, use_canonical_path_id=True)
+        custom_rs["run_id"] = "run_custom_99"
+
+        changed_fg = self.topo["F"][0]
+        old_p = self.topo["P"][changed_fg][0]
+        new_p = self.topo["P"][changed_fg][1]
+
+        results_48 = []
+        for fg in self.topo["F"]:
+            cur_p = self.topo["P"][fg][0]
+            if fg == changed_fg:
+                results_48.append(
+                    {
+                        "flow_group_id": fg,
+                        "old_path_id": old_p,
+                        "actual_path_id": new_p,
+                        "changed": True,
+                        "status": "APPLIED",
+                        "verification_status": "VERIFIED",
+                        "verified_at_utc": self.tick_at,
+                    }
+                )
+            else:
+                results_48.append(
+                    {
+                        "flow_group_id": fg,
+                        "old_path_id": cur_p,
+                        "actual_path_id": cur_p,
+                        "changed": False,
+                        "status": "KEPT",
+                        "verification_status": "VERIFIED",
+                        "verified_at_utc": self.tick_at,
+                    }
+                )
+
+        published_rs = _build_routing_state(self.topo, eligible=True, use_canonical_path_id=True)
+        published_rs["run_id"] = "run_custom_99"
+        published_rs["routes"][changed_fg]["path_id"] = new_p
+
+        class AsyncRecoveryHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+            def do_GET(self) -> None:
+                nonlocal poll_attempt
+                get_paths.append(self.path)
+                if self.path.startswith("/routing-state"):
+                    body = json.dumps(published_rs).encode("utf-8")
+                    self.send_response(200)
+                else:
+                    poll_attempt += 1
+                    if poll_attempt == 1:
+                        body = json.dumps({"status": "APPLYING", "decision_batch_id": "dec_rec_019"}).encode("utf-8")
+                        self.send_response(202)
+                    else:
+                        body = json.dumps(
+                            {"status": "APPLIED", "decision_batch_id": "dec_rec_019", "results": results_48}
+                        ).encode("utf-8")
+                        self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if self.path == "/v1/optimization/decisions":
+                    resp = json.dumps({"status": "ACCEPTED", "decision_batch_id": "dec_rec_019"}).encode("utf-8")
+                    self.send_response(200)
+                else:
+                    resp = json.dumps(
+                        {
+                            "status": "ACCEPTED",
+                            "decision_batch_id": "dec_rec_019",
+                            "poll_url": "/v1/runs/run_custom_99/apply-status?decision_batch_id=dec_rec_019",
+                        }
+                    ).encode("utf-8")
+                    self.send_response(202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), AsyncRecoveryHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                journal_file = Path(tmp_dir) / "pending_apply.json"
+                base_url = f"http://127.0.0.1:{port}"
+
+                ctrl1 = OptimizationController(_base_config(budget_b=4), topology_override=self.topo)
+                client1 = OptimizationServiceClient(
+                    controller=ctrl1,
+                    data_base_url=base_url,
+                    sdn_base_url=base_url,
+                    apply_poll_interval_sec=0.01,
+                    apply_max_polls=1,
+                    journal_path=journal_file,
+                )
+                first_out = client1.execute_tick(
+                    u_current=0.92,
+                    forecast_data=custom_fc,
+                    routing_state=custom_rs,
+                    now_utc=self.now,
+                    decision_batch_id="dec_rec_019",
+                    apply_deadline_utc=self.deadline,
+                    tick_id="tick_019",
+                    tick_at_utc=self.tick_at,
+                )
+                self.assertEqual(first_out["apply_result"]["status"], "TIMEOUT")
+                self.assertTrue(journal_file.exists())
+
+                ctrl2 = OptimizationController(_base_config(budget_b=4), topology_override=self.topo)
+                client2 = OptimizationServiceClient(
+                    controller=ctrl2,
+                    data_base_url=base_url,
+                    sdn_base_url=base_url,
+                    apply_poll_interval_sec=0.01,
+                    apply_max_polls=3,
+                    journal_path=journal_file,
+                )
+                rec = client2.recover_pending_apply(now_utc=self.now, fetch_routing_state_after_apply=True)
+                self.assertIsNotNone(rec)
+                self.assertEqual(rec["apply_result"]["status"], "APPLIED")
+                self.assertTrue(rec["hold_down_update"]["complete_48"])
+                self.assertIn(changed_fg, rec["hold_down_update"]["locked_updated"])
+                self.assertFalse(journal_file.exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        self.assertEqual(
+            get_paths,
+            [
+                "/v1/runs/run_custom_99/apply-status?decision_batch_id=dec_rec_019",
+                "/v1/runs/run_custom_99/apply-status?decision_batch_id=dec_rec_019",
+                "/routing-state?run_id=run_custom_99",
+            ],
+        )
 
 
 if __name__ == "__main__":

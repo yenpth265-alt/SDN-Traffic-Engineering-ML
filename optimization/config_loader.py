@@ -12,6 +12,7 @@ DEFAULT_OPTIMIZATION_CONFIG: dict[str, Any] = {
     "config_version": "1.0",
     "topology_version": "1.0",
     "network_config_dir": "configs/network",
+    "H": 1,
     "TH": 0.85,
     "N": 3,
     "h": 0.05,
@@ -23,18 +24,14 @@ DEFAULT_OPTIMIZATION_CONFIG: dict[str, Any] = {
     "apply_guard_ms": 200,
 }
 
-_HASHED_KEYS = (
-    "config_version",
-    "topology_version",
-    "TH",
-    "N",
-    "h",
-    "T_hold",
-    "B",
-    "lambda_weight",
-    "C_e",
-    "deadline_ms",
-    "apply_guard_ms",
+_RUNTIME_EXCLUDED_KEYS = frozenset(
+    {
+        "config_hash",
+        "topology_hash",
+        "run_id",
+        "audit_log_path",
+        "network_config_dir",
+    }
 )
 
 
@@ -67,19 +64,9 @@ def _simple_yaml_load(text: str) -> dict[str, Any]:
 
 
 def compute_config_hash(config: Mapping[str, Any]) -> str:
-    canonical: dict[str, Any] = {}
-    for key in _HASHED_KEYS:
-        if key in config and config[key] is not None:
-            val = config[key]
-            canonical[key] = (
-                float(val)
-                if isinstance(val, (int, float))
-                and not isinstance(val, bool)
-                and key in ("TH", "h", "T_hold", "lambda_weight", "C_e")
-                else val
-            )
-    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    canonical = {k: v for k, v in config.items() if k not in _RUNTIME_EXCLUDED_KEYS}
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return f"sha256:{hashlib.sha256(raw).hexdigest()}"
 
 
 def load_optimization_config(config_path: str | Path = "configs/optimization/optimization.yaml") -> dict[str, Any]:

@@ -1,0 +1,17 @@
+[
+  {
+    "recorded_at_utc": "2026-11-26T14:00:00Z",
+    "run_id": "run_g0_fixture",
+    "tick_id": "tick_001",
+    "decision_batch_id": "dec_fixture_reroute_001",
+    "forecast_batch_id": "fc_batch_001",
+    "snapshot_id": "snap_001",
+    "state_version": 5,
+    "status": "APPLY_REQUESTED",
+    "reason": "",
+    "topology_version": "1.0",
+    "topology_hash": "sha256:topo_v1_0_fixture",
+    "config_version": "1.0",
+    "config_hash": "sha256:1fcd04aa072584f9b067e76b870f5c40f716081eb2b5569e5019caf3a1e21388"
+  }
+]

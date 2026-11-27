@@ -102,9 +102,13 @@ def load_topology_from_configs(config_dir: str = "configs/network") -> dict[str,
     if os.path.exists(bundle_path):
         with open(bundle_path, mode="r", encoding="utf-8") as fb:
             bundle = json.load(fb)
-
-        topology_version = str(bundle.get("topology_version", "1.0")).lstrip("v")
-        topology_hash = bundle.get("topology_hash") or bundle.get("sha256")
+        topology_version = str(bundle.get("topology_version", "1.0")).strip()
+        raw_hash = bundle.get("topology_hash") or bundle.get("sha256")
+        if raw_hash is not None and str(raw_hash).strip():
+            h_str = str(raw_hash).strip()
+            topology_hash = h_str if h_str.startswith("sha256:") else f"sha256:{h_str}"
+        else:
+            topology_hash = None
 
         raw_links = bundle.get("links", [])
         link_items = raw_links.values() if isinstance(raw_links, Mapping) else raw_links

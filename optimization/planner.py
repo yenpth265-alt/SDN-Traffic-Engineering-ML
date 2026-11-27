@@ -1,12 +1,16 @@
 import inspect
+import json
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from optimization.config_loader import compute_config_hash
 from optimization.input_validator import (
+    _parse_iso_utc,
     normalize_routing_entries,
     resolve_flow_path_id,
+    validate_context_binding,
     validate_forecast,
     validate_routing_state,
 )
@@ -28,6 +32,16 @@ from optimization.routing_policies.trigger import check_trigger
 from optimization.solver.solver import solve_model
 
 
+def _split_error_code(exc: ValueError, default_code: str = "INVALID_CONTEXT") -> tuple[str, str]:
+    msg = str(exc).strip()
+    if ":" in msg:
+        prefix, rest = msg.split(":", 1)
+        code = prefix.strip()
+        if code.isupper() and "_" in code:
+            return code, rest.strip()
+    return default_code, msg
+
+
 def _resolve_locked_groups(
     routes: Mapping[str, Mapping[str, Any]],
     t_hold: float,
@@ -46,6 +60,114 @@ def _resolve_locked_groups(
     else:
         locked = get_locked_groups(effective_routes, t_hold)
     return set(locked)
+
+
+def validate_post_solve_solution(
+    *,
+    topology: Mapping[str, Any],
+    b_f: Mapping[str, float],
+    current_selected: Mapping[str, str],
+    x_vals: Mapping[str, Mapping[str, Any]],
+    y_vals: Mapping[str, Any],
+    locked_groups: set[str],
+    config: Mapping[str, Any],
+    U_reported: float,
+    J_reported: float,
+    apply_deadline_utc: str,
+    now_utc: datetime,
+    solve_ms: float = 0.0,
+    prob: Any = None,
+    x_vars: Mapping[str, Mapping[str, Any]] | None = None,
+    y_vars: Mapping[str, Any] | None = None,
+    u_var: Any = None,
+) -> tuple[bool, str, dict[str, str]]:
+    """Bộ kiểm tra khả thi độc lập hậu solver trước khi serialize (CF-15)."""
+    F = topology["F"]
+    P = topology["P"]
+    E = topology["E"]
+    C_map = topology.get("C", {})
+    default_ce = float(config.get("C_e", 100.0))
+    a_fpe = topology["a_fpe"]
+    k_e = topology.get("k_e", {})
+    budget_b = int(config.get("B", 4))
+
+    selected_paths: dict[str, str] = {}
+    actual_changes = 0
+
+    for f in F:
+        row_x = x_vals.get(f, {})
+        ones: list[str] = []
+        for p in P[f]:
+            raw_x = row_x.get(p, 0)
+            if isinstance(raw_x, bool) or not isinstance(raw_x, (int, float)):
+                return False, f"Biến x[{f}][{p}] sai kiểu: {raw_x!r}", {}
+            rounded_x = int(round(float(raw_x)))
+            if abs(float(raw_x) - rounded_x) > 1e-5 or rounded_x not in (0, 1):
+                return False, f"Biến x[{f}][{p}] không nhị phân: {raw_x!r}", {}
+            if rounded_x == 1:
+                ones.append(p)
+
+        if len(ones) != 1:
+            return False, f"Vi phạm ràng buộc chọn đúng 1 tuyến cho flow {f}: {ones}", {}
+
+        chosen_p = ones[0]
+        selected_paths[f] = chosen_p
+        changed = 1 if chosen_p != current_selected[f] else 0
+
+        raw_y = y_vals.get(f, 0)
+        if isinstance(raw_y, bool) or not isinstance(raw_y, (int, float)):
+            return False, f"Biến y[{f}] sai kiểu: {raw_y!r}", {}
+        rounded_y = int(round(float(raw_y)))
+        if abs(float(raw_y) - rounded_y) > 1e-5 or rounded_y not in (0, 1):
+            return False, f"Biến y[{f}] không nhị phân: {raw_y!r}", {}
+        if rounded_y != changed:
+            return False, f"Biến y[{f}]={rounded_y} lệch với chuyển tuyến thực tế ({changed})", {}
+
+        if f in locked_groups and changed == 1:
+            return False, f"Vi phạm hold-down lock trên flow {f}", {}
+
+        actual_changes += changed
+
+    if actual_changes > budget_b:
+        return False, f"Số luồng đổi tuyến ({actual_changes}) vượt ngân sách B={budget_b}", {}
+
+    max_u = 0.0
+    for e in E:
+        cap = float(C_map.get(e, default_ce))
+        if cap <= 0:
+            return False, f"Dung lượng link {e} không hợp lệ: {cap}", {}
+        load_e = sum(float(b_f[f]) for f in F if a_fpe[f][selected_paths[f]][e] == 1)
+        u_e = (float(k_e.get(e, 1.0)) * load_e) / cap
+        if u_e > max_u:
+            max_u = u_e
+
+    if abs(max_u - float(U_reported)) > 1e-4:
+        return False, f"Sai lệch mức tải tối đa U: tính lại={max_u:.6f} != solver={U_reported}", {}
+
+    if prob is not None and getattr(prob, "objective", None) is not None and x_vars and y_vars and u_var is not None:
+        var_values: dict[str, float] = {u_var.name: max_u}
+        for f in F:
+            var_values[y_vars[f].name] = float(1 if selected_paths[f] != current_selected[f] else 0)
+            for p in P[f]:
+                var_values[x_vars[f][p].name] = float(1 if selected_paths[f] == p else 0)
+        j_calc = float(getattr(prob.objective, "constant", 0.0) or 0.0)
+        for var, coeff in prob.objective.items():
+            if var.name in var_values:
+                j_calc += float(coeff) * var_values[var.name]
+        if abs(j_calc - float(J_reported)) > 1e-4:
+            return False, f"Sai lệch hàm mục tiêu J: tính lại={j_calc:.6f} != solver={J_reported}", {}
+    elif float(J_reported) < max_u - 1e-6:
+        return False, f"Hàm mục tiêu J ({J_reported}) nhỏ hơn mức tải max_u ({max_u:.6f})", {}
+
+    dt_deadline, err_dl = _parse_iso_utc(apply_deadline_utc, "apply_deadline_utc")
+    if dt_deadline is None:
+        return False, err_dl, {}
+    dt_after_solve = now_utc + timedelta(milliseconds=max(0.0, float(solve_ms)))
+    rem_ms = (dt_deadline - dt_after_solve).total_seconds() * 1000.0
+    if rem_ms < float(config.get("apply_guard_ms", 200)):
+        return False, f"Hết quỹ thời gian apply sau khi giải ({rem_ms:.1f}ms)", {}
+
+    return True, "OK", selected_paths
 
 
 def run_planner(
@@ -76,19 +198,49 @@ def run_planner(
     if not merged_config.get("config_hash"):
         merged_config["config_hash"] = compute_config_hash(merged_config)
 
-    ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
     effective_tick_id = tick_id if tick_id is not None else forecast_data.get("tick_id")
     effective_tick_at = tick_at_utc if tick_at_utc is not None else forecast_data.get("tick_at_utc")
+
+    # CF-13 & CF-14: Kiểm soát timestamp và không tự bịa đồng hồ hệ thống nếu thiếu ngữ cảnh online
+    if now_utc is not None:
+        ref_now, err_now = _parse_iso_utc(now_utc, "now_utc")
+        if ref_now is None:
+            return {"status": "INVALID_TIMESTAMP", "reason": err_now}
+    elif effective_tick_at is not None:
+        ref_now, err_tick = _parse_iso_utc(effective_tick_at, "tick_at_utc")
+        if ref_now is None:
+            return {"status": "INVALID_TIMESTAMP", "reason": err_tick}
+    else:
+        return {"status": "MISSING_CONTEXT", "reason": "Thiếu now_utc hoặc tick_at_utc cho chu kỳ tối ưu online"}
+
+    if effective_tick_at is not None:
+        _, err_tick_fmt = _parse_iso_utc(effective_tick_at, "tick_at_utc")
+        if err_tick_fmt:
+            return {"status": "INVALID_TIMESTAMP", "reason": err_tick_fmt}
+
     F = topology["F"]
     routes = normalize_routing_entries(routing_state)
+
+    # CF-05 & CF-11: Đối chiếu ràng buộc run_id, snapshot_id, topology/config version & hash
+    ctx_ok, ctx_status, ctx_msg = validate_context_binding(forecast_data, routing_state, topology, merged_config)
+    if not ctx_ok:
+        return {"status": ctx_status, "reason": ctx_msg}
 
     state_ok, state_status, state_msg = validate_routing_state(routing_state, F, topology["P"])
     if not state_ok:
         return {"status": state_status, "reason": state_msg}
 
-    effective_deadline = resolve_apply_deadline_utc(
-        forecast_data, merged_config, ref_now, override_deadline=apply_deadline_utc
-    )
+    # CF-13 & CF-14: Không tự bịa deadline khi thiếu apply_deadline_utc
+    try:
+        effective_deadline = resolve_apply_deadline_utc(
+            forecast_data, merged_config, ref_now, override_deadline=apply_deadline_utc
+        )
+    except ValueError as exc:
+        err_code, err_msg = _split_error_code(exc, "MISSING_CONTEXT")
+        return {"status": err_code, "reason": err_msg}
+
+    # CF-12: Ép kiểm tra Horizon H khớp cấu hình model/run
+    expected_h = int(merged_config.get("H", 1))
     fc_ok, fc_status, fc_msg = validate_forecast(
         forecast_data,
         F,
@@ -96,6 +248,7 @@ def run_planner(
         apply_guard_ms=int(merged_config.get("apply_guard_ms", 200)),
         now_utc=ref_now,
         apply_deadline_utc=effective_deadline,
+        expected_horizon=expected_h,
     )
     if not fc_ok:
         return {"status": fc_status, "reason": fc_msg}
@@ -108,7 +261,12 @@ def run_planner(
     U_old = evaluate_routing_utilization(topology, b_f, routes, default_ce=default_ce)
     J_old = U_old
 
-    state_ver = int(routing_state.get("state_version", routing_state.get("routing_version", 1)))
+    raw_state_ver = (
+        routing_state.get("state_version")
+        if routing_state.get("state_version") is not None
+        else routing_state["routing_version"]
+    )
+    state_ver = int(raw_state_ver)
     run_id = str(forecast_data.get("run_id") or routing_state.get("run_id") or "run_default")
     batch_id = resolve_decision_batch_id(decision_batch_id, run_id, ref_now, tick_id=effective_tick_id)
     locked_groups = _resolve_locked_groups(
@@ -129,30 +287,35 @@ def run_planner(
     ) -> dict[str, Any]:
         u_fin = U_old if u_after is None else u_after
         j_fin = J_old if j_after is None else j_after
-        decision_batch = serialize_decision_batch(
-            decision_batch_id=batch_id,
-            topology=topology,
-            routing_state=routes,
-            selected_paths=current_selected,
-            locked_groups=locked_groups,
-            b_f=b_f,
-            forecast_data=forecast_data,
-            state_version=state_ver,
-            config=merged_config,
-            apply_deadline_utc=effective_deadline,
-            solver_metrics={
-                "status": solver_status,
-                "U_before": round(U_old, 6),
-                "U_after": round(u_fin, 6),
-                "J_before": round(J_old, 6),
-                "J_after": round(j_fin, 6),
-                "solve_ms": round(solve_ms, 3),
-            },
-            reason=reason_code,
-            tick_id=effective_tick_id,
-            tick_at_utc=effective_tick_at,
-            now_utc=ref_now,
-        )
+        try:
+            decision_batch = serialize_decision_batch(
+                decision_batch_id=batch_id,
+                topology=topology,
+                routing_state=routes,
+                selected_paths=current_selected,
+                locked_groups=locked_groups,
+                b_f=b_f,
+                forecast_data=forecast_data,
+                state_version=state_ver,
+                config=merged_config,
+                apply_deadline_utc=effective_deadline,
+                solver_metrics={
+                    "status": solver_status,
+                    "U_before": round(U_old, 6),
+                    "U_after": round(u_fin, 6),
+                    "J_before": round(J_old, 6),
+                    "J_after": round(j_fin, 6),
+                    "solve_ms": round(solve_ms, 3),
+                },
+                reason=reason_code,
+                tick_id=effective_tick_id,
+                tick_at_utc=effective_tick_at,
+                now_utc=ref_now,
+            )
+        except ValueError as exc:
+            err_code, err_msg = _split_error_code(exc, "INVALID_CONTEXT")
+            return {"status": err_code, "reason": err_msg}
+
         out: dict[str, Any] = {
             "status": "KEPT",
             "reason": reason_code,
@@ -191,7 +354,29 @@ def run_planner(
     if status not in ["Optimal", "Feasible"]:
         return _build_kept_result(f"Solver status: {status}", solver_status=status, solve_ms=solve_ms)
 
-    n_changes = sum(y_vals.values())
+    # CF-15: Hậu kiểm nghiệm MILP độc lập trước khi kiểm tra hysteresis và serialize
+    post_ok, post_msg, selected_paths = validate_post_solve_solution(
+        topology=topology,
+        b_f=b_f,
+        current_selected=current_selected,
+        x_vals=x_vals,
+        y_vals=y_vals,
+        locked_groups=locked_groups,
+        config=merged_config,
+        U_reported=U_new,
+        J_reported=J_new,
+        apply_deadline_utc=effective_deadline,
+        now_utc=ref_now,
+        solve_ms=solve_ms,
+        prob=prob,
+        x_vars=x,
+        y_vars=y,
+        u_var=U,
+    )
+    if not post_ok:
+        return _build_kept_result(f"POST_SOLVE_INVALID: {post_msg}", solver_status=status, solve_ms=solve_ms)
+
+    n_changes = sum(1 for f in F if selected_paths[f] != current_selected[f])
     if not check_hysteresis(J_old, J_new, n_changes, float(merged_config["h"])):
         return _build_kept_result(
             "NO_IMPROVEMENT",
@@ -201,50 +386,45 @@ def run_planner(
             solve_ms=solve_ms,
         )
 
-    selected_paths: dict[str, str] = {}
-    for f in F:
-        chosen = current_selected[f]
-        for p, val in x_vals.get(f, {}).items():
-            if int(round(val)) == 1:
-                chosen = p
-                break
-        selected_paths[f] = chosen
+    try:
+        decision_batch = serialize_decision_batch(
+            decision_batch_id=batch_id,
+            topology=topology,
+            routing_state=routes,
+            selected_paths=selected_paths,
+            locked_groups=locked_groups,
+            b_f=b_f,
+            forecast_data=forecast_data,
+            state_version=state_ver,
+            config=merged_config,
+            apply_deadline_utc=effective_deadline,
+            solver_metrics={
+                "status": status,
+                "U_before": round(U_old, 6),
+                "U_after": round(U_new, 6),
+                "J_before": round(J_old, 6),
+                "J_after": round(J_new, 6),
+                "solve_ms": round(solve_ms, 3),
+            },
+            reason="REROUTED",
+            tick_id=effective_tick_id,
+            tick_at_utc=effective_tick_at,
+            now_utc=ref_now,
+        )
 
-    decision_batch = serialize_decision_batch(
-        decision_batch_id=batch_id,
-        topology=topology,
-        routing_state=routes,
-        selected_paths=selected_paths,
-        locked_groups=locked_groups,
-        b_f=b_f,
-        forecast_data=forecast_data,
-        state_version=state_ver,
-        config=merged_config,
-        apply_deadline_utc=effective_deadline,
-        solver_metrics={
-            "status": status,
-            "U_before": round(U_old, 6),
-            "U_after": round(U_new, 6),
-            "J_before": round(J_old, 6),
-            "J_after": round(J_new, 6),
-            "solve_ms": round(solve_ms, 3),
-        },
-        reason="REROUTED",
-        tick_id=effective_tick_id,
-        tick_at_utc=effective_tick_at,
-        now_utc=ref_now,
-    )
-
-    apply_req = serialize_apply_request(
-        decision_batch_id=batch_id,
-        decision_rows=decision_batch["rows"],
-        forecast_data=forecast_data,
-        state_version=state_ver,
-        config=merged_config,
-        apply_deadline_utc=effective_deadline,
-        topology=topology,
-        now_utc=ref_now,
-    )
+        apply_req = serialize_apply_request(
+            decision_batch_id=batch_id,
+            decision_rows=decision_batch["rows"],
+            forecast_data=forecast_data,
+            state_version=state_ver,
+            config=merged_config,
+            apply_deadline_utc=effective_deadline,
+            topology=topology,
+            now_utc=ref_now,
+        )
+    except ValueError as exc:
+        err_code, err_msg = _split_error_code(exc, "INVALID_CONTEXT")
+        return {"status": err_code, "reason": err_msg}
 
     if apply_req is None:
         return _build_kept_result(
@@ -270,9 +450,60 @@ class OptimizationController:
             if topology_override is not None
             else load_topology_from_configs(self.config.get("network_config_dir", "configs/network"))
         )
+        self.config.setdefault("topology_version", self.topology.get("topology_version", "1.0"))
+        if self.topology.get("topology_hash") and not self.config.get("topology_hash"):
+            self.config["topology_hash"] = self.topology["topology_hash"]
+        if not self.config.get("config_hash"):
+            self.config["config_hash"] = compute_config_hash(self.config)
+
         n_win = max(1, int(self.config.get("N", 3)))
         self._u_history: deque[float] = deque(maxlen=n_win)
         self._hold_down_overrides: dict[str, str] = {}
+        self._audit_records: list[dict[str, Any]] = []
+
+    def get_audit_records(self) -> list[dict[str, Any]]:
+        return list(self._audit_records)
+
+    def _emit_audit(
+        self,
+        res: Mapping[str, Any],
+        forecast_data: Mapping[str, Any],
+        routing_state: Mapping[str, Any],
+        now_utc: datetime | None,
+        tick_id: int | str | None,
+    ) -> None:
+        """Ghi nhận audit disposition/reason/context cho mọi tick kể cả NO_TRIGGER/SKIPPED (CF-16)."""
+        db = res.get("decision_batch") if isinstance(res.get("decision_batch"), Mapping) else {}
+        ts_dt: datetime | None = None
+        if now_utc is not None:
+            ts_dt, _ = _parse_iso_utc(now_utc, "now_utc")
+        if ts_dt is None:
+            ts_dt = datetime.now(timezone.utc)
+
+        raw_tick = tick_id if tick_id is not None else forecast_data.get("tick_id")
+        record = {
+            "recorded_at_utc": _to_rfc3339_utc(ts_dt),
+            "run_id": str(db.get("run_id") or forecast_data.get("run_id") or routing_state.get("run_id") or ""),
+            "tick_id": str(raw_tick) if raw_tick is not None else "",
+            "decision_batch_id": db.get("decision_batch_id"),
+            "forecast_batch_id": forecast_data.get("forecast_batch_id") or forecast_data.get("batch_id"),
+            "snapshot_id": forecast_data.get("snapshot_id") or routing_state.get("snapshot_id"),
+            "state_version": routing_state.get("state_version", routing_state.get("routing_version")),
+            "status": res.get("status"),
+            "reason": res.get("reason", ""),
+            "topology_version": self.topology.get("topology_version"),
+            "topology_hash": self.topology.get("topology_hash"),
+            "config_version": self.config.get("config_version"),
+            "config_hash": self.config.get("config_hash"),
+        }
+        self._audit_records.append(record)
+
+        audit_path = self.config.get("audit_log_path")
+        if audit_path:
+            out_path = Path(str(audit_path))
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with out_path.open(mode="a", encoding="utf-8") as fa:
+                fa.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def step(
         self,
@@ -305,13 +536,21 @@ class OptimizationController:
         elif res["status"] in (
             "STATE_UNKNOWN",
             "STATE_INCOMPLETE",
+            "INVALID_STATE_VERSION",
+            "PATH_MAPPING_ERROR",
             "DATA_STALE",
             "FORECAST_INVALID",
             "FORECAST_NOT_READY",
             "INVALID_FORECAST_OFFSET",
             "INVALID_FORECAST_WINDOW",
+            "CONTEXT_MISMATCH",
+            "MISSING_CONTEXT",
+            "INVALID_TIMESTAMP",
+            "INVALID_DEADLINE",
         ):
             self._u_history.clear()
+
+        self._emit_audit(res, forecast_data, routing_state, now_utc, tick_id)
         return res
 
     def ingest_apply_result(

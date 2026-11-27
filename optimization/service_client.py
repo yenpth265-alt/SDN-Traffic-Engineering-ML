@@ -1,15 +1,18 @@
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Mapping
 
 from optimization.planner import OptimizationController
 from optimization.result_serializer import bind_decision_batch_id, build_decision_wire_payload
 
 _INTERIM_APPLY_STATUSES = {"ACCEPTED", "APPLYING", "IN_PROGRESS", "PENDING", "QUEUED"}
+_NON_TERMINAL_RECOVERY_STATUSES = _INTERIM_APPLY_STATUSES | {"TIMEOUT"}
 
 
 class OptimizationServiceClient:
@@ -31,6 +34,7 @@ class OptimizationServiceClient:
         retry_backoff_sec: float = 0.05,
         apply_poll_interval_sec: float = 0.05,
         apply_max_polls: int = 20,
+        journal_path: str | Path | None = None,
     ) -> None:
         self.controller = controller
         self.data_base_url = data_base_url.rstrip("/")
@@ -47,6 +51,7 @@ class OptimizationServiceClient:
         self.retry_backoff_sec = max(0.0, float(retry_backoff_sec))
         self.apply_poll_interval_sec = max(0.0, float(apply_poll_interval_sec))
         self.apply_max_polls = max(1, int(apply_max_polls))
+        self.journal_path = Path(journal_path) if journal_path is not None else None
 
     def _build_data_headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -59,6 +64,39 @@ class OptimizationServiceClient:
         if self.sdn_api_key:
             headers[self.sdn_auth_header] = f"{self.sdn_auth_scheme} {self.sdn_api_key}".strip()
         return headers
+
+    def _save_pending_journal(
+        self,
+        *,
+        apply_request: Mapping[str, Any],
+        decision_batch: Mapping[str, Any] | None = None,
+        poll_url: str | None = None,
+    ) -> None:
+        """Lưu trạng thái batch bền vững trước/trong khi gọi SDN để khôi phục khi mất ACK/restart (CF-18)."""
+        if self.journal_path is None:
+            return
+        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, Any] = {}
+        if self.journal_path.exists():
+            try:
+                existing = json.loads(self.journal_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+
+        state: dict[str, Any] = {
+            "run_id": str(apply_request.get("run_id") or existing.get("run_id") or ""),
+            "decision_batch_id": str(apply_request["decision_batch_id"]),
+            "apply_request": dict(apply_request),
+            "decision_batch": dict(decision_batch) if decision_batch is not None else existing.get("decision_batch"),
+            "poll_url": poll_url if poll_url is not None else existing.get("poll_url"),
+        }
+        tmp_path = self.journal_path.with_suffix(f"{self.journal_path.suffix}.tmp")
+        tmp_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, self.journal_path)
+
+    def _clear_pending_journal(self) -> None:
+        if self.journal_path is not None and self.journal_path.exists():
+            self.journal_path.unlink()
 
     def _request_json_with_status(
         self,
@@ -104,8 +142,30 @@ class OptimizationServiceClient:
         _, body = self._request_json_with_status("GET", url, headers=self._build_data_headers(), retryable=True)
         return body
 
-    def get_routing_state(self, endpoint_path: str | None = None) -> dict[str, Any]:
-        url = f"{self.sdn_base_url}{endpoint_path or self.sdn_state_endpoint}"
+    def get_routing_state(self, endpoint_path: str | None = None, run_id: str | None = None) -> dict[str, Any]:
+        """Đọc RoutingState hiện tại từ SDN, giữ nguyên run_id của phiên chạy nếu có (CF-17)."""
+        base_ep = (endpoint_path or self.sdn_state_endpoint).strip()
+        clean_run = str(run_id).strip() if run_id is not None and str(run_id).strip() else ""
+        safe_run = urllib.parse.quote(clean_run, safe="") if clean_run else ""
+
+        if "{run_id}" in base_ep:
+            base_ep = base_ep.format(run_id=safe_run)
+
+        if base_ep.startswith("http://") or base_ep.startswith("https://"):
+            url = base_ep
+        else:
+            path_prefix = base_ep if base_ep.startswith("/") else f"/{base_ep}"
+            url = f"{self.sdn_base_url}{path_prefix}"
+
+        if clean_run:
+            parsed = urllib.parse.urlsplit(url)
+            query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+            if "run_id" not in query_params and safe_run not in parsed.path and clean_run not in parsed.path:
+                query_params["run_id"] = clean_run
+            url = urllib.parse.urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query_params), parsed.fragment)
+            )
+
         _, body = self._request_json_with_status("GET", url, headers=self._build_sdn_headers(), retryable=True)
         return body
 
@@ -130,9 +190,12 @@ class OptimizationServiceClient:
         status_endpoint: str | None = None,
         run_id: str | None = None,
     ) -> dict[str, Any]:
+        """Truy vấn trạng thái apply bất đồng bộ theo poll_url SDN và giữ run_id (CF-17)."""
         base_ep = (status_endpoint or self.sdn_status_endpoint).strip()
-        safe_id = urllib.parse.quote(str(decision_batch_id).strip(), safe="")
-        safe_run = urllib.parse.quote(str(run_id).strip(), safe="") if run_id and str(run_id).strip() else ""
+        clean_id = str(decision_batch_id).strip()
+        clean_run = str(run_id).strip() if run_id is not None and str(run_id).strip() else ""
+        safe_id = urllib.parse.quote(clean_id, safe="")
+        safe_run = urllib.parse.quote(clean_run, safe="") if clean_run else ""
 
         if "{run_id}" in base_ep or "{decision_batch_id}" in base_ep:
             base_ep = base_ep.format(run_id=safe_run, decision_batch_id=safe_id)
@@ -145,10 +208,10 @@ class OptimizationServiceClient:
 
         parsed = urllib.parse.urlsplit(url)
         query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-        if safe_run and "run_id" not in query_params and safe_run not in parsed.path:
-            query_params["run_id"] = str(run_id).strip()
-        if "decision_batch_id" not in query_params and safe_id not in parsed.path:
-            query_params["decision_batch_id"] = str(decision_batch_id).strip()
+        if clean_run and "run_id" not in query_params and safe_run not in parsed.path and clean_run not in parsed.path:
+            query_params["run_id"] = clean_run
+        if "decision_batch_id" not in query_params and safe_id not in parsed.path and clean_id not in parsed.path:
+            query_params["decision_batch_id"] = clean_id
 
         url = urllib.parse.urlunsplit(
             (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query_params), parsed.fragment)
@@ -175,6 +238,7 @@ class OptimizationServiceClient:
         endpoint_path: str | None = None,
         status_endpoint: str | None = None,
     ) -> dict[str, Any]:
+        self._save_pending_journal(apply_request=apply_request)
         url = f"{self.sdn_base_url}{endpoint_path or self.sdn_apply_endpoint}"
         code, body = self._request_json_with_status(
             "POST", url, headers=self._build_sdn_headers(), payload=dict(apply_request), retryable=False
@@ -187,12 +251,64 @@ class OptimizationServiceClient:
                 or status_endpoint
                 or self.sdn_status_endpoint
             )
+            poll_target_str = str(poll_target)
+            self._save_pending_journal(apply_request=apply_request, poll_url=poll_target_str)
             return self.poll_apply_status(
                 decision_batch_id=str(apply_request["decision_batch_id"]),
-                status_endpoint=str(poll_target),
+                status_endpoint=poll_target_str,
                 run_id=str(apply_request.get("run_id") or "") or None,
             )
         return body
+
+    def recover_pending_apply(
+        self,
+        *,
+        now_utc: datetime | None = None,
+        status_endpoint: str | None = None,
+        fetch_routing_state_after_apply: bool = True,
+    ) -> dict[str, Any] | None:
+        """Khôi phục và reconcile batch đã gửi SDN khi mất ACK hoặc client restart (CF-18)."""
+        if self.journal_path is None or not self.journal_path.exists():
+            return None
+
+        saved = json.loads(self.journal_path.read_text(encoding="utf-8"))
+        apply_req = saved.get("apply_request") if isinstance(saved.get("apply_request"), Mapping) else {}
+        batch_id = str(saved.get("decision_batch_id") or apply_req.get("decision_batch_id") or "").strip()
+        if not batch_id:
+            return None
+
+        run_id = str(saved.get("run_id") or apply_req.get("run_id") or "").strip() or None
+        saved_poll_url = saved.get("poll_url") or status_endpoint
+
+        apply_result = self.poll_apply_status(
+            decision_batch_id=batch_id,
+            status_endpoint=str(saved_poll_url) if saved_poll_url else None,
+            run_id=run_id,
+        )
+
+        pub_state: Mapping[str, Any] | None = None
+        if isinstance(apply_result, Mapping) and isinstance(apply_result.get("published_routing_state"), Mapping):
+            pub_state = apply_result["published_routing_state"]
+        elif fetch_routing_state_after_apply:
+            pub_state = self.get_routing_state(run_id=run_id)
+
+        hold_down_upd = self.controller.ingest_apply_result(
+            apply_result,
+            now_utc=now_utc,
+            published_routing_state=pub_state,
+        )
+
+        final_st = str(apply_result.get("status", "")).upper()
+        if final_st not in _NON_TERMINAL_RECOVERY_STATUSES:
+            self._clear_pending_journal()
+
+        return {
+            "recovered": True,
+            "run_id": run_id,
+            "decision_batch_id": batch_id,
+            "apply_result": apply_result,
+            "hold_down_update": hold_down_upd,
+        }
 
     def execute_tick(
         self,
@@ -212,7 +328,11 @@ class OptimizationServiceClient:
         sdn_status_endpoint: str | None = None,
         fetch_routing_state_after_apply: bool = False,
     ) -> dict[str, Any]:
-        effective_routing = routing_state if routing_state is not None else self.get_routing_state()
+        effective_routing = (
+            routing_state
+            if routing_state is not None
+            else self.get_routing_state(run_id=run_id)
+        )
         effective_forecast = forecast_data
         if effective_forecast is None:
             if not run_id or not forecast_batch_id:
@@ -240,22 +360,40 @@ class OptimizationServiceClient:
 
         apply_request = plan.get("apply_request")
         if plan["status"] == "APPLY_REQUESTED" and apply_request is not None:
+            self._save_pending_journal(apply_request=apply_request, decision_batch=plan.get("decision_batch"))
             apply_result = self.post_apply_request_to_sdn(
                 apply_request,
                 endpoint_path=sdn_apply_endpoint,
                 status_endpoint=sdn_status_endpoint,
             )
             plan["apply_result"] = apply_result
+
+            effective_run_id = (
+                str(run_id).strip()
+                if run_id is not None and str(run_id).strip()
+                else str(
+                    apply_request.get("run_id")
+                    or effective_forecast.get("run_id")
+                    or effective_routing.get("run_id")
+                    or ""
+                ).strip()
+                or None
+            )
+
             pub_state: Mapping[str, Any] | None = None
             if isinstance(apply_result, Mapping) and isinstance(apply_result.get("published_routing_state"), Mapping):
                 pub_state = apply_result["published_routing_state"]
             elif fetch_routing_state_after_apply:
-                pub_state = self.get_routing_state()
+                pub_state = self.get_routing_state(run_id=effective_run_id)
 
             plan["hold_down_update"] = self.controller.ingest_apply_result(
                 apply_result,
                 now_utc=now_utc,
                 published_routing_state=pub_state,
             )
+
+            final_st = str(apply_result.get("status", "")).upper()
+            if final_st not in _NON_TERMINAL_RECOVERY_STATUSES:
+                self._clear_pending_journal()
 
         return plan

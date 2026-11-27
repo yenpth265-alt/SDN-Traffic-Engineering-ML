@@ -95,7 +95,7 @@ def _solve_exact_branch_and_bound(
     flow_path_weights: dict[str, dict[str, list[tuple[int, float]]]] = {}
 
     for f in F:
-        p0 = routing_state[f].get("current_path") or routing_state[f].get("actual_path_id")
+        p0 = str(resolve_flow_path_id(routing_state[f]) or "")
         cur_path[f] = p0
         flow_path_weights[f] = {}
         demand = float(b_f[f])

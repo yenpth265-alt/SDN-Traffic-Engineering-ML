@@ -20,20 +20,36 @@ def _to_rfc3339_utc(dt: datetime) -> str:
 
 
 def _parse_utc(raw: Any, field_name: str = "timestamp") -> datetime:
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            raise ValueError(f"INVALID_TIMESTAMP: {field_name} thiếu múi giờ UTC")
+        return raw.astimezone(timezone.utc)
     if not isinstance(raw, str) or not raw.strip():
-        raise ValueError(f"{field_name} phải là chuỗi RFC3339 UTC hợp lệ")
-    dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        raise ValueError(f"INVALID_TIMESTAMP: {field_name} phải là chuỗi RFC3339 UTC hợp lệ")
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"INVALID_TIMESTAMP: {field_name} sai định dạng ISO-8601: {raw!r}") from exc
     if dt.tzinfo is None:
-        raise ValueError(f"{field_name} thiếu múi giờ UTC")
+        raise ValueError(f"INVALID_TIMESTAMP: {field_name} thiếu múi giờ UTC")
     return dt.astimezone(timezone.utc)
 
 
-def _parse_optional_utc(raw: Any) -> datetime | None:
+def _parse_optional_utc(raw: Any, field_name: str = "timestamp") -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            raise ValueError(f"INVALID_TIMESTAMP: {field_name} thiếu múi giờ UTC")
+        return raw.astimezone(timezone.utc)
     if not isinstance(raw, str) or not raw.strip():
         return None
-    dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"INVALID_TIMESTAMP: {field_name} sai định dạng ISO-8601: {raw!r}") from exc
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        raise ValueError(f"INVALID_TIMESTAMP: {field_name} thiếu múi giờ UTC")
     return dt.astimezone(timezone.utc)
 
 
@@ -45,9 +61,20 @@ def _resolve_forecast_batch_id(forecast_data: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _extract_decision_batch_bounds(forecast_data: Mapping[str, Any], now_utc: datetime) -> tuple[int | str, int | str]:
-    f_start = forecast_data.get("forecast_start") if "forecast_start" in forecast_data else forecast_data.get("forecast_start_utc")
-    f_end = forecast_data.get("forecast_end") if "forecast_end" in forecast_data else forecast_data.get("forecast_end_utc")
+def _extract_decision_batch_bounds(forecast_data: Mapping[str, Any]) -> tuple[int | str, int | str]:
+    f_start = (
+        forecast_data.get("forecast_start")
+        if "forecast_start" in forecast_data
+        else forecast_data.get("forecast_start_utc")
+    )
+    f_end = (
+        forecast_data.get("forecast_end")
+        if "forecast_end" in forecast_data
+        else forecast_data.get("forecast_end_utc")
+    )
+
+    if f_start is None or f_end is None:
+        raise ValueError("MISSING_CONTEXT: Thiếu forecast_start hoặc forecast_end trong ForecastBatch")
 
     if (
         isinstance(f_start, int)
@@ -57,21 +84,30 @@ def _extract_decision_batch_bounds(forecast_data: Mapping[str, Any], now_utc: da
     ):
         return f_start, f_end
 
-    s_str = str(f_start) if f_start is not None else _to_rfc3339_utc(now_utc)
-    e_str = str(f_end) if f_end is not None else s_str
-    return s_str, e_str
+    return str(f_start).strip(), str(f_end).strip()
 
 
-def _extract_apply_request_utc_bounds(forecast_data: Mapping[str, Any], now_utc: datetime) -> tuple[str, str]:
+def _extract_apply_request_utc_bounds(
+    forecast_data: Mapping[str, Any],
+    now_utc: datetime | None = None,
+) -> tuple[str, str]:
     s_utc = forecast_data.get("forecast_start_utc")
     e_utc = forecast_data.get("forecast_end_utc")
     if isinstance(s_utc, str) and s_utc.strip() and isinstance(e_utc, str) and e_utc.strip():
-        return s_utc.strip(), e_utc.strip()
+        dt_s = _parse_utc(s_utc, "forecast_start_utc")
+        dt_e = _parse_utc(e_utc, "forecast_end_utc")
+        if dt_e <= dt_s:
+            raise ValueError("INVALID_FORECAST_WINDOW: forecast_end_utc phải sau forecast_start_utc")
+        return _to_rfc3339_utc(dt_s), _to_rfc3339_utc(dt_e)
 
     f_start = forecast_data.get("forecast_start")
     f_end = forecast_data.get("forecast_end")
     if isinstance(f_start, str) and f_start.strip() and isinstance(f_end, str) and f_end.strip():
-        return f_start.strip(), f_end.strip()
+        dt_s = _parse_utc(f_start, "forecast_start")
+        dt_e = _parse_utc(f_end, "forecast_end")
+        if dt_e <= dt_s:
+            raise ValueError("INVALID_FORECAST_WINDOW: forecast_end phải sau forecast_start")
+        return _to_rfc3339_utc(dt_s), _to_rfc3339_utc(dt_e)
 
     origin_refs = forecast_data.get("origin_refs") if isinstance(forecast_data.get("origin_refs"), Mapping) else {}
     delta_s = float(forecast_data.get("delta_s") or origin_refs.get("delta_s") or 1.0)
@@ -84,16 +120,25 @@ def _extract_apply_request_utc_bounds(forecast_data: Mapping[str, Any], now_utc:
         and isinstance(f_end, int)
         and not isinstance(f_end, bool)
     ):
-        meas_start = _parse_optional_utc(forecast_data.get("measurement_started_at_utc") or origin_refs.get("measurement_started_at_utc"))
+        if f_end <= f_start:
+            raise ValueError("INVALID_FORECAST_WINDOW: forecast_end phải lớn hơn forecast_start")
+        meas_start = _parse_optional_utc(
+            forecast_data.get("measurement_started_at_utc") or origin_refs.get("measurement_started_at_utc"),
+            "measurement_started_at_utc",
+        )
         if meas_start is not None:
             return _to_rfc3339_utc(meas_start + timedelta(seconds=f_start * delta_s)), _to_rfc3339_utc(
                 meas_start + timedelta(seconds=f_end * delta_s)
             )
-        span_bins = max(1, f_end - f_start)
-        base_dt = _parse_optional_utc(forecast_data.get("snapshot_as_of_utc")) or now_utc
+        span_bins = f_end - f_start
+        base_dt = _parse_optional_utc(forecast_data.get("snapshot_as_of_utc"), "snapshot_as_of_utc")
+        if base_dt is None and now_utc is not None:
+            base_dt = now_utc.astimezone(timezone.utc) if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc)
+        if base_dt is None:
+            raise ValueError("MISSING_CONTEXT: Thiếu mốc thời gian gốc UTC để quy đổi cửa sổ dự báo")
         return _to_rfc3339_utc(base_dt), _to_rfc3339_utc(base_dt + timedelta(seconds=span_bins * delta_s))
 
-    return _to_rfc3339_utc(now_utc), _to_rfc3339_utc(now_utc + timedelta(seconds=1))
+    raise ValueError("MISSING_CONTEXT: Thiếu forecast_start/forecast_end hợp lệ để tạo ApplyRequest")
 
 
 def resolve_decision_batch_id(
@@ -113,7 +158,7 @@ def resolve_decision_batch_id(
 def resolve_apply_deadline_utc(
     forecast_data: Mapping[str, Any],
     config: Mapping[str, Any],
-    now_utc: datetime,
+    now_utc: datetime | None = None,
     override_deadline: str | None = None,
 ) -> str:
     if isinstance(override_deadline, str) and override_deadline.strip():
@@ -121,8 +166,7 @@ def resolve_apply_deadline_utc(
     raw = forecast_data.get("apply_deadline_utc")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
-    budget_ms = int(config.get("deadline_ms", 200)) + int(config.get("apply_guard_ms", 200)) + 2000
-    return _to_rfc3339_utc(now_utc + timedelta(milliseconds=budget_ms))
+    raise ValueError("MISSING_CONTEXT: Thiếu apply_deadline_utc từ Runner/ForecastBatch")
 
 
 def compute_apply_request_hash(payload: Mapping[str, Any]) -> str:
@@ -219,20 +263,19 @@ def serialize_decision_batch(
     tick_at_utc: str | None = None,
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
-    ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
-    resolved_tick_at = (
-        str(tick_at_utc).strip()
-        if isinstance(tick_at_utc, str) and tick_at_utc.strip()
-        else (
-            str(forecast_data.get("tick_at_utc")).strip()
-            if isinstance(forecast_data.get("tick_at_utc"), str) and str(forecast_data.get("tick_at_utc")).strip()
-            else _to_rfc3339_utc(ref_now)
-        )
-    )
+    if isinstance(tick_at_utc, str) and tick_at_utc.strip():
+        resolved_tick_at = tick_at_utc.strip()
+    elif isinstance(forecast_data.get("tick_at_utc"), str) and str(forecast_data.get("tick_at_utc")).strip():
+        resolved_tick_at = str(forecast_data.get("tick_at_utc")).strip()
+    elif now_utc is not None:
+        resolved_tick_at = _to_rfc3339_utc(now_utc)
+    else:
+        raise ValueError("MISSING_CONTEXT: Thiếu tick_at_utc cho chu kỳ tối ưu online")
+
     dt_tick = _parse_utc(resolved_tick_at, "tick_at_utc")
     dt_deadline = _parse_utc(apply_deadline_utc, "apply_deadline_utc")
     if dt_deadline <= dt_tick:
-        raise ValueError("apply_deadline_utc phải sau tick_at_utc")
+        raise ValueError("INVALID_DEADLINE: apply_deadline_utc phải sau tick_at_utc")
 
     rows: list[dict[str, Any]] = []
     changed_count = 0
@@ -263,7 +306,7 @@ def serialize_decision_batch(
         )
 
     batch_status = "APPLY_REQUESTED" if changed_count > 0 else "KEPT"
-    f_start, f_end = _extract_decision_batch_bounds(forecast_data, ref_now)
+    f_start, f_end = _extract_decision_batch_bounds(forecast_data)
 
     optimizer_result: dict[str, Any] = {
         "decision_status": batch_status,
@@ -348,8 +391,11 @@ def serialize_apply_request(
     if len(changes) > max_b:
         raise ValueError(f"Số luồng đổi tuyến ({len(changes)}) vượt quá ngân sách B={max_b}")
 
-    ref_now = now_utc.astimezone(timezone.utc) if now_utc is not None else datetime.now(timezone.utc)
-    f_start_utc, f_end_utc = _extract_apply_request_utc_bounds(forecast_data, ref_now)
+    f_start_utc, f_end_utc = _extract_apply_request_utc_bounds(forecast_data, now_utc)
+    dt_deadline = _parse_utc(apply_deadline_utc, "apply_deadline_utc")
+    dt_end_utc = _parse_utc(f_end_utc, "forecast_end")
+    if dt_deadline > dt_end_utc:
+        raise ValueError("INVALID_DEADLINE: apply_deadline_utc không được vượt quá forecast_end")
 
     topo_ver = (
         str(topology["topology_version"])

@@ -20,6 +20,29 @@ def resolve_forecast_batch_id(forecast_data: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _normalize_sha256(raw: Any) -> str:
+    val = str(raw).strip()
+    if not val:
+        return ""
+    return val if val.startswith("sha256:") else f"sha256:{val}"
+
+
+def _parse_iso_utc(raw: Any, field_name: str) -> tuple[datetime | None, str]:
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            return None, f"{field_name} thiếu múi giờ UTC"
+        return raw.astimezone(timezone.utc), ""
+    if not isinstance(raw, str) or not raw.strip():
+        return None, f"{field_name} phải là chuỗi thời gian UTC hợp lệ"
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None, f"{field_name} sai định dạng ISO-8601: {raw!r}"
+    if dt.tzinfo is None:
+        return None, f"{field_name} thiếu múi giờ UTC"
+    return dt.astimezone(timezone.utc), ""
+
+
 def normalize_routing_entries(routing_state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     raw = routing_state.get("routing_state")
     if isinstance(raw, list):
@@ -136,6 +159,55 @@ def check_data_sync_gate(routing_state: Mapping[str, Any]) -> tuple[bool, str, s
     return True, "OK", ""
 
 
+def validate_context_binding(
+    forecast_data: Mapping[str, Any],
+    routing_state: Mapping[str, Any],
+    topology: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> tuple[bool, str, str]:
+    """Đối chiếu ràng buộc run_id, snapshot_id, topology/config version & hash (CF-05, CF-11)."""
+    fc_run = str(forecast_data.get("run_id") or "").strip()
+    rs_run = str(routing_state.get("run_id") or "").strip()
+    cfg_run = str(config.get("run_id") or "").strip()
+    if fc_run and rs_run and fc_run != rs_run:
+        return False, "CONTEXT_MISMATCH", f"Lệch run_id giữa forecast ({fc_run}) và routing_state ({rs_run})"
+    if cfg_run and fc_run and cfg_run != fc_run:
+        return False, "CONTEXT_MISMATCH", f"Lệch run_id với cấu hình run ({cfg_run} != {fc_run})"
+    if cfg_run and rs_run and cfg_run != rs_run:
+        return False, "CONTEXT_MISMATCH", f"Lệch run_id giữa cấu hình ({cfg_run}) và routing_state ({rs_run})"
+
+    fc_snap = str(forecast_data.get("snapshot_id") or "").strip()
+    rs_snap = str(routing_state.get("snapshot_id") or "").strip()
+    if fc_snap and rs_snap and fc_snap != rs_snap:
+        return False, "CONTEXT_MISMATCH", f"Lệch snapshot_id ({fc_snap} != {rs_snap})"
+
+    expected_topo_ver = str(topology.get("topology_version") or "").strip()
+    expected_topo_hash = _normalize_sha256(topology.get("topology_hash") or "")
+    for src_name, src in (("routing_state", routing_state), ("forecast_data", forecast_data)):
+        src_ver = src.get("topology_version")
+        if src_ver is not None and str(src_ver).strip() and expected_topo_ver:
+            if str(src_ver).strip() != expected_topo_ver:
+                return False, "CONTEXT_MISMATCH", f"Lệch topology_version ở {src_name}: {src_ver} != {expected_topo_ver}"
+        src_hash = src.get("topology_hash")
+        if src_hash is not None and str(src_hash).strip() and expected_topo_hash:
+            if _normalize_sha256(src_hash) != expected_topo_hash:
+                return False, "CONTEXT_MISMATCH", f"Lệch topology_hash ở {src_name}: {src_hash} != {expected_topo_hash}"
+
+    expected_cfg_ver = str(config.get("config_version") or "").strip()
+    expected_cfg_hash = _normalize_sha256(config.get("config_hash") or "")
+    for src_name, src in (("routing_state", routing_state), ("forecast_data", forecast_data)):
+        c_ver = src.get("config_version")
+        if c_ver is not None and str(c_ver).strip() and expected_cfg_ver:
+            if str(c_ver).strip() != expected_cfg_ver:
+                return False, "CONTEXT_MISMATCH", f"Lệch config_version ở {src_name}: {c_ver} != {expected_cfg_ver}"
+        c_hash = src.get("config_hash")
+        if c_hash is not None and str(c_hash).strip() and expected_cfg_hash:
+            if _normalize_sha256(c_hash) != expected_cfg_hash:
+                return False, "CONTEXT_MISMATCH", f"Lệch config_hash ở {src_name}: {c_hash} != {expected_cfg_hash}"
+
+    return True, "OK", ""
+
+
 def validate_routing_state(
     routing_state: Mapping[str, Any],
     flow_groups: Sequence[str],
@@ -158,9 +230,8 @@ def validate_routing_state(
         return False, "STATE_INCOMPLETE", "SDN chưa hoàn tất thu thập trạng thái 48 luồng"
 
     state_ver = routing_state.get("state_version", routing_state.get("routing_version"))
-    if state_ver is not None:
-        if isinstance(state_ver, bool) or not isinstance(state_ver, int) or state_ver < 1:
-            return False, "INVALID_STATE_VERSION", f"state_version không hợp lệ: {state_ver!r}"
+    if state_ver is None or isinstance(state_ver, bool) or not isinstance(state_ver, int) or state_ver < 1:
+        return False, "INVALID_STATE_VERSION", f"Thiếu hoặc sai state_version/routing_version: {state_ver!r}"
 
     routes = normalize_routing_entries(routing_state)
     for f in flow_groups:
@@ -186,30 +257,43 @@ def validate_routing_state(
     return True, "OK", ""
 
 
-def _validate_window_bounds(f_start_raw: Any, f_end_raw: Any) -> tuple[bool, str, str]:
-    if isinstance(f_start_raw, float) or isinstance(f_end_raw, float):
-        return False, "INVALID_FORECAST_OFFSET", "forecast_start/forecast_end phải là số nguyên (int)"
+def _validate_window_bounds(
+    f_start_raw: Any,
+    f_end_raw: Any,
+    expected_bins: int | None = None,
+) -> tuple[bool, str, str, datetime | None]:
+    if isinstance(f_start_raw, (bool, float)) or isinstance(f_end_raw, (bool, float)):
+        return False, "INVALID_FORECAST_OFFSET", "forecast_start/forecast_end không được là bool hoặc float", None
 
-    if (
-        isinstance(f_start_raw, int)
-        and not isinstance(f_start_raw, bool)
-        and isinstance(f_end_raw, int)
-        and not isinstance(f_end_raw, bool)
-    ):
+    if isinstance(f_start_raw, int) and isinstance(f_end_raw, int):
         if f_end_raw <= f_start_raw:
-            return False, "INVALID_FORECAST_WINDOW", "forecast_end phải lớn hơn forecast_start"
-        return True, "OK", ""
+            return False, "INVALID_FORECAST_WINDOW", "forecast_end phải lớn hơn forecast_start", None
+        if expected_bins is not None and (f_end_raw - f_start_raw) != expected_bins:
+            return (
+                False,
+                "INVALID_FORECAST_WINDOW",
+                f"Số bin ({expected_bins}) không khớp cửa sổ [{f_start_raw}, {f_end_raw})",
+                None,
+            )
+        return True, "OK", "", None
 
-    if isinstance(f_start_raw, str) and isinstance(f_end_raw, str):
-        dt_start = datetime.fromisoformat(f_start_raw.replace("Z", "+00:00"))
-        dt_end = datetime.fromisoformat(f_end_raw.replace("Z", "+00:00"))
-        if dt_start.tzinfo is None or dt_end.tzinfo is None:
-            return False, "INVALID_TIMESTAMP", "forecast_start/forecast_end thiếu múi giờ UTC"
+    if isinstance(f_start_raw, (str, datetime)) and isinstance(f_end_raw, (str, datetime)):
+        dt_start, err_s = _parse_iso_utc(f_start_raw, "forecast_start")
+        if dt_start is None:
+            return False, "INVALID_TIMESTAMP", err_s, None
+        dt_end, err_e = _parse_iso_utc(f_end_raw, "forecast_end")
+        if dt_end is None:
+            return False, "INVALID_TIMESTAMP", err_e, None
         if dt_end <= dt_start:
-            return False, "INVALID_FORECAST_WINDOW", "forecast_end phải lớn hơn forecast_start"
-        return True, "OK", ""
+            return False, "INVALID_FORECAST_WINDOW", "forecast_end phải lớn hơn forecast_start", None
+        return True, "OK", "", dt_end
 
-    return False, "INVALID_FORECAST_OFFSET", f"Kiểu forecast_start/forecast_end không hợp lệ: {type(f_start_raw).__name__}"
+    return (
+        False,
+        "INVALID_FORECAST_OFFSET",
+        f"Kiểu forecast_start/forecast_end không hợp lệ: {type(f_start_raw).__name__}",
+        None,
+    )
 
 
 def validate_forecast(
@@ -221,6 +305,7 @@ def validate_forecast(
     apply_deadline_utc: str | None = None,
     expected_horizon: int | None = None,
 ) -> tuple[bool, str, str]:
+    # CF-09: Chỉ từ chối nếu status có mặt và khác READY; chấp nhận forecast đủ dòng không kèm status
     batch_status = forecast_data.get("status")
     if batch_status is not None and str(batch_status).strip():
         if str(batch_status).strip().upper() != "READY":
@@ -245,13 +330,12 @@ def validate_forecast(
         flow_offsets = offset_map.get(f, ())
         if expected_offsets is None:
             expected_offsets = flow_offsets
-            if (
-                expected_horizon is not None
-                and not isinstance(expected_horizon, bool)
-                and int(expected_horizon) > 0
-                and len(expected_offsets) != int(expected_horizon)
-            ):
-                return False, "FORECAST_INVALID", f"Horizon H không khớp ({len(expected_offsets)} != {int(expected_horizon)})"
+            # CF-12: Ép kiểm tra Horizon H khớp cấu hình model/run
+            if expected_horizon is not None:
+                if isinstance(expected_horizon, bool) or not isinstance(expected_horizon, int) or expected_horizon < 1:
+                    return False, "FORECAST_INVALID", f"expected_horizon không hợp lệ: {expected_horizon!r}"
+                if len(expected_offsets) != expected_horizon:
+                    return False, "FORECAST_INVALID", f"Horizon H không khớp ({len(expected_offsets)} != {expected_horizon})"
         elif flow_offsets != expected_offsets:
             return False, "FORECAST_INVALID", f"Tập bin dự báo không đồng nhất cho flow {f}"
 
@@ -264,22 +348,52 @@ def validate_forecast(
             ):
                 return False, "FORECAST_INVALID", f"Invalid predicted_mbps value for flow {f}: {val!r}"
 
-    f_start_raw = forecast_data.get("forecast_start") if "forecast_start" in forecast_data else forecast_data.get("forecast_start_utc")
-    f_end_raw = forecast_data.get("forecast_end") if "forecast_end" in forecast_data else forecast_data.get("forecast_end_utc")
+    # CF-13 & CF-14: Kiểm tra window bounds, timestamp an toàn, cấm thiếu context online
+    f_start_raw = (
+        forecast_data.get("forecast_start")
+        if "forecast_start" in forecast_data
+        else forecast_data.get("forecast_start_utc")
+    )
+    f_end_raw = (
+        forecast_data.get("forecast_end")
+        if "forecast_end" in forecast_data
+        else forecast_data.get("forecast_end_utc")
+    )
+    if f_start_raw is None or f_end_raw is None:
+        return False, "MISSING_CONTEXT", "ForecastBatch thiếu forecast_start hoặc forecast_end"
 
-    if f_start_raw is not None and f_end_raw is not None:
-        win_ok, win_code, win_msg = _validate_window_bounds(f_start_raw, f_end_raw)
-        if not win_ok:
-            return False, win_code, win_msg
+    expected_bins = len(expected_offsets) if expected_offsets is not None else None
+    win_ok, win_code, win_msg, dt_window_end = _validate_window_bounds(
+        f_start_raw, f_end_raw, expected_bins=expected_bins
+    )
+    if not win_ok:
+        return False, win_code, win_msg
+
+    if "tick_at_utc" in forecast_data and forecast_data["tick_at_utc"] is not None:
+        dt_tick, err_tick = _parse_iso_utc(forecast_data["tick_at_utc"], "tick_at_utc")
+        if dt_tick is None:
+            return False, "INVALID_TIMESTAMP", err_tick
 
     deadline_raw = apply_deadline_utc or forecast_data.get("apply_deadline_utc")
-    if deadline_raw:
-        dt_deadline = datetime.fromisoformat(str(deadline_raw).replace("Z", "+00:00"))
-        if dt_deadline.tzinfo is None:
-            return False, "INVALID_TIMESTAMP", "apply_deadline_utc thiếu múi giờ UTC"
-        ref_now = now_utc if now_utc is not None else datetime.now(timezone.utc)
-        remaining_ms = (dt_deadline - ref_now).total_seconds() * 1000.0
-        if remaining_ms < (deadline_ms + apply_guard_ms):
-            return False, "DATA_STALE", f"Quỹ thời gian còn lại ({remaining_ms:.1f}ms) nhỏ hơn {deadline_ms + apply_guard_ms}ms"
+    if not deadline_raw:
+        return False, "MISSING_CONTEXT", "Thiếu apply_deadline_utc cho chu kỳ tối ưu online"
+
+    dt_deadline, err_dl = _parse_iso_utc(deadline_raw, "apply_deadline_utc")
+    if dt_deadline is None:
+        return False, "INVALID_TIMESTAMP", err_dl
+
+    if dt_window_end is not None and dt_deadline > dt_window_end:
+        return False, "INVALID_DEADLINE", "apply_deadline_utc không được vượt quá forecast_end"
+
+    if now_utc is None:
+        return False, "MISSING_CONTEXT", "Thiếu now_utc của tick hiện tại"
+
+    dt_now, err_now = _parse_iso_utc(now_utc, "now_utc")
+    if dt_now is None:
+        return False, "INVALID_TIMESTAMP", err_now
+
+    remaining_ms = (dt_deadline - dt_now).total_seconds() * 1000.0
+    if remaining_ms < (deadline_ms + apply_guard_ms):
+        return False, "DATA_STALE", f"Quỹ thời gian còn lại ({remaining_ms:.1f}ms) nhỏ hơn {deadline_ms + apply_guard_ms}ms"
 
     return True, "OK", ""

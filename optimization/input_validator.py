@@ -222,8 +222,9 @@ def validate_forecast(
     expected_horizon: int | None = None,
 ) -> tuple[bool, str, str]:
     batch_status = forecast_data.get("status")
-    if batch_status is None or not str(batch_status).strip() or str(batch_status).strip().upper() != "READY":
-        return False, "FORECAST_NOT_READY", f"ForecastBatch chưa sẵn sàng (status={batch_status})"
+    if batch_status is not None and str(batch_status).strip():
+        if str(batch_status).strip().upper() != "READY":
+            return False, "FORECAST_NOT_READY", f"ForecastBatch chưa sẵn sàng (status={batch_status})"
 
     try:
         series_map, offset_map = extract_forecast_with_offsets(forecast_data)

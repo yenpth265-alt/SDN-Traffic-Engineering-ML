@@ -3,7 +3,7 @@ import json
 import os
 from typing import Any, Mapping, Sequence
 
-from optimization.input_validator import extract_forecast_series
+from optimization.input_validator import extract_forecast_series, resolve_flow_path_id
 
 
 def _parse_token_list(raw_val: Any) -> list[str]:
@@ -228,7 +228,9 @@ def evaluate_routing_utilization(
             continue
         load_e = 0.0
         for f in topology["F"]:
-            cur_p = routes[f].get("current_path") or routes[f].get("actual_path_id")
+            cur_p = resolve_flow_path_id(routes[f])
+            if not cur_p or cur_p not in a_fpe[f]:
+                raise ValueError(f"Không xác định được tuyến hợp lệ cho luồng {f}: {routes[f]!r}")
             if a_fpe[f][cur_p][e] == 1:
                 load_e += float(b_f[f])
         u_e = (float(k_e.get(e, 1.0)) * load_e) / cap

@@ -6,6 +6,7 @@ from typing import Any, Mapping, Sequence
 from optimization.config_loader import compute_config_hash
 from optimization.input_validator import (
     normalize_routing_entries,
+    resolve_flow_path_id,
     validate_forecast,
     validate_routing_state,
 )
@@ -117,9 +118,7 @@ def run_planner(
         hold_down_overrides=hold_down_overrides,
     )
 
-    current_selected = {
-        f: str(routes[f].get("current_path") or routes[f].get("actual_path_id")) for f in F
-    }
+    current_selected = {f: str(resolve_flow_path_id(routes[f]) or "") for f in F}
 
     def _build_kept_result(
         reason_code: str,
@@ -360,6 +359,7 @@ class OptimizationController:
                 item.get("actual_path_id")
                 or item.get("new_path_id")
                 or item.get("proposed_path_id")
+                or item.get("path_id")
                 or item.get("new_path")
             )
             flow_status = str(item.get("status", "")).upper()
@@ -384,7 +384,7 @@ class OptimizationController:
                     pub_status = str(
                         pub_routes[fg].get("verification_status") or pub_routes[fg].get("status") or ""
                     ).upper()
-                    pub_path = pub_routes[fg].get("current_path") or pub_routes[fg].get("actual_path_id")
+                    pub_path = resolve_flow_path_id(pub_routes[fg])
                     if pub_status != "VERIFIED" or (new_p is not None and str(pub_path) != str(new_p)):
                         unverified_flows.append(fg)
                         continue

@@ -405,7 +405,7 @@ class TestOptimizationSDNContract(unittest.TestCase):
             server.server_close()
 
         self.assertEqual(out["status"], "APPLY_REQUESTED")
-    self.assertEqual(
+        self.assertEqual(
             received_order,
             [
                 "GET:/v1/runs/run_test_01/forecasts/fb_001",

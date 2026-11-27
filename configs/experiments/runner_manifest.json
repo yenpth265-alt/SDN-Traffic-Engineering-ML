@@ -6,7 +6,7 @@
     "split": "train",
     "method": "M1",
     "topology_version": "v1.0",
-    "config_hash": "2314ec7415f18a926e2842f4f94e97e29b2f38f52c1ed139d72bc068c69e905d",
+    "config_hash": "622401d9cca5f70c54239f376ef2de79e687cb433c450927ed575ae14cf9d72e",
     "run_start_utc": "2026-11-10T10:27:59.694275+00:00",
     "phases": {
         "warmup_seconds": 60,

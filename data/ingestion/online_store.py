@@ -36,7 +36,7 @@ def lock_run(cursor, run_id):
     return run
 
 
-def insert_once(cursor, table, row, key, generated=()):
+def insert_once(cursor, table, row, key, generated=(), mutable=()):
     query = sql.SQL("INSERT INTO public.{} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING")
     cursor.execute(query.format(sql.Identifier(table), sql.SQL(", ").join(map(sql.Identifier, row)),
                                 sql.SQL(", ").join(sql.Placeholder() for _ in row),
@@ -49,7 +49,16 @@ def insert_once(cursor, table, row, key, generated=()):
     )
     cursor.execute(query, [row[col] for col in key])
     existing = cursor.fetchone()
-    if any(existing[col] != value for col, value in row.items() if col not in generated):
+    ignored = set(generated) | set(mutable)
+
+    def same_value(existing_value, requested_value):
+        byte_types = (bytes, bytearray, memoryview)
+        if isinstance(existing_value, byte_types) and isinstance(requested_value, byte_types):
+            return bytes(existing_value) == bytes(requested_value)
+        return existing_value == requested_value
+
+    if any(not same_value(existing[col], value)
+           for col, value in row.items() if col not in ignored):
         raise Conflict(f"Existing {table} record has different content")
     return 0
 
@@ -248,6 +257,14 @@ def ingest_snapshot(cursor, run, message, raw, digest):
     wire = json.loads(raw)
     if snapshot_content_hash(wire["sdn"]) != snapshot.content_hash:
         raise ValueError("Snapshot content_hash does not match canonical SDN v1.4 content")
+    if snapshot.run_id != run["run_id"]:
+        raise Conflict("Snapshot run_id differs from the registered run")
+    if (snapshot.config_version != run["config_version"]
+            or snapshot.config_hash != run["config_hash"]):
+        raise Conflict("Snapshot configuration metadata differs from the registered run")
+
+    # Validate run context before the idempotent replay return too: previously
+    # stored or replayed bytes must never bypass the run/configuration checks.
     cursor.execute("""
         SELECT payload, payload_hash FROM public.snapshots
         WHERE run_id = %s AND snapshot_id = %s
@@ -262,8 +279,7 @@ def ingest_snapshot(cursor, run, message, raw, digest):
     origins = snapshot.origin_refs
     if origin is None:
         raise Conflict("Run is missing measurement_started_at_utc")
-    if (snapshot.run_id != run["run_id"]
-            or origins.run_started_at_utc != run["run_started_at_utc"]
+    if (origins.run_started_at_utc != run["run_started_at_utc"]
             or origins.traffic_started_at_utc != run["traffic_started_at_utc"]
             or origins.measurement_started_at_utc != origin
             or origins.warmup_s != run["warmup_s"]

@@ -113,7 +113,10 @@ def create_run(cursor, _run, payload):
     row.update(status="running", manifest=encoded(payload.manifest))
     # Serialize identical concurrent registrations, including before the row exists.
     cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (payload.run_id,))
-    return {"inserted": store.insert_once(cursor, "runs", row, ("run_id",))}
+    # Run status is lifecycle state, not immutable registration content. A
+    # replay after completion must remain idempotent and must not reopen the run.
+    return {"inserted": store.insert_once(
+        cursor, "runs", row, ("run_id",), mutable=("status",))}
 
 
 def set_status(cursor, run, payload):

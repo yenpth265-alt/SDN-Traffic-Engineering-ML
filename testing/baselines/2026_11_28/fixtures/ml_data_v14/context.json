@@ -1,0 +1,15 @@
+{
+  "run_id": "online-test-run",
+  "snapshot_id": "snap:online-test:t100:v1",
+  "snapshot_content_hash": "a64125ba79214858dca6a4a8859fc2f9f0c1bc1e8a6130308546cdb1cc9e9ded",
+  "config_hash": "sdn_config_v1_hash",
+  "topology_hash": "2fa43f873e8530d934661d455fad946cd28d4d77b8f0f87b0b0cb4aa4594d0dc",
+  "ml_config_sha256": "27a1e1076203b06b3ce4fbbf6eeb9df3d2526a62315b5479d43e3c6c1ea96887",
+  "model_sha256": "cc3e7a24a5ad9f2e39471efca210650b1f6562cc06505c06592f9404970726d1",
+  "measurement_started_at_utc": "2026-11-26T09:01:00.000000Z",
+  "measurement_end_utc": "2026-11-26T09:07:00.000000Z",
+  "max_snapshot_age_s": 5.0,
+  "forecast_timeout_ms": 5000.0,
+  "fallback_policy": "skip",
+  "fallback_epsilon": 0.0
+}

@@ -1,0 +1,162 @@
+[
+  {
+    "path": "fixtures/optimization/wire/apply_request_reroute.json",
+    "source_path": "optimization/fixtures/wire/apply_request_reroute.json",
+    "git_blob_sha": "826f245b615ad421b40b4e93d056fb16625bc98c",
+    "sha256": "86f0b3bea6e044e1b0137d37b9c284ded81592ce7326ae13f12b841808be446b",
+    "size_bytes": 1120,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/sdn/data_v14_v10/snapshot_stale_body.json",
+    "source_path": "sdn/fixtures/data_v14_v10/snapshot_stale_body.json",
+    "git_blob_sha": "b13c8835e231f4fcc22d6666d15e73d97a31b0a4",
+    "sha256": "42533a6071863b85dd26d757b9645fbeb8cd0aa8162a51031e8ae012ab05ea65",
+    "size_bytes": 177773,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/online_contract/README.md",
+    "source_path": "testing/fixtures/online_contract/README.md",
+    "git_blob_sha": "1614233be4a07033e9ae26e1db2829a118b063e4",
+    "sha256": "9843be643732dbd35588e6dd69c08a03ddf2c3a890be397dac085254eb3302aa",
+    "size_bytes": 1062,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/online_contract/apply.json",
+    "source_path": "testing/fixtures/online_contract/apply.json",
+    "git_blob_sha": "4d02575a2e10877f88ac3c74ca53b5aba9560e97",
+    "sha256": "5f6add048165c38f874070c4c4f4d5545744664ff98c833b33dfb21b8580d88b",
+    "size_bytes": 21126,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/sdn/data_v14_v10/README.md",
+    "source_path": "sdn/fixtures/data_v14_v10/README.md",
+    "git_blob_sha": "58f6bcd4015333a63cf2871bf3686c502032c4e3",
+    "sha256": "7bc1d90e3d4462b20a998324cd7bb6c7302c071286815507538015c5099aa016",
+    "size_bytes": 1379,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/sdn/data_v14_v10/verify_v10_fixtures.py",
+    "source_path": "sdn/fixtures/data_v14_v10/verify_v10_fixtures.py",
+    "git_blob_sha": "81a3edd8a4bf2265c23b96d225aa1ec38f255cb2",
+    "sha256": "cabe8cfad13218cb45537a1d9166e18fe630b57eec465ee22fbce5e48993df88",
+    "size_bytes": 12318,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/optimization/wire/decision_batch_wire_reroute.json",
+    "source_path": "optimization/fixtures/wire/decision_batch_wire_reroute.json",
+    "git_blob_sha": "20d0f0d49138bd4dd5888770f729fc84a0e03bcf",
+    "sha256": "33f945e870ceeb7746f1610b89cd4d6c409537724b843d47a7eae6d7bd305faa",
+    "size_bytes": 6628,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/ml_data_v14/forecast_batch.json",
+    "source_path": "testing/fixtures/ml_data_v14/forecast_batch.json",
+    "git_blob_sha": "81336c4dde9e41d4242ca44e6a8f8430257b3d38",
+    "sha256": "89a0abb871d174934c3f3625669e01c4e389afe3bf2e0130006e961d4c30c2b5",
+    "size_bytes": 12309,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/online_contract/capture_provenance.json",
+    "source_path": "testing/fixtures/online_contract/capture_provenance.json",
+    "git_blob_sha": "58775fee1dd61465d9763b6d886a1dcd4e7a6604",
+    "sha256": "9bd90d444ccaeff143bad35c96c5f6ced7e1bfd8c7214d585b3c7cba134cb6e7",
+    "size_bytes": 881,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/online_contract/forecast.json",
+    "source_path": "testing/fixtures/online_contract/forecast.json",
+    "git_blob_sha": "10564b597467799eeeb03d113019fc9851bbdc3d",
+    "sha256": "8c41b19dc226f5a652ff5cd4977a8f36b91af3d948d63cc57c2f9b3bc72fa0a3",
+    "size_bytes": 44162,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/online_contract/telemetry.json",
+    "source_path": "testing/fixtures/online_contract/telemetry.json",
+    "git_blob_sha": "117a27670ab1e852f7edc455714eeb751a0a9185",
+    "sha256": "ada7281afae4eb44951fbcd818b92b8e4d23df6fd05ab59a78de74c96245a89c",
+    "size_bytes": 5554,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/optimization/wire/decision_batch_wire_zero_b.json",
+    "source_path": "optimization/fixtures/wire/decision_batch_wire_zero_b.json",
+    "git_blob_sha": "5116a62a195c29d4fdc504d125a8d0ba9315f998",
+    "sha256": "f259e9509475cbc1a77731528e0105b6e52cb71065ba462a28bf6976f8662759",
+    "size_bytes": 6614,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/ml_data_v14/verification.json",
+    "source_path": "testing/fixtures/ml_data_v14/verification.json",
+    "git_blob_sha": "892640ce40bca9899845fc37651efab7f8d079a5",
+    "sha256": "a1e8871bc9fc6fedfc53d4f49c53eedfc4f4bde8d5fb80b0529a787b5b10990b",
+    "size_bytes": 984,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/sdn/data_v14_v10/snapshot_incomplete_body.json",
+    "source_path": "sdn/fixtures/data_v14_v10/snapshot_incomplete_body.json",
+    "git_blob_sha": "7e020238853f71773a8d992eb26a2a7a5f9b5001",
+    "sha256": "91d5124d76c0f0b3d546da991c0a60345c4ec4f3a03e0e55fbfadca268e0ee86",
+    "size_bytes": 177718,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/ml_data_v14/context.json",
+    "source_path": "testing/fixtures/ml_data_v14/context.json",
+    "git_blob_sha": "078c62993bead45847d6fd3f091a70827a30af33",
+    "sha256": "bdcee38ba5b635fd749457e0299d8b61ba8c9739736d1dc11c6b4debc6b6da91",
+    "size_bytes": 713,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/ml_data_v14/README.md",
+    "source_path": "testing/fixtures/ml_data_v14/README.md",
+    "git_blob_sha": "9db109c104034a31a209f871a4dfd2b5c589ffe8",
+    "sha256": "a7e75c7edc7f28e6721421a48097eafe1763588a4f343a2dfd64198be37f6650",
+    "size_bytes": 1546,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/ml_data_v14/snapshot.json",
+    "source_path": "testing/fixtures/ml_data_v14/snapshot.json",
+    "git_blob_sha": "a4538ec66da9283b224fdbfebe5baeb07efdb568",
+    "sha256": "0e913eaccfcd740933a63633202d6d1701511acad2f0b6b20ff3231f305e00d4",
+    "size_bytes": 656145,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/sdn/data_v14_v10/snapshot_valid_l10_body.json",
+    "source_path": "sdn/fixtures/data_v14_v10/snapshot_valid_l10_body.json",
+    "git_blob_sha": "fa2b028e31a792f4263bfe2bd57910405c93f548",
+    "sha256": "c0cd578becbeb19bb37cbba10223ffe9207306a278215247c1ee3b5595b15265",
+    "size_bytes": 177765,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/online_contract/snapshot.json",
+    "source_path": "testing/fixtures/online_contract/snapshot.json",
+    "git_blob_sha": "8125adc9a4d6f8942db8b60c36b6fe50d2dedd07",
+    "sha256": "e6b5a175df5eace90c154cd16c368b0be33311911d1d6d064d071a74ab85203d",
+    "size_bytes": 69650,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  },
+  {
+    "path": "fixtures/sdn/data_v14_v10/snapshot_valid_l30_body.json",
+    "source_path": "sdn/fixtures/data_v14_v10/snapshot_valid_l30_body.json",
+    "git_blob_sha": "9488e33dea54d071efa7599e3d33f4e45431acb7",
+    "sha256": "e0781ac7b2424b6cccf5bfc47e2dc72e5b4537b7fbd173ed81784c5619e90158",
+    "size_bytes": 483911,
+    "source_commit": "29b95149e728078fd8f1840ffd021afb37536c7f"
+  }
+]

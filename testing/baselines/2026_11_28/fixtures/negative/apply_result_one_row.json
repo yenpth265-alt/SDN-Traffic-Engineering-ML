@@ -1,0 +1,1 @@
+{"run_id":"qa-contract-capture","decision_batch_id":"capture-apply","response_status":"APPLIED","response_state_version":2,"completed_at_utc":"2026-01-01T10:02:40.5Z","rows":[{"flow_group_id":"0x103","actual_path_id":"0x103_P2","status":"APPLIED","verified_at_utc":"2026-01-01T10:02:40.4Z","reason":null}]}

@@ -1,0 +1,23 @@
+test_blank_key_and_newline (testing.runner.test_network_delivery.TestNetworkDelivery.test_blank_key_and_newline) ... ok
+test_cli_key_overrides_environment (testing.runner.test_network_delivery.TestNetworkDelivery.test_cli_key_overrides_environment) ... ok
+test_cli_valid_and_missing_url_exit_codes (testing.runner.test_network_delivery.TestNetworkDelivery.test_cli_valid_and_missing_url_exit_codes) ... ok
+test_dry_run_forbids_launch (testing.runner.test_network_delivery.TestNetworkDelivery.test_dry_run_forbids_launch) ... ok
+test_endpoint_swapped (testing.runner.test_network_delivery.TestNetworkDelivery.test_endpoint_swapped) ... ok
+test_explicit_mode_is_required (testing.runner.test_network_delivery.TestNetworkDelivery.test_explicit_mode_is_required) ... ok
+test_https_default_port_and_ipv6 (testing.runner.test_network_delivery.TestNetworkDelivery.test_https_default_port_and_ipv6) ... ok
+test_input_environment_not_mutated (testing.runner.test_network_delivery.TestNetworkDelivery.test_input_environment_not_mutated) ... ok
+test_integration_environment_key (testing.runner.test_network_delivery.TestNetworkDelivery.test_integration_environment_key) ... ok
+test_malformed_urls (testing.runner.test_network_delivery.TestNetworkDelivery.test_malformed_urls) ... ok
+test_missing_both_urls (testing.runner.test_network_delivery.TestNetworkDelivery.test_missing_both_urls) ... ok
+test_missing_key (testing.runner.test_network_delivery.TestNetworkDelivery.test_missing_key) ... ok
+test_missing_release_url (testing.runner.test_network_delivery.TestNetworkDelivery.test_missing_release_url) ... ok
+test_missing_telemetry_url (testing.runner.test_network_delivery.TestNetworkDelivery.test_missing_telemetry_url) ... ok
+test_no_key_in_report_repr_or_args (testing.runner.test_network_delivery.TestNetworkDelivery.test_no_key_in_report_repr_or_args) ... ok
+test_nonintegration_rejects_explicit_urls_or_key (testing.runner.test_network_delivery.TestNetworkDelivery.test_nonintegration_rejects_explicit_urls_or_key) ... ok
+test_offline_omits_urls_and_key (testing.runner.test_network_delivery.TestNetworkDelivery.test_offline_omits_urls_and_key) ... ok
+test_same_data_origin (testing.runner.test_network_delivery.TestNetworkDelivery.test_same_data_origin) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.015s
+
+OK

@@ -1,0 +1,38 @@
+[
+  {
+    "path": "fixtures/negative/forecast_float_bin.json",
+    "derived_from": "fixtures/ml_data_v14/forecast_batch.json",
+    "mutation": "first forecast_start integer -> float literal",
+    "expected": "HTTP422 strict Prediction; no insert",
+    "case_id": "TC-I03/TC-M02",
+    "status": "NOT_RUN_NEW_VARIANT",
+    "sha256": "797a621af12913b75d01c015b9fda2fa1e4d0dd15b44504e156593f72dec0f33"
+  },
+  {
+    "path": "fixtures/negative/forecast_missing_row.json",
+    "derived_from": "fixtures/ml_data_v14/forecast_batch.json",
+    "mutation": "remove first row, 47 instead of 48",
+    "expected": "HTTP422 incomplete batch for bound H1 run; no insert",
+    "case_id": "TC-M01/TC-I03",
+    "status": "NOT_RUN_NEW_VARIANT",
+    "sha256": "d25fd6f7de6be50d49d75f57ef3d1fdd9611ad6c83e2de034666ff26ed6f3517"
+  },
+  {
+    "path": "fixtures/negative/telemetry_empty.json",
+    "derived_from": "fixtures/online_contract/telemetry.json",
+    "mutation": "samples=[], sample_count=0",
+    "expected": "reject HTTP422 empty coverage batch; no insert",
+    "case_id": "TC-D04",
+    "status": "NOT_RUN_NEW_VARIANT",
+    "sha256": "97421b3626a1a7934a93b21416f64f3cbb6b1e7df28d813751b0dd3a86ef7d94"
+  },
+  {
+    "path": "fixtures/negative/apply_result_one_row.json",
+    "derived_from": "fixtures/online_contract/apply.json#result",
+    "mutation": "extract one-row producer result instead of result_full",
+    "expected": "HTTP422 result missing 47 flow groups on bound decision",
+    "case_id": "TC-I04",
+    "status": "NOT_RUN_NEW_VARIANT",
+    "sha256": "9fc9144eefa75c2f95afbfcefcb9db730835ad2dc4b5dafe390bf120faaafeca"
+  }
+]

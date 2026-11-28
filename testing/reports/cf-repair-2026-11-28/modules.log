@@ -1,0 +1,21 @@
+........................................................................ [ 25%]
+........................................................................ [ 50%]
+........................................................................ [ 75%]
+........................................................................ [100%]
+============================== warnings summary ===============================
+ml/tests/test_data_handoff.py::test_real_producer_batch_passes_data_schema_and_ingestion_guards
+  C:\Users\FPT\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+optimization/tests/test_optimization_sdn_contract.py::TestOptimizationSDNContract::test_04_milp_reroute_and_strict_sdn_apply_request
+optimization/tests/test_optimization_sdn_contract.py::TestOptimizationSDNContract::test_07_hold_down_only_on_verified_path_change
+optimization/tests/test_optimization_sdn_contract.py::TestOptimizationSDNContract::test_09_bind_decision_batch_id_recomputes_sdn_payload_hash
+optimization/tests/test_optimization_sdn_contract.py::TestOptimizationSDNContract::test_10_service_client_get_forecast_post_data_before_sdn_and_retry_id
+optimization/tests/test_optimization_sdn_contract.py::TestOptimizationSDNContract::test_13_cf10_sdn_canonical_path_id_across_full_pipeline
+optimization/tests/test_optimization_sdn_contract.py::TestOptimizationSDNContract::test_19_cf17_cf18_poll_url_with_run_id_and_restart_recovery
+  D:\SDN-Traffic-Engineering-ML\.worktrees\ml-review-deps\pulp\apis\coin_api.py:70: DeprecationWarning: PULP_CBC_CMD is deprecated and will be removed in PuLP 4.0. Install CBC with `pip install pulp[cbc]` and use COIN_CMD instead.
+    v4_deprecation(PULP_CBC_CMD_DEPRECATION_MSG, stacklevel=stacklevel)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+- generated xml file: D:\SDN-Traffic-Engineering-ML\.worktrees\integration-conflicts-20261128\testing\reports\cf-repair-2026-11-28\modules.xml -
+288 passed, 7 warnings in 57.36s

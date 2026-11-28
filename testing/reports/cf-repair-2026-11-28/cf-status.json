@@ -1,0 +1,212 @@
+{
+  "source_report": "input-findings.json",
+  "branch": "fix/integration-conflicts-20261128",
+  "remote_modified": false,
+  "PASS_SYSTEM": false,
+  "items": [
+    {
+      "id": "CF-01",
+      "title": "Còn8file merge conflict G0–main/ML",
+      "owner_role": "Optimization",
+      "status": "RESOLVED_LOCAL",
+      "resolution": "Resolved all eight G0/main conflicts, preserving strict G0 guards and the frozen ML contract."
+    },
+    {
+      "id": "CF-02",
+      "title": "SDN/G0 mới chưa được hội tụ vào main",
+      "owner_role": "QA",
+      "status": "LOCAL_ONLY",
+      "resolution": "SDN and G0 are integrated in the local repair branch. Remote main and branch PRs have not been changed."
+    },
+    {
+      "id": "CF-03",
+      "title": "Merge trực tiếp G0–SDN có20modify/delete conflict",
+      "owner_role": "QA",
+      "status": "RESOLVED_LOCAL",
+      "resolution": "Integrated SDN through main before G0; preserved SDN files instead of direct modify/delete merging."
+    },
+    {
+      "id": "CF-06",
+      "title": "run config_hash và optimizer parameter hash vẫn lẫn namespace",
+      "owner_role": "QA/Runner",
+      "status": "CODE_FIXED",
+      "resolution": "Separated run config_hash from optimizer_config_hash; propagated run version/hash and preserved native topology hash."
+    },
+    {
+      "id": "CF-07",
+      "title": "Thiếu mapper manifest Network → RunCreate/runtime context",
+      "owner_role": "QA/Runner",
+      "status": "CODE_FIXED",
+      "resolution": "Added manifest_to_run with actual explicit origins, RunCreate validation and frozen L/H/model metadata."
+    },
+    {
+      "id": "CF-08",
+      "title": "Runner đóng vòng vẫn chưa triển khai",
+      "owner_role": "QA/Runner",
+      "status": "IMPLEMENTED_PENDING_LIVE",
+      "resolution": "Added sequential Runner with registration, readiness, tick deadlines, backpressure, durable audit, recovery and drain. Native whole-system launch still requires CF-39."
+    },
+    {
+      "id": "CF-11",
+      "title": "Thiếu ID vẫn sinh run_default/snap_default",
+      "owner_role": "Optimization",
+      "status": "CODE_FIXED",
+      "resolution": "Reject missing run/snapshot IDs; removed run_default and snap_default from serializers."
+    },
+    {
+      "id": "CF-12",
+      "title": "H1/Δ1 vẫn nhận window UTC5giây; fixture test dùng Δ10",
+      "owner_role": "Optimization",
+      "status": "CODE_FIXED",
+      "resolution": "Validate UTC duration H*delta, bin anchor and row windows. Optimization test fixture now uses production delta=1."
+    },
+    {
+      "id": "CF-14",
+      "title": "Data READY forecast chưa có bounds/origin/deadline cho planner",
+      "owner_role": "QA/Runner",
+      "status": "CODE_FIXED",
+      "resolution": "Added READY envelope adapter binding Data forecast to registered run/snapshot/routing and deriving bounds/deadline from the actual target."
+    },
+    {
+      "id": "CF-16",
+      "title": "Audit tick đã có code nhưng chưa có sink bền vững được cấu hình chung",
+      "owner_role": "Optimization",
+      "status": "CODE_FIXED",
+      "resolution": "Runner SQLite audit freezes every tick before delivery and checkpoints ACK; optimizer JSONL flushes and fsyncs."
+    },
+    {
+      "id": "CF-18",
+      "title": "Journal có thể ghi đè batch chưa resolve; recovery chưa bắt buộc",
+      "owner_role": "Optimization",
+      "status": "CODE_FIXED",
+      "resolution": "Outstanding apply journal cannot be overwritten or silently replaced after corruption. Recover before new work; Runner takes exclusive OS lock. Native wrapped SDN job responses are handled."
+    },
+    {
+      "id": "CF-19",
+      "title": "G0 chưa nạp/verify selected.yaml như hợp đồng ML trên main",
+      "owner_role": "Optimization",
+      "status": "CODE_FIXED",
+      "resolution": "Verify frozen YAML against model/config bytes and metadata; bind H and preserve final forecast values without a second epsilon."
+    },
+    {
+      "id": "CF-22",
+      "title": "Chốt lịch tick đầu và audit các tick thiếu lịch sử",
+      "owner_role": "QA/Runner",
+      "status": "OWNER_CONFIRMATION_PENDING",
+      "resolution": "Implemented existing nonnegative-bin policy: skip/audit until L measurement bins exist. Owner confirmation of deployment policy remains open."
+    },
+    {
+      "id": "CF-23",
+      "title": "Chưa nghiệm thu H1/latency/timeout/fallback/replay sau expiry",
+      "owner_role": "QA/Runner",
+      "status": "PILOT_REQUIRED",
+      "resolution": "Kept H1 and safe expiry/recovery guards. Development timeout profile is explicit; real latency budget, retention/late-ACK acceptance and pilot measurements cannot be certified locally."
+    },
+    {
+      "id": "CF-26",
+      "title": "M8: routing history/verification evidence còn CONTRACT_BLOCKED",
+      "owner_role": "Data",
+      "status": "CODE_FIXED",
+      "resolution": "Losslessly publish RoutingHistory and VerificationEvidence through existing Data SDN events; verified PostgreSQL persistence and replay. No new endpoint is invented."
+    },
+    {
+      "id": "CF-28",
+      "title": "Test SDN–PostgreSQL vẫn có thể STALE và suite timeout",
+      "owner_role": "SDN",
+      "status": "TEST_FIXED",
+      "resolution": "Use real store ingestion with bulk fixture setup, DB clock and bounded catch-up; preserve original stale threshold. All three SDN PostgreSQL cases pass."
+    },
+    {
+      "id": "CF-30",
+      "title": "Loss còn âm khi thiếu packet log/receive raw count vượt sent",
+      "owner_role": "Network",
+      "status": "CODE_FIXED",
+      "resolution": "Receive overcount yields invalid/unknown loss, never negative or clamped. Raw validator deduplicates packet sequences and applies an explicit cohort deadline parameter."
+    },
+    {
+      "id": "CF-32",
+      "title": "Telemetry chưa write-ahead vào outbox trước HTTP",
+      "owner_role": "Network",
+      "status": "CODE_FIXED",
+      "resolution": "Telemetry write-ahead persists/fsyncs before first HTTP and retries through lifecycle. Demand/traffic journals also persist before delivery. Corrupt telemetry journal fails closed."
+    },
+    {
+      "id": "CF-35",
+      "title": "4test snapshot/capture còn payload compact cũ",
+      "owner_role": "QA",
+      "status": "TEST_FIXED",
+      "resolution": "Canonical nested v1.4 snapshot fixtures, regenerated same-checkout producer captures and deterministic synthetic API fixture builder; SQL round-trip/replay coverage retained."
+    },
+    {
+      "id": "CF-36",
+      "title": "2test telemetry còn trái coverage Data",
+      "owner_role": "QA",
+      "status": "TEST_FIXED",
+      "resolution": "Retained strict coverage: empty batches are rejected; integration fixture supplies all 24 measurable links."
+    },
+    {
+      "id": "CF-37",
+      "title": "Test dùng clock thật/client–DB nên không ổn định theo tải",
+      "owner_role": "QA",
+      "status": "TEST_FIXED",
+      "resolution": "Use Data DB time for availability boundaries and a controlled clock for the large HTTP snapshot unit fixture; no freshness relaxation."
+    },
+    {
+      "id": "CF-38",
+      "title": "CI chưa chạy main/PR và producer pins còn cũ",
+      "owner_role": "QA",
+      "status": "CI_UPDATED_NOT_RUN_ON_GITHUB",
+      "resolution": "Workflow runs main/PR/manual events and imports the current checkout. Removed stale producer pins, added artifact environment locks and zero-skip PostgreSQL suite. Remote CI execution awaits publication."
+    },
+    {
+      "id": "CF-39",
+      "title": "Chưa có TC-I01/fault vòng kín trên baseline chung",
+      "owner_role": "QA",
+      "status": "LIVE_EVIDENCE_REQUIRED",
+      "resolution": "Local module and real PostgreSQL evidence is available. Mininet/OVS whole-loop TC-I01 and F01-F12 pilot evidence have not been run; PASS_SYSTEM is not claimed."
+    },
+    {
+      "id": "CF-40",
+      "title": "Benchmark executor/results validator vẫn0byte",
+      "owner_role": "QA",
+      "status": "IMPLEMENTED_BENCHMARK_NOT_RUN",
+      "resolution": "Implemented frozen M0-M4 Latin run order, separate fault runs, sequential explicit launcher, preserved failures, raw metric recomputation, coverage/checksums and paired schedule bootstrap API. No real benchmark or fault hook execution is claimed."
+    },
+    {
+      "id": "CF-41",
+      "title": "ID/warmup/gate trong tài liệu vẫn mâu thuẫn",
+      "owner_role": "QA",
+      "status": "DOC_FIXED",
+      "resolution": "Corrected canonical IDs and warm-up60 baseline; explicitly distinguished QA G1-G6 from Network/S0 and superseded historical advice."
+    },
+    {
+      "id": "CF-43",
+      "title": "Profile môi trường/lệnh test chưa thống nhất cho triển khai",
+      "owner_role": "QA",
+      "status": "RUNBOOK_ADDED_LINUX_LAUNCH_PENDING",
+      "resolution": "Added separate Runner/ML lock and controller requirements, environment/role/path instructions and actual launch manifest contract. Linux controller/Mininet deployment still needs target environment execution."
+    },
+    {
+      "id": "CF-44",
+      "title": "README G0 còn endpoint cũ và code fence chưa đóng",
+      "owner_role": "Optimization",
+      "status": "DOC_FIXED",
+      "resolution": "Corrected native /apply endpoint, closed README code fence and distinguished rich audit records from strict HTTP wire payloads."
+    },
+    {
+      "id": "CF-45",
+      "title": "Main/ML còn9file pyc đã track",
+      "owner_role": "Optimization",
+      "status": "RESOLVED_LOCAL",
+      "resolution": "Removed all nine tracked pyc files from the integrated tree; ignore rules retain Python cache exclusions."
+    },
+    {
+      "id": "CF-46",
+      "title": "Sổ quyết định/calibration/deployment chưa cập nhật đầy đủ",
+      "owner_role": "QA",
+      "status": "OWNER_CONFIRMATION_REQUIRED",
+      "resolution": "Recorded implemented contracts and outstanding pilot/sign-off work. No owner identity, approval time, measured calibration or gate acceptance was fabricated."
+    }
+  ],
+  "code_commit": "a64916e24bb2025db28dcad73ef6d4e7f12df5a4"
+}

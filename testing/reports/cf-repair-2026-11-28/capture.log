@@ -1,0 +1,9 @@
+[!] Warning: bin 0 missing 8/32 links: h1>e1(h1:0:missing_switch), h2>e1(h2:0:missing_switch), h3>e2(h3:0:missing_switch), h4>e2(h4:0:missing_switch), h5>e3(h5:0:missing_switch), h6>e3(h6:0:missing_switch), h7>e4(h7:0:missing_switch), h8>e4(h8:0:missing_switch)
+[*] Waiting until 2026-11-28T09:15:55.834833Z (0.2 s remaining) to start telemetry...
+[+] Telemetry collection finished: C:\Users\FPT\AppData\Local\Temp\tmpirnkr0ui\link_samples.csv
+L=2 H=5 epsilon=0.0: validation MAE=0.028409
+5f6add048165c38f874070c4c4f4d5545744664ff98c833b33dfb21b8580d88b  apply.json
+9bd90d444ccaeff143bad35c96c5f6ced7e1bfd8c7214d585b3c7cba134cb6e7  capture_provenance.json
+8c41b19dc226f5a652ff5cd4977a8f36b91af3d948d63cc57c2f9b3bc72fa0a3  forecast.json
+e6b5a175df5eace90c154cd16c368b0be33311911d1d6d064d071a74ab85203d  snapshot.json
+ada7281afae4eb44951fbcd818b92b8e4d23df6fd05ab59a78de74c96245a89c  telemetry.json

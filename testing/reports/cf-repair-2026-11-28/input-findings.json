@@ -1,0 +1,1826 @@
+{
+  "metadata": {
+    "date_local": "2026-11-28",
+    "branches": {
+      "feat/ml-offline-data-v14": "b903706aaee879c00458fc5c06a5058c095faf53",
+      "feat/optimization-g0": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+      "feature/sdn-data-contract-v14": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+      "main": "baa496769deff49f2d17e05371b8d9977df8483e"
+    },
+    "open_items": 29,
+    "original_items_rechecked": 46,
+    "fixed_or_replaced": 16,
+    "optional": 1,
+    "meaning": "Open items include code defects, textual conflicts, test defects, missing implementation, runtime decisions/evidence and documentation; this is not a count of independent code bugs.",
+    "limits": "No live Mininet/OVS full-system run. Refs changed during the audit: finalML/main status is pinned above; Data/SDN/G0 tests/probes are separately logged. SQLcontainers were stopped/removed."
+  },
+  "open_items": [
+    {
+      "id": "CF-01",
+      "previous_title": "G0 xung đột Git với main tại 7 file",
+      "priority": "P0",
+      "status": "OPEN",
+      "kind": "GIT",
+      "lead": "Optimization",
+      "support": "ML,QA",
+      "title": "Còn8file merge conflict G0–main/ML",
+      "evidence_and_action": "merge-results.json; sau mergeML vào main, giữ cả ML deployment contract và strict guards G0 khi giải conflict.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "optimization/ml_contract.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/optimization/ml_contract.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-02",
+      "previous_title": "Ba nhánh có sửa đổi chưa bàn giao lên baseline chung",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "DELIVERY",
+      "lead": "QA",
+      "support": "SDN,Optimization",
+      "title": "SDN/G0 mới chưa được hội tụ vào main",
+      "evidence_and_action": "ML b903706 đã merge main baa4967. Không còn ghi ML là chưa bàn giao; SDN d7b9bce và G0 b3a85bb vẫn là các nhánh riêng.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/docs/ONLINE_INTEGRATION_CONTRACT.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/docs/ONLINE_INTEGRATION_CONTRACT.md"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/SDN_INTEGRATION_PROFILE_V14.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/SDN_INTEGRATION_PROFILE_V14.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-03",
+      "previous_title": "Merge trực tiếp G0 với nhánh SDN gây 19 conflict modify/delete",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CONDITIONAL_GIT",
+      "lead": "QA",
+      "support": "SDN,Optimization",
+      "title": "Merge trực tiếp G0–SDN có20modify/delete conflict",
+      "evidence_and_action": "Chỉ phát sinh nếu merge trực tiếp hai nhánh; đi qua main đã phục hồiSDN và kiểm ancestry. Không cộng20file này thành conflict của ML–main.",
+      "source_files": [
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/controller/decision_handler.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/controller/decision_handler.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-06",
+      "previous_title": "Chưa có quy tắc hash/config version chung giữa các role",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CONTRACT",
+      "lead": "QA/Runner",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "run config_hash và optimizer parameter hash vẫn lẫn namespace",
+      "evidence_and_action": "Probe Data run hash622401... bị so với G0 sha256:ad2b... và CONTEXT_MISMATCH. Network main dùng config_version v1.0, G0/SDN defaults1.0; chốt namespace/version và propagate theo run.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "configs/network/config.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/configs/network/config.yaml"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/config_loader.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/config_loader.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "configs/network/config.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/configs/network/config.yaml"
+        }
+      ]
+    },
+    {
+      "id": "CF-07",
+      "previous_title": "runner_manifest chưa có adapter thành RunCreate và manifest runtime",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "MISSING_IMPLEMENTATION",
+      "lead": "QA/Runner",
+      "support": "Network,Data,SDN,ML",
+      "title": "Thiếu mapper manifest Network → RunCreate/runtime context",
+      "evidence_and_action": "Manifest mẫu không đủ schema RunCreate. Cần cấp run_id/origins/L/H/model/config hashes và thời điểm thực; không sửa bằng cách yêu cầu Data xuất file offline.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "configs/experiments/runner_manifest.json",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/configs/experiments/runner_manifest.json"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/management_api.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/management_api.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-08",
+      "previous_title": "Chưa có Runner đóng vòng runtime",
+      "priority": "P0",
+      "status": "OPEN",
+      "kind": "MISSING_IMPLEMENTATION",
+      "lead": "QA/Runner",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "Runner đóng vòng vẫn chưa triển khai",
+      "evidence_and_action": "integration/orchestration chỉ .gitkeep; thiếu lifecycle/preflight/tick/backpressure/finalize/drain. Chạy runtime sau khi nhóm xác nhận gate.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "integration/orchestration/.gitkeep",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/integration/orchestration/.gitkeep"
+        }
+      ]
+    },
+    {
+      "id": "CF-11",
+      "previous_title": "Planner cho qua forecast khác run và routing thiếu state_version",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_CONFIRMED",
+      "lead": "Optimization",
+      "support": "Data,SDN,QA",
+      "title": "Thiếu ID vẫn sinh run_default/snap_default",
+      "evidence_and_action": "optimization-probes.json: bỏ forecast.run_id hoặc snapshot_id vẫn KEPT và tạo decision với ID mặc định. Phải reject context thiếu, không bịa ID.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/input_validator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/input_validator.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-12",
+      "previous_title": "Horizon và cửa sổ forecast chưa được đối chiếu với cấu hình khóa",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_CONFIRMED",
+      "lead": "Optimization",
+      "support": "ML,Data,QA",
+      "title": "H1/Δ1 vẫn nhận window UTC5giây; fixture test dùng Δ10",
+      "evidence_and_action": "optimization-probes.json:48rows/H1,delta_s1,UTC window5s vẫn validatorOK/plannerKEPT. Nhánh UTC chưa kiểm span=H×Δ/anchor. Test fixture mặc địnhdelta_s10 che khác biệt với productionΔ1.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/input_validator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/input_validator.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-14",
+      "previous_title": "Thiếu origin/window/deadline bị bù bằng thời gian tự tạo",
+      "priority": "P0",
+      "status": "OPEN",
+      "kind": "ADAPTER_GAP",
+      "lead": "QA/Runner",
+      "support": "Optimization,Data,ML",
+      "title": "Data READY forecast chưa có bounds/origin/deadline cho planner",
+      "evidence_and_action": "Data đã trảREADY. Probe đưa response thẳng vào G0 vẫn MISSING_CONTEXT; enrich đúng metadata vàB0 qua KEPT/BUDGET_ZERO. Giữ7trường PredictionRow, adapter lấy context từ run/snapshot.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/result_serializer.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/result_serializer.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/result_serializer.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/result_serializer.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-16",
+      "previous_title": "NO_TRIGGER và nhiều nhánh skip không có audit bền vững",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "RUNTIME_CONFIG",
+      "lead": "Optimization",
+      "support": "QA/Runner,Data",
+      "title": "Audit tick đã có code nhưng chưa có sink bền vững được cấu hình chung",
+      "evidence_and_action": "G0 _audit_records mặc định trong RAM; file audit chỉ bật khi có audit_log_path. Cần cấu hình/đối soát tick dispositions vào evidence index/Data khi triển khai Runner.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/service_client.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/service_client.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-18",
+      "previous_title": "Chưa có luồng recovery khi mất ACK sau SDN apply",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_AND_RECOVERY",
+      "lead": "Optimization",
+      "support": "QA/Runner,SDN",
+      "title": "Journal có thể ghi đè batch chưa resolve; recovery chưa bắt buộc",
+      "evidence_and_action": "optimization-probes.json: ghi unresolved_first rồi new_second làm mất record đầu. Bổ sung outstanding-batch gate/multi-key journal; journal_path mặc địnhNone nên launcher còn phải bật đúng path.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/service_client.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/service_client.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/adapters/sqlite_idempotency_store.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/adapters/sqlite_idempotency_store.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-19",
+      "previous_title": "G0 chưa mang theo loader hợp đồng ML khóa L/H/epsilon",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CONTRACT_HANDOFF",
+      "lead": "Optimization",
+      "support": "ML,QA",
+      "title": "G0 chưa nạp/verify selected.yaml như hợp đồng ML trên main",
+      "evidence_and_action": "H mặc định1 đang trùng model, nhưng loader G0 không bind artifact/model hash/deployment YAML. Hợp nhất cùng CF-01; không đổi H đơn lẻ hoặc áp epsilon lần hai.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "optimization/ml_contract.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/optimization/ml_contract.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "configs/optimization/optimization.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/configs/optimization/optimization.yaml"
+        }
+      ]
+    },
+    {
+      "id": "CF-22",
+      "previous_title": "Tick đầu và cách dùng lịch sử warm-up chưa thống nhất",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "POLICY",
+      "lead": "QA/Runner",
+      "support": "Data,SDN,ML",
+      "title": "Chốt lịch tick đầu và audit các tick thiếu lịch sử",
+      "evidence_and_action": "Cả3role hiện cấm bin âm. VớiL30,cutoff>=30 measurement. Nhận định ML đã nhận bin âm ở audit cũ đã được đính chính.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/online_api.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/online_api.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/monitoring/snapshot_creator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/monitoring/snapshot_creator.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/inference/predict.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/inference/predict.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-23",
+      "previous_title": "H1 là quyết định offline, chưa có ngân sách latency runtime được nghiệm thu",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "PILOT_PENDING",
+      "lead": "QA/Runner",
+      "support": "ML,Data,SDN,Optimization,Network",
+      "title": "Chưa nghiệm thu H1/latency/timeout/fallback/replay sau expiry",
+      "evidence_and_action": "H1 là cấu hình offline. Chốt ngân sách toàn vòng, retry/lateACK/retention và đo trên môi trường chung; không tự đổi H trong selected.yaml.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/docs/ONLINE_INTEGRATION_CONTRACT.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/docs/ONLINE_INTEGRATION_CONTRACT.md"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "configs/optimization/optimization.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/configs/optimization/optimization.yaml"
+        }
+      ]
+    },
+    {
+      "id": "CF-26",
+      "previous_title": "M8: RoutingHistory/VerificationEvidence chưa có mapping persistence được chốt",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CONTRACT_BLOCKED",
+      "lead": "Data",
+      "support": "SDN,QA",
+      "title": "M8: routing history/verification evidence còn CONTRACT_BLOCKED",
+      "evidence_and_action": "Publisher data_v1 vẫn giữ hai loại event. Chốt dùng events/raw logs đủ trace hoặc endpoint riêng; không bắt buộc thêm endpoint nếu mapping hiện có đáp ứng nghiệm thu.",
+      "source_files": [
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/adapters/data_event_publisher.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/adapters/data_event_publisher.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/adapters/data_event_publisher.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/adapters/data_event_publisher.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-28",
+      "previous_title": "Test PostgreSQL SDN tạo snapshot STALE nhưng đòi decision VALID",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "TEST_CONFIRMED",
+      "lead": "SDN",
+      "support": "QA,Data",
+      "title": "Test SDN–PostgreSQL vẫn có thể STALE và suite timeout",
+      "evidence_and_action": "sdn-current-postgres-fast.log:cutoff02:57:58Z/asof02:58:00.190661Z → STALE thayVALID. Suite3ca vượt240s. Cần setup/clock/catch-up có giới hạn; không nới freshness chỉ để test xanh.",
+      "source_files": [
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/tests/integration_postgres_v14.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/tests/integration_postgres_v14.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-30",
+      "previous_title": "Loss dùng packet count có duplicate và mẫu số0 trả0 thay N/A",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_CONFIRMED",
+      "lead": "Network",
+      "support": "QA,Data",
+      "title": "Loss còn âm khi thiếu packet log/receive raw count vượt sent",
+      "evidence_and_action": "network-probes.json:sent5,received10,no packetlog→lost=-5,loss=-1.0. Unique-count fix chỉ hoạt động khi có sequence evidence; cần invalid/unknown policy và deadline/cohort semantics, không clamp0 để che lỗi.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/correlate_traffic.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/correlate_traffic.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/correlate_traffic.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/correlate_traffic.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-32",
+      "previous_title": "Telemetry có retry/JSONL nhưng chưa có tiến trình replay theo ACK",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_CONFIRMED",
+      "lead": "Network",
+      "support": "QA/Runner,Data",
+      "title": "Telemetry chưa write-ahead vào outbox trước HTTP",
+      "evidence_and_action": "network-probes.json:trước firstHTTP journal chưa tồn tại; crash/restart outboxrỗng. RawJSONL có thể còn nhưng chưa có auto-replay từ raw. Outbox replay hiện chỉ gọi lúc startup; cần pre-persist+ACK và retry trong lifecycle.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/telemetry/telemetry_collector.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/telemetry/telemetry_collector.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-35",
+      "previous_title": "Bộ test/capture PostgreSQL còn snapshot compact cũ",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "TEST_CONFIRMED",
+      "lead": "QA",
+      "support": "Data,SDN",
+      "title": "4test snapshot/capture còn payload compact cũ",
+      "evidence_and_action": "data-main.log:4ca snapshot422 do top-levelrun_id/history/cutoff_bin thay {sdn:...}. Tái sinh fixtures/capture đúng producer/SHA và SQLreadback.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/scripts/test_postgresql_contracts.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/scripts/test_postgresql_contracts.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/scripts/capture_contract_fixtures.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/scripts/capture_contract_fixtures.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/test_online_ingestion.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/test_online_ingestion.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-36",
+      "previous_title": "Hai ca telemetry kỳ vọng trái coverage Data",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "TEST_CONFIRMED",
+      "lead": "QA",
+      "support": "Data,Network",
+      "title": "2test telemetry còn trái coverage Data",
+      "evidence_and_action": "data-main.log:empty poll thiếu1link; mock-fabric thiếu8accesslinks. Chốt empty-poll policy và dùng đủ24measurablelinks, không bỏ coverage guard.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/test_online_ingestion.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/test_online_ingestion.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/online_store.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/online_store.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-37",
+      "previous_title": "Test availability dùng clock Python/DB khác nhau nên không ổn định",
+      "priority": "P2",
+      "status": "OPEN",
+      "kind": "TEST_TIMING",
+      "lead": "QA",
+      "support": "Data,SDN",
+      "title": "Test dùng clock thật/client–DB nên không ổn định theo tải",
+      "evidence_and_action": "SDN fullsuite160PASS/1FAIL doSTALE; rerun riêng đúngca PASS2.22s. Data history clock/asof tương tự đã tái hiện lượt trước. Dùng DB/controlledclock cho assertions.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/test_online_ingestion.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/test_online_ingestion.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-38",
+      "previous_title": "CI chưa chạy trên main/PR và producer pins không phản ánh baseline mới",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CI",
+      "lead": "QA",
+      "support": "Data,ML,Optimization,SDN,Network",
+      "title": "CI chưa chạy main/PR và producer pins còn cũ",
+      "evidence_and_action": "Workflow vẫn on.push nhánhQAđãxóa, thiếupull_request/main; pinMLf619544/Optf0aaa26/SDN2ec0a58; cần đúng tree và assert importpath/SHA.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": ".github/workflows/postgresql_interface_contracts.yml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/.github/workflows/postgresql_interface_contracts.yml"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": ".github/workflows/postgresql_interface_contracts.yml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/.github/workflows/postgresql_interface_contracts.yml"
+        }
+      ]
+    },
+    {
+      "id": "CF-39",
+      "previous_title": "Chưa có evidence toàn vòng và fault trên baseline chung",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "EVIDENCE_MISSING",
+      "lead": "QA",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "Chưa có TC-I01/fault vòng kín trên baseline chung",
+      "evidence_and_action": "Module/contract tests không thay liveOVS+PG toànvòng. Data18ca còn6FAIL; SDN–PG chưa0skip/PASS. Chưa xác nhận PASS_SYSTEM/G1.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/results/README.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/results/README.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/test_plan_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/test_plan_v2.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-40",
+      "previous_title": "Benchmark executor và results validator vẫn là file0byte",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "MISSING_IMPLEMENTATION",
+      "lead": "QA",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "Benchmark executor/results validator vẫn0byte",
+      "evidence_and_action": "run_benchmarks.py/validate_results.py chưa có implementation. Cần ma trậnM0–M4/fault,coverage,raw recompute và pairedmetrics.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/scripts/run_benchmarks.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/scripts/run_benchmarks.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/scripts/validate_results.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/scripts/validate_results.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-41",
+      "previous_title": "Tài liệu QA/SDN còn ID, warmup và gate definitions mâu thuẫn",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "DOCUMENT_CONFLICT",
+      "lead": "QA",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "ID/warmup/gate trong tài liệu vẫn mâu thuẫn",
+      "evidence_and_action": "C01test_plan còn h1_h3 trong khi codehex;warmup70vs60;G1contract-signoffvsNetworkS0. Supersede/ghi rõ bản hiện hành và nguồn đã lỗi thời.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/test_plan_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/test_plan_v2.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/test_plan_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/test_plan_v2.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "docs/architecture/SDN_Traffic_Engineering_Role_Integration_Guide_v1.4.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/docs/architecture/SDN_Traffic_Engineering_Role_Integration_Guide_v1.4.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-43",
+      "previous_title": "Chưa có profile dependencies/lệnh kiểm chung cho runtime và model khóa",
+      "priority": "P2",
+      "status": "OPEN",
+      "kind": "ENVIRONMENT",
+      "lead": "QA",
+      "support": "SDN,ML,Optimization,Data",
+      "title": "Profile môi trường/lệnh test chưa thống nhất cho triển khai",
+      "evidence_and_action": "SDN requirements controller còn hướng dẫncomment; có cácrequirements riêng và modelversionlock. ML README đã sửa trên main; vẫn cần launcher/runbook cho từng process, không ép tất cả chung một venv.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "sdn/requirements-ubuntu.txt",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/sdn/requirements-ubuntu.txt"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/saved_models/offline-L30-H1/requirements-lock.txt",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/saved_models/offline-L30-H1/requirements-lock.txt"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/model_registry.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/model_registry.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-44",
+      "previous_title": "Ví dụ CLI/default path và endpoint trong README không khớp source",
+      "priority": "P2",
+      "status": "OPEN",
+      "kind": "DOCUMENT_CONFLICT",
+      "lead": "Optimization",
+      "support": "QA,Network",
+      "title": "README G0 còn endpoint cũ và code fence chưa đóng",
+      "evidence_and_action": "Network CLI defaults đã sửa. Phần còn lại:README nói /v1/routing/apply thay /apply và legacy fixture references cần supersede.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/receiver.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/receiver.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/README.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/README.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-45",
+      "previous_title": "main và ML branch vẫn track9file pyc Python3.14",
+      "priority": "P3",
+      "status": "OPEN",
+      "kind": "HYGIENE",
+      "lead": "Optimization",
+      "support": "QA,ML",
+      "title": "Main/ML còn9file pyc đã track",
+      "evidence_and_action": "syntax-and-bytecode.json:main/ML9file;G0/SDN0. Bỏ tracking đúng pyc ở tree tích hợp; không gán chúng là nguyên nhân lỗi runtime.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "optimization/.gitignore",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/optimization/.gitignore"
+        }
+      ]
+    },
+    {
+      "id": "CF-46",
+      "previous_title": "Sổ quyết định chưa có sign-off và cấu hình triển khai/calibration đầy đủ",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "SIGNOFF_PENDING",
+      "lead": "QA",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "Sổ quyết định/calibration/deployment chưa cập nhật đầy đủ",
+      "evidence_and_action": "Cần owner+confirmed_at+protocol/config/model hashes+evidence;chốt địa chỉ/rolekey/clock,packetdeadline,k_e,pacing,runmatrix/exclusion và gate. Không suy diễn chưa có trao đổi ngoài repo.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "docs/architecture/Online_API_Team_Decisions.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/docs/architecture/Online_API_Team_Decisions.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/acceptance_criteria_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/acceptance_criteria_v2.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/test_plan_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/test_plan_v2.md"
+        }
+      ]
+    }
+  ],
+  "all_46_rechecked": [
+    {
+      "id": "CF-01",
+      "previous_title": "G0 xung đột Git với main tại 7 file",
+      "priority": "P0",
+      "status": "OPEN",
+      "kind": "GIT",
+      "lead": "Optimization",
+      "support": "ML,QA",
+      "title": "Còn8file merge conflict G0–main/ML",
+      "evidence_and_action": "merge-results.json; sau mergeML vào main, giữ cả ML deployment contract và strict guards G0 khi giải conflict.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "optimization/ml_contract.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/optimization/ml_contract.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-02",
+      "previous_title": "Ba nhánh có sửa đổi chưa bàn giao lên baseline chung",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "DELIVERY",
+      "lead": "QA",
+      "support": "SDN,Optimization",
+      "title": "SDN/G0 mới chưa được hội tụ vào main",
+      "evidence_and_action": "ML b903706 đã merge main baa4967. Không còn ghi ML là chưa bàn giao; SDN d7b9bce và G0 b3a85bb vẫn là các nhánh riêng.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/docs/ONLINE_INTEGRATION_CONTRACT.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/docs/ONLINE_INTEGRATION_CONTRACT.md"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/SDN_INTEGRATION_PROFILE_V14.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/SDN_INTEGRATION_PROFILE_V14.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-03",
+      "previous_title": "Merge trực tiếp G0 với nhánh SDN gây 19 conflict modify/delete",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CONDITIONAL_GIT",
+      "lead": "QA",
+      "support": "SDN,Optimization",
+      "title": "Merge trực tiếp G0–SDN có20modify/delete conflict",
+      "evidence_and_action": "Chỉ phát sinh nếu merge trực tiếp hai nhánh; đi qua main đã phục hồiSDN và kiểm ancestry. Không cộng20file này thành conflict của ML–main.",
+      "source_files": [
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/controller/decision_handler.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/controller/decision_handler.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-04",
+      "previous_title": "sender.py trên main không chạy được vì chứa Markdown và mã dán nối",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "sender.py trên main không chạy được vì chứa Markdown và mã dán nối",
+      "evidence_and_action": "Sender hiện không còn SyntaxError; AST toàn bộ4refs đều sạch.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/sender.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/sender.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-05",
+      "previous_title": "Topology main đổi version nhưng giữ hash cũ",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Topology main đổi version nhưng giữ hash cũ",
+      "evidence_and_action": "Topology mainv1.0 được tái xuất, hash ec6c... xác minh đúng.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "configs/network/topology_bundle.json",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/configs/network/topology_bundle.json"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/load_estimator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/load_estimator.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-06",
+      "previous_title": "Chưa có quy tắc hash/config version chung giữa các role",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CONTRACT",
+      "lead": "QA/Runner",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "run config_hash và optimizer parameter hash vẫn lẫn namespace",
+      "evidence_and_action": "Probe Data run hash622401... bị so với G0 sha256:ad2b... và CONTEXT_MISMATCH. Network main dùng config_version v1.0, G0/SDN defaults1.0; chốt namespace/version và propagate theo run.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "configs/network/config.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/configs/network/config.yaml"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/config_loader.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/config_loader.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "configs/network/config.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/configs/network/config.yaml"
+        }
+      ]
+    },
+    {
+      "id": "CF-07",
+      "previous_title": "runner_manifest chưa có adapter thành RunCreate và manifest runtime",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "MISSING_IMPLEMENTATION",
+      "lead": "QA/Runner",
+      "support": "Network,Data,SDN,ML",
+      "title": "Thiếu mapper manifest Network → RunCreate/runtime context",
+      "evidence_and_action": "Manifest mẫu không đủ schema RunCreate. Cần cấp run_id/origins/L/H/model/config hashes và thời điểm thực; không sửa bằng cách yêu cầu Data xuất file offline.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "configs/experiments/runner_manifest.json",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/configs/experiments/runner_manifest.json"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/management_api.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/management_api.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-08",
+      "previous_title": "Chưa có Runner đóng vòng runtime",
+      "priority": "P0",
+      "status": "OPEN",
+      "kind": "MISSING_IMPLEMENTATION",
+      "lead": "QA/Runner",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "Runner đóng vòng vẫn chưa triển khai",
+      "evidence_and_action": "integration/orchestration chỉ .gitkeep; thiếu lifecycle/preflight/tick/backpressure/finalize/drain. Chạy runtime sau khi nhóm xác nhận gate.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "integration/orchestration/.gitkeep",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/integration/orchestration/.gitkeep"
+        }
+      ]
+    },
+    {
+      "id": "CF-09",
+      "previous_title": "Forecast READY từ Data bị Optimization từ chối",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Forecast READY từ Data bị Optimization từ chối",
+      "evidence_and_action": "Data trảREADY và G0 đã xử lý status-less response; context adapter chuyển sangCF-14.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/online_store.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/online_store.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/input_validator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/input_validator.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-10",
+      "previous_title": "path_id SDN chưa được normalize xuyên suốt Optimization",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "path_id SDN chưa được normalize xuyên suốt Optimization",
+      "evidence_and_action": "Native path_id đi qua estimator; G0 có normalize ở các stage và test mới.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/load_estimator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/load_estimator.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/milp/model.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/milp/model.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-11",
+      "previous_title": "Planner cho qua forecast khác run và routing thiếu state_version",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_CONFIRMED",
+      "lead": "Optimization",
+      "support": "Data,SDN,QA",
+      "title": "Thiếu ID vẫn sinh run_default/snap_default",
+      "evidence_and_action": "optimization-probes.json: bỏ forecast.run_id hoặc snapshot_id vẫn KEPT và tạo decision với ID mặc định. Phải reject context thiếu, không bịa ID.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/input_validator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/input_validator.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-12",
+      "previous_title": "Horizon và cửa sổ forecast chưa được đối chiếu với cấu hình khóa",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_CONFIRMED",
+      "lead": "Optimization",
+      "support": "ML,Data,QA",
+      "title": "H1/Δ1 vẫn nhận window UTC5giây; fixture test dùng Δ10",
+      "evidence_and_action": "optimization-probes.json:48rows/H1,delta_s1,UTC window5s vẫn validatorOK/plannerKEPT. Nhánh UTC chưa kiểm span=H×Δ/anchor. Test fixture mặc địnhdelta_s10 che khác biệt với productionΔ1.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/input_validator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/input_validator.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-13",
+      "previous_title": "Timestamp sai định dạng làm validator ném exception",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Timestamp sai định dạng làm validator ném exception",
+      "evidence_and_action": "Malformed datetime đã trả lỗi kiểm soát trong19testG0.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/input_validator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/input_validator.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-14",
+      "previous_title": "Thiếu origin/window/deadline bị bù bằng thời gian tự tạo",
+      "priority": "P0",
+      "status": "OPEN",
+      "kind": "ADAPTER_GAP",
+      "lead": "QA/Runner",
+      "support": "Optimization,Data,ML",
+      "title": "Data READY forecast chưa có bounds/origin/deadline cho planner",
+      "evidence_and_action": "Data đã trảREADY. Probe đưa response thẳng vào G0 vẫn MISSING_CONTEXT; enrich đúng metadata vàB0 qua KEPT/BUDGET_ZERO. Giữ7trường PredictionRow, adapter lấy context từ run/snapshot.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/result_serializer.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/result_serializer.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/result_serializer.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/result_serializer.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-15",
+      "previous_title": "Thiếu kiểm khả thi độc lập sau khi solver trả nghiệm",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Thiếu kiểm khả thi độc lập sau khi solver trả nghiệm",
+      "evidence_and_action": "Đã có post-solve validator; không còn báo thiếu hoàn toàn.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/solver/solver.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/solver/solver.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/routing_policies/solution_validator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/routing_policies/solution_validator.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-16",
+      "previous_title": "NO_TRIGGER và nhiều nhánh skip không có audit bền vững",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "RUNTIME_CONFIG",
+      "lead": "Optimization",
+      "support": "QA/Runner,Data",
+      "title": "Audit tick đã có code nhưng chưa có sink bền vững được cấu hình chung",
+      "evidence_and_action": "G0 _audit_records mặc định trong RAM; file audit chỉ bật khi có audit_log_path. Cần cấu hình/đối soát tick dispositions vào evidence index/Data khi triển khai Runner.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/planner.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/planner.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/service_client.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/service_client.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-17",
+      "previous_title": "Client bỏ poll_url và không giữ run_id khi đọc SDN",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Client bỏ poll_url và không giữ run_id khi đọc SDN",
+      "evidence_and_action": "Đã theo poll_url/run_id, có testG0.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/service_client.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/service_client.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/adapters/http_control_api.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/adapters/http_control_api.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-18",
+      "previous_title": "Chưa có luồng recovery khi mất ACK sau SDN apply",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_AND_RECOVERY",
+      "lead": "Optimization",
+      "support": "QA/Runner,SDN",
+      "title": "Journal có thể ghi đè batch chưa resolve; recovery chưa bắt buộc",
+      "evidence_and_action": "optimization-probes.json: ghi unresolved_first rồi new_second làm mất record đầu. Bổ sung outstanding-batch gate/multi-key journal; journal_path mặc địnhNone nên launcher còn phải bật đúng path.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/service_client.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/service_client.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/adapters/sqlite_idempotency_store.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/adapters/sqlite_idempotency_store.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-19",
+      "previous_title": "G0 chưa mang theo loader hợp đồng ML khóa L/H/epsilon",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CONTRACT_HANDOFF",
+      "lead": "Optimization",
+      "support": "ML,QA",
+      "title": "G0 chưa nạp/verify selected.yaml như hợp đồng ML trên main",
+      "evidence_and_action": "H mặc định1 đang trùng model, nhưng loader G0 không bind artifact/model hash/deployment YAML. Hợp nhất cùng CF-01; không đổi H đơn lẻ hoặc áp epsilon lần hai.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "optimization/ml_contract.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/optimization/ml_contract.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "configs/optimization/optimization.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/configs/optimization/optimization.yaml"
+        }
+      ]
+    },
+    {
+      "id": "CF-20",
+      "previous_title": "Chạy lại cùng snapshot hoặc restart ML có thể đổi payload cùng batch ID",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Chạy lại cùng snapshot hoặc restart ML có thể đổi payload cùng batch ID",
+      "evidence_and_action": "b903706 đã merge/push vào main baa4967; journal/replay và docs không còn chỉlocal.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/inference/online.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/inference/online.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/docs/ONLINE_INTEGRATION_CONTRACT.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/docs/ONLINE_INTEGRATION_CONTRACT.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-21",
+      "previous_title": "Fixture SDN L=10 chưa kiểm được model bàn giao L=30",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Fixture SDN L=10 chưa kiểm được model bàn giao L=30",
+      "evidence_and_action": "SDN có fixtureL30v1.0; modelthật nhận1440history và xuất48rows qua Data schema/guard. PG/live evidence vẫnCF-28/39.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/tests/test_native_sdn_fixture.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/tests/test_native_sdn_fixture.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "configs/ml/selected.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/configs/ml/selected.yaml"
+        }
+      ]
+    },
+    {
+      "id": "CF-22",
+      "previous_title": "Tick đầu và cách dùng lịch sử warm-up chưa thống nhất",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "POLICY",
+      "lead": "QA/Runner",
+      "support": "Data,SDN,ML",
+      "title": "Chốt lịch tick đầu và audit các tick thiếu lịch sử",
+      "evidence_and_action": "Cả3role hiện cấm bin âm. VớiL30,cutoff>=30 measurement. Nhận định ML đã nhận bin âm ở audit cũ đã được đính chính.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/online_api.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/online_api.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/monitoring/snapshot_creator.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/monitoring/snapshot_creator.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/inference/predict.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/inference/predict.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-23",
+      "previous_title": "H1 là quyết định offline, chưa có ngân sách latency runtime được nghiệm thu",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "PILOT_PENDING",
+      "lead": "QA/Runner",
+      "support": "ML,Data,SDN,Optimization,Network",
+      "title": "Chưa nghiệm thu H1/latency/timeout/fallback/replay sau expiry",
+      "evidence_and_action": "H1 là cấu hình offline. Chốt ngân sách toàn vòng, retry/lateACK/retention và đo trên môi trường chung; không tự đổi H trong selected.yaml.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/docs/ONLINE_INTEGRATION_CONTRACT.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/docs/ONLINE_INTEGRATION_CONTRACT.md"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "configs/optimization/optimization.yaml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/configs/optimization/optimization.yaml"
+        }
+      ]
+    },
+    {
+      "id": "CF-24",
+      "previous_title": "Đăng ký cùng run và manifest vẫn trả 409",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Đăng ký cùng run và manifest vẫn trả 409",
+      "evidence_and_action": "Run replay PostgreSQL trả200 inserted0; bytes/memoryview và mutable status đã sửa.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/online_store.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/online_store.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/management_api.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/management_api.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-25",
+      "previous_title": "Data lưu snapshot có config_hash/config_version khác run",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Data lưu snapshot có config_hash/config_version khác run",
+      "evidence_and_action": "Probe PostgreSQL mới trả409 cho snapshot sai config; guard đã có trên9309/main. Không giữ lỗi này là còn mở.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/online_store.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/online_store.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-26",
+      "previous_title": "M8: RoutingHistory/VerificationEvidence chưa có mapping persistence được chốt",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CONTRACT_BLOCKED",
+      "lead": "Data",
+      "support": "SDN,QA",
+      "title": "M8: routing history/verification evidence còn CONTRACT_BLOCKED",
+      "evidence_and_action": "Publisher data_v1 vẫn giữ hai loại event. Chốt dùng events/raw logs đủ trace hoặc endpoint riêng; không bắt buộc thêm endpoint nếu mapping hiện có đáp ứng nghiệm thu.",
+      "source_files": [
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/adapters/data_event_publisher.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/adapters/data_event_publisher.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/adapters/data_event_publisher.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/adapters/data_event_publisher.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-27",
+      "previous_title": "Profile tích hợp data_v1 chưa được gắn vào launcher chung",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Profile tích hợp data_v1 chưa được gắn vào launcher chung",
+      "evidence_and_action": "SDN đã có launcher/preflight; kích hoạt profile trong deployment thuộcCF-07/08/43.",
+      "source_files": [
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/apps/ryu_s0_app.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/apps/ryu_s0_app.py"
+        },
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/SDN_INTEGRATION_PROFILE_V14.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/SDN_INTEGRATION_PROFILE_V14.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-28",
+      "previous_title": "Test PostgreSQL SDN tạo snapshot STALE nhưng đòi decision VALID",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "TEST_CONFIRMED",
+      "lead": "SDN",
+      "support": "QA,Data",
+      "title": "Test SDN–PostgreSQL vẫn có thể STALE và suite timeout",
+      "evidence_and_action": "sdn-current-postgres-fast.log:cutoff02:57:58Z/asof02:58:00.190661Z → STALE thayVALID. Suite3ca vượt240s. Cần setup/clock/catch-up có giới hạn; không nới freshness chỉ để test xanh.",
+      "source_files": [
+        {
+          "branch": "feature/sdn-data-contract-v14",
+          "sha": "d7b9bce444ed2cbb41b1ccf33fa498da5484ef81",
+          "path": "sdn/tests/integration_postgres_v14.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/d7b9bce444ed2cbb41b1ccf33fa498da5484ef81/sdn/tests/integration_postgres_v14.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-29",
+      "previous_title": "Không có bất kỳ sender/receiver log nào vẫn sinh số đo 0",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Không có bất kỳ sender/receiver log nào vẫn sinh số đo 0",
+      "evidence_and_action": "Không có logs trảNULL, không còn fabricatedzero trong probe mới.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/correlate_traffic.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/correlate_traffic.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/correlate_traffic.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/correlate_traffic.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-30",
+      "previous_title": "Loss dùng packet count có duplicate và mẫu số0 trả0 thay N/A",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_CONFIRMED",
+      "lead": "Network",
+      "support": "QA,Data",
+      "title": "Loss còn âm khi thiếu packet log/receive raw count vượt sent",
+      "evidence_and_action": "network-probes.json:sent5,received10,no packetlog→lost=-5,loss=-1.0. Unique-count fix chỉ hoạt động khi có sequence evidence; cần invalid/unknown policy và deadline/cohort semantics, không clamp0 để che lỗi.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/correlate_traffic.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/correlate_traffic.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/correlate_traffic.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/correlate_traffic.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-31",
+      "previous_title": "Có packet log nhưng thiếu bytes lại báo received_bytes=0",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Có packet log nhưng thiếu bytes lại báo received_bytes=0",
+      "evidence_and_action": "Packet-only bytes trảNULL thay0.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/correlate_traffic.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/correlate_traffic.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-32",
+      "previous_title": "Telemetry có retry/JSONL nhưng chưa có tiến trình replay theo ACK",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CODE_CONFIRMED",
+      "lead": "Network",
+      "support": "QA/Runner,Data",
+      "title": "Telemetry chưa write-ahead vào outbox trước HTTP",
+      "evidence_and_action": "network-probes.json:trước firstHTTP journal chưa tồn tại; crash/restart outboxrỗng. RawJSONL có thể còn nhưng chưa có auto-replay từ raw. Outbox replay hiện chỉ gọi lúc startup; cần pre-persist+ACK và retry trong lifecycle.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/telemetry/telemetry_collector.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/telemetry/telemetry_collector.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-33",
+      "previous_title": "Telemetry CSV biến missing thành0 trong khi JSON giữNULL",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Telemetry CSV biến missing thành0 trong khi JSON giữNULL",
+      "evidence_and_action": "Telemetry CSV giữmissingempty và is_valid;JSONNULL tương ứng.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/telemetry/telemetry_collector.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/telemetry/telemetry_collector.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-34",
+      "previous_title": "Adapter Data export→ML prepare chỉ cần nếu mở phạm vi offline mới",
+      "status": "OPTIONAL_OFFLINE_ONLY",
+      "title": "Data history.csv/runs.json không cần cho inference hiện tại",
+      "evidence_and_action": "Chỉ mở adapter nếu có yêu cầu bộ dữ liệu/huấn luyện/đánh giá offline mới; không là lỗi/blocker runtime.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/export/export_ml_offline.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/export/export_ml_offline.py"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/preprocessing/bundle.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/preprocessing/bundle.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-35",
+      "previous_title": "Bộ test/capture PostgreSQL còn snapshot compact cũ",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "TEST_CONFIRMED",
+      "lead": "QA",
+      "support": "Data,SDN",
+      "title": "4test snapshot/capture còn payload compact cũ",
+      "evidence_and_action": "data-main.log:4ca snapshot422 do top-levelrun_id/history/cutoff_bin thay {sdn:...}. Tái sinh fixtures/capture đúng producer/SHA và SQLreadback.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/scripts/test_postgresql_contracts.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/scripts/test_postgresql_contracts.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/scripts/capture_contract_fixtures.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/scripts/capture_contract_fixtures.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/test_online_ingestion.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/test_online_ingestion.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-36",
+      "previous_title": "Hai ca telemetry kỳ vọng trái coverage Data",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "TEST_CONFIRMED",
+      "lead": "QA",
+      "support": "Data,Network",
+      "title": "2test telemetry còn trái coverage Data",
+      "evidence_and_action": "data-main.log:empty poll thiếu1link; mock-fabric thiếu8accesslinks. Chốt empty-poll policy và dùng đủ24measurablelinks, không bỏ coverage guard.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/test_online_ingestion.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/test_online_ingestion.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/online_store.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/online_store.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-37",
+      "previous_title": "Test availability dùng clock Python/DB khác nhau nên không ổn định",
+      "priority": "P2",
+      "status": "OPEN",
+      "kind": "TEST_TIMING",
+      "lead": "QA",
+      "support": "Data,SDN",
+      "title": "Test dùng clock thật/client–DB nên không ổn định theo tải",
+      "evidence_and_action": "SDN fullsuite160PASS/1FAIL doSTALE; rerun riêng đúngca PASS2.22s. Data history clock/asof tương tự đã tái hiện lượt trước. Dùng DB/controlledclock cho assertions.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "data/ingestion/test_online_ingestion.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/data/ingestion/test_online_ingestion.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-38",
+      "previous_title": "CI chưa chạy trên main/PR và producer pins không phản ánh baseline mới",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "CI",
+      "lead": "QA",
+      "support": "Data,ML,Optimization,SDN,Network",
+      "title": "CI chưa chạy main/PR và producer pins còn cũ",
+      "evidence_and_action": "Workflow vẫn on.push nhánhQAđãxóa, thiếupull_request/main; pinMLf619544/Optf0aaa26/SDN2ec0a58; cần đúng tree và assert importpath/SHA.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": ".github/workflows/postgresql_interface_contracts.yml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/.github/workflows/postgresql_interface_contracts.yml"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": ".github/workflows/postgresql_interface_contracts.yml",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/.github/workflows/postgresql_interface_contracts.yml"
+        }
+      ]
+    },
+    {
+      "id": "CF-39",
+      "previous_title": "Chưa có evidence toàn vòng và fault trên baseline chung",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "EVIDENCE_MISSING",
+      "lead": "QA",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "Chưa có TC-I01/fault vòng kín trên baseline chung",
+      "evidence_and_action": "Module/contract tests không thay liveOVS+PG toànvòng. Data18ca còn6FAIL; SDN–PG chưa0skip/PASS. Chưa xác nhận PASS_SYSTEM/G1.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/results/README.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/results/README.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/test_plan_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/test_plan_v2.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-40",
+      "previous_title": "Benchmark executor và results validator vẫn là file0byte",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "MISSING_IMPLEMENTATION",
+      "lead": "QA",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "Benchmark executor/results validator vẫn0byte",
+      "evidence_and_action": "run_benchmarks.py/validate_results.py chưa có implementation. Cần ma trậnM0–M4/fault,coverage,raw recompute và pairedmetrics.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/scripts/run_benchmarks.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/scripts/run_benchmarks.py"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/scripts/validate_results.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/scripts/validate_results.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-41",
+      "previous_title": "Tài liệu QA/SDN còn ID, warmup và gate definitions mâu thuẫn",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "DOCUMENT_CONFLICT",
+      "lead": "QA",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "ID/warmup/gate trong tài liệu vẫn mâu thuẫn",
+      "evidence_and_action": "C01test_plan còn h1_h3 trong khi codehex;warmup70vs60;G1contract-signoffvsNetworkS0. Supersede/ghi rõ bản hiện hành và nguồn đã lỗi thời.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/test_plan_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/test_plan_v2.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/test_plan_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/test_plan_v2.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "docs/architecture/SDN_Traffic_Engineering_Role_Integration_Guide_v1.4.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/docs/architecture/SDN_Traffic_Engineering_Role_Integration_Guide_v1.4.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-42",
+      "previous_title": "Fixture audit giàu metadata dễ bị dùng nhầm làm wire Data",
+      "status": "SOURCE_FIXED_OR_REPLACED",
+      "title": "Fixture audit giàu metadata dễ bị dùng nhầm làm wire Data",
+      "evidence_and_action": "G0 đã tách audit/wire dirs; doclegacyrefs cònCF-44.",
+      "source_files": [
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/fixtures/decision_batch_wire_reroute.json",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/fixtures/decision_batch_wire_reroute.json"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/fixtures/sdn_v14/decision_batch_48_flows.json",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/fixtures/sdn_v14/decision_batch_48_flows.json"
+        }
+      ]
+    },
+    {
+      "id": "CF-43",
+      "previous_title": "Chưa có profile dependencies/lệnh kiểm chung cho runtime và model khóa",
+      "priority": "P2",
+      "status": "OPEN",
+      "kind": "ENVIRONMENT",
+      "lead": "QA",
+      "support": "SDN,ML,Optimization,Data",
+      "title": "Profile môi trường/lệnh test chưa thống nhất cho triển khai",
+      "evidence_and_action": "SDN requirements controller còn hướng dẫncomment; có cácrequirements riêng và modelversionlock. ML README đã sửa trên main; vẫn cần launcher/runbook cho từng process, không ép tất cả chung một venv.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "sdn/requirements-ubuntu.txt",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/sdn/requirements-ubuntu.txt"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/saved_models/offline-L30-H1/requirements-lock.txt",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/saved_models/offline-L30-H1/requirements-lock.txt"
+        },
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "ml/model_registry.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/ml/model_registry.py"
+        }
+      ]
+    },
+    {
+      "id": "CF-44",
+      "previous_title": "Ví dụ CLI/default path và endpoint trong README không khớp source",
+      "priority": "P2",
+      "status": "OPEN",
+      "kind": "DOCUMENT_CONFLICT",
+      "lead": "Optimization",
+      "support": "QA,Network",
+      "title": "README G0 còn endpoint cũ và code fence chưa đóng",
+      "evidence_and_action": "Network CLI defaults đã sửa. Phần còn lại:README nói /v1/routing/apply thay /apply và legacy fixture references cần supersede.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "network/traffic_generator/receiver.py",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/network/traffic_generator/receiver.py"
+        },
+        {
+          "branch": "feat/optimization-g0",
+          "sha": "b3a85bb218b36c43c543619ed0794f59da8bb357",
+          "path": "optimization/README.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b3a85bb218b36c43c543619ed0794f59da8bb357/optimization/README.md"
+        }
+      ]
+    },
+    {
+      "id": "CF-45",
+      "previous_title": "main và ML branch vẫn track9file pyc Python3.14",
+      "priority": "P3",
+      "status": "OPEN",
+      "kind": "HYGIENE",
+      "lead": "Optimization",
+      "support": "QA,ML",
+      "title": "Main/ML còn9file pyc đã track",
+      "evidence_and_action": "syntax-and-bytecode.json:main/ML9file;G0/SDN0. Bỏ tracking đúng pyc ở tree tích hợp; không gán chúng là nguyên nhân lỗi runtime.",
+      "source_files": [
+        {
+          "branch": "feat/ml-offline-data-v14",
+          "sha": "b903706aaee879c00458fc5c06a5058c095faf53",
+          "path": "optimization/.gitignore",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/b903706aaee879c00458fc5c06a5058c095faf53/optimization/.gitignore"
+        }
+      ]
+    },
+    {
+      "id": "CF-46",
+      "previous_title": "Sổ quyết định chưa có sign-off và cấu hình triển khai/calibration đầy đủ",
+      "priority": "P1",
+      "status": "OPEN",
+      "kind": "SIGNOFF_PENDING",
+      "lead": "QA",
+      "support": "Network,Data,SDN,ML,Optimization",
+      "title": "Sổ quyết định/calibration/deployment chưa cập nhật đầy đủ",
+      "evidence_and_action": "Cần owner+confirmed_at+protocol/config/model hashes+evidence;chốt địa chỉ/rolekey/clock,packetdeadline,k_e,pacing,runmatrix/exclusion và gate. Không suy diễn chưa có trao đổi ngoài repo.",
+      "source_files": [
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "docs/architecture/Online_API_Team_Decisions.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/docs/architecture/Online_API_Team_Decisions.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/acceptance_criteria_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/acceptance_criteria_v2.md"
+        },
+        {
+          "branch": "main",
+          "sha": "baa496769deff49f2d17e05371b8d9977df8483e",
+          "path": "testing/docs/test_plan_v2.md",
+          "url": "https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/baa496769deff49f2d17e05371b8d9977df8483e/testing/docs/test_plan_v2.md"
+        }
+      ]
+    }
+  ],
+  "data_probe_results": [
+    {
+      "id": "baseline_snapshot",
+      "quality_status": "STALE",
+      "http": 200
+    },
+    {
+      "id": "identical_run_replay",
+      "http": 200,
+      "body": {
+        "inserted": 0
+      }
+    },
+    {
+      "id": "wrong_config_snapshot",
+      "quality_status": "STALE",
+      "http": 409,
+      "body": {
+        "detail": "Snapshot configuration metadata differs from the registered run"
+      }
+    }
+  ]
+}

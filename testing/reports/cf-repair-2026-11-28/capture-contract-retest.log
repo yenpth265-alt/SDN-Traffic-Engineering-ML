@@ -1,0 +1,69 @@
+C:\Users\FPT\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+PostgreSQL 17.12 (Debian 17.12-1.pgdg13+1)
+test_i02_cutoff_late_missing_and_future_schedule (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_i02_cutoff_late_missing_and_future_schedule) ... {"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+{"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/network/demand", "expected_http": 409, "actual_http": 409}
+{"actual": 95, "check": "demand_observations after retry and same-ID conflict", "expected": 95, "run_id": "qa-contract-35e920bb42774b7790121ac0cff1269d", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+{"actual": {"bins": [158, 159], "rows": 95}, "check": "history at first as_of", "expected": {"bins": [158, 159], "rows": 95}, "run_id": "qa-contract-35e920bb42774b7790121ac0cff1269d", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+{"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/sdn/snapshots", "expected_http": 422, "actual_http": 422}
+{"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/ml/forecasts", "expected_http": 409, "actual_http": 409}
+{"actual": true, "check": "original as_of returns identical history after late ingest and schedule edit", "expected": true, "run_id": "qa-contract-35e920bb42774b7790121ac0cff1269d", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+{"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/sdn/snapshots", "expected_http": 409, "actual_http": 409}
+{"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/sdn/snapshots", "expected_http": 409, "actual_http": 409}
+{"actual": [96, 97], "check": "history at newer as_of and PostgreSQL observations", "expected": [96, 97], "run_id": "qa-contract-35e920bb42774b7790121ac0cff1269d", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+{"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/sdn/snapshots", "expected_http": 409, "actual_http": 409}
+{"actual": 2, "check": "snapshot counts after exact replay: incomplete plus valid", "expected": 2, "run_id": "qa-contract-35e920bb42774b7790121ac0cff1269d", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+L=2 H=5 epsilon=0.0: validation MAE=0.028409
+TC-I02: 95 as-of rows; 96 after refresh; M1–M3 invariant to future schedule
+ok
+test_i03_warmup_and_forecast_horizon (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_i03_warmup_and_forecast_horizon) ... {"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+{"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/sdn/snapshots", "expected_http": 422, "actual_http": 422}
+{"actual": [160, 100], "check": "PostgreSQL traffic bin and measurement bin", "expected": [160, 100], "run_id": "qa-contract-13e99de11eb14b4da45f9733ca532986", "status": "PASS", "test": "test_i03_warmup_and_forecast_horizon"}
+{"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/ml/forecasts", "expected_http": 422, "actual_http": 422}
+{"actual": true, "check": "raw ML float bin rejected by field validator", "expected": true, "run_id": "qa-contract-13e99de11eb14b4da45f9733ca532986", "status": "PASS", "test": "test_i03_warmup_and_forecast_horizon"}
+{"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/ml/forecasts", "expected_http": 422, "actual_http": 422}
+{"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/ml/forecasts", "expected_http": 422, "actual_http": 422}
+{"actual": [0, 0], "check": "invalid forecast leaves no batches and no predictions", "expected": [0, 0], "run_id": "qa-contract-13e99de11eb14b4da45f9733ca532986", "status": "PASS", "test": "test_i03_warmup_and_forecast_horizon"}
+{"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/ml/forecasts", "expected_http": 409, "actual_http": 409}
+{"actual": [1, 240], "check": "forecast_batches and predictions after replay and conflict", "expected": [1, 240], "run_id": "qa-contract-13e99de11eb14b4da45f9733ca532986", "status": "PASS", "test": "test_i03_warmup_and_forecast_horizon"}
+TC-I03: cutoff traffic=160, measurement=100; 48 groups × H=5 → 240 rows
+ok
+test_runner_and_event_replay (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_runner_and_event_replay) ... {"test": "test_runner_and_event_replay", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+{"test": "test_runner_and_event_replay", "request": "POST /v1/runs/qa-contract-a4ef02d0d2b744b7964687cfd614c7e0/events/network", "expected_http": 401, "actual_http": 401}
+{"test": "test_runner_and_event_replay", "request": "POST /v1/runs/qa-contract-a4ef02d0d2b744b7964687cfd614c7e0/events/network", "expected_http": 409, "actual_http": 409}
+{"actual": 1, "check": "network event rows after replay and same-ID conflict", "expected": 1, "run_id": "qa-contract-a4ef02d0d2b744b7964687cfd614c7e0", "status": "PASS", "test": "test_runner_and_event_replay"}
+{"test": "test_runner_and_event_replay", "request": "PATCH /v1/runs/qa-contract-a4ef02d0d2b744b7964687cfd614c7e0/status", "expected_http": 409, "actual_http": 409}
+ok
+test_runner_registration_replay (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_runner_registration_replay) ... {"test": "test_runner_registration_replay", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+{"actual": 1, "check": "registered run rows after identical replay", "expected": 1, "run_id": "qa-contract-6af4e049d13945a8870ad206e698ad94", "status": "PASS", "test": "test_runner_registration_replay"}
+{"actual": {"body": {"inserted": 0}, "http": 200}, "check": "HTTP and ACK for identical run registration", "expected": {"body": {"inserted": 0}, "http": 200}, "run_id": "qa-contract-6af4e049d13945a8870ad206e698ad94", "status": "PASS", "test": "test_runner_registration_replay"}
+ok
+test_sdn_history_and_verification_events_persist_and_replay (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_sdn_history_and_verification_events_persist_and_replay) ... {"test": "test_sdn_history_and_verification_events_persist_and_replay", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+ok
+test_telemetry_retry_and_topology (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_telemetry_retry_and_topology) ... {"test": "test_telemetry_retry_and_topology", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+{"test": "test_telemetry_retry_and_topology", "request": "POST /v1/sdn/links", "expected_http": 422, "actual_http": 422}
+{"actual": 24, "check": "link_samples after replay", "expected": 24, "run_id": "qa-contract-3797501a709b41d3917e7545af896674", "status": "PASS", "test": "test_telemetry_retry_and_topology"}
+{"test": "test_telemetry_retry_and_topology", "request": "POST /v1/sdn/links", "expected_http": 422, "actual_http": 422}
+{"test": "test_telemetry_retry_and_topology", "request": "POST /v1/sdn/links", "expected_http": 409, "actual_http": 409}
+{"actual": 24, "check": "link_samples after invalid and conflicting payloads", "expected": 24, "run_id": "qa-contract-3797501a709b41d3917e7545af896674", "status": "PASS", "test": "test_telemetry_retry_and_topology"}
+ok
+test_version_change_deadline_and_apply_replay (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_version_change_deadline_and_apply_replay) ... {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/snapshots", "expected_http": 422, "actual_http": 422}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/ml/forecasts", "expected_http": 409, "actual_http": 409}
+{"actual": [1, 240], "check": "forecast_batches and predictions after replay and conflict", "expected": [1, 240], "run_id": "qa-contract-c4698881aa0049c0a57ed871b00592cc", "status": "PASS", "test": "test_version_change_deadline_and_apply_replay"}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/optimization/decisions", "expected_http": 422, "actual_http": 422}
+{"actual": [0, 0], "check": "control_ticks and decision_batches after expired deadline", "expected": [0, 0], "run_id": "qa-contract-c4698881aa0049c0a57ed871b00592cc", "status": "PASS", "test": "test_version_change_deadline_and_apply_replay"}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/apply-results", "expected_http": 409, "actual_http": 409}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/routing", "expected_http": 409, "actual_http": 409}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/optimization/decisions", "expected_http": 409, "actual_http": 409}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/snapshots", "expected_http": 409, "actual_http": 409}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/apply-results", "expected_http": 422, "actual_http": 422}
+{"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/apply-results", "expected_http": 409, "actual_http": 409}
+{"actual": [2, 1, 47], "check": "stored state_version, APPLIED count, KEPT count", "expected": [2, 1, 47], "run_id": "qa-contract-c4698881aa0049c0a57ed871b00592cc", "status": "PASS", "test": "test_version_change_deadline_and_apply_replay"}
+{"actual": [1, 2], "check": "routing_versions after switch and retries", "expected": [1, 2], "run_id": "qa-contract-c4698881aa0049c0a57ed871b00592cc", "status": "PASS", "test": "test_version_change_deadline_and_apply_replay"}
+ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 21.795s
+
+OK

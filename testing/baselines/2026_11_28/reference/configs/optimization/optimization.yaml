@@ -1,0 +1,19 @@
+config_version: "v1.0"
+topology_version: "v1.0"
+warmup_seconds: 60
+
+TH: 0.85
+N: 3
+h: 0.05
+T_hold: 10.0
+B: 4
+lambda_weight: 0.01
+C_e: 100.0
+
+deadline_ms: 200
+apply_guard_ms: 200
+sdn_base_url: "http://127.0.0.1:18080"
+network_config_dir: "configs/network"
+# Frozen ML selection; horizon and calibration must match the model artifact.
+ml_deployment_config: "configs/ml/selected.yaml"
+

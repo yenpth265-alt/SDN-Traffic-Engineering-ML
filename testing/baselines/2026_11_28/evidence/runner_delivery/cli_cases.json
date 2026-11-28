@@ -1,0 +1,72 @@
+[
+  {
+    "name": "integration_valid",
+    "expected_exit": 0,
+    "actual_exit": 0,
+    "status": "PASS_OFFLINE",
+    "actual": {
+      "mode": "integration",
+      "status": "CONFIG_VALID_NOT_RUN",
+      "network_launch_allowed_by_this_gate": true,
+      "data_delivery_enabled": true,
+      "demand_endpoint_configured": true,
+      "telemetry_endpoint_configured": true,
+      "key_source": "environment",
+      "delivery_verified": false
+    }
+  },
+  {
+    "name": "integration_missing_telemetry",
+    "expected_exit": 2,
+    "actual_exit": 2,
+    "status": "PASS_OFFLINE",
+    "actual": {
+      "status": "CONFIG_REJECTED_NOT_RUN",
+      "error": "--telemetry-url requires a complete HTTP(S) URL",
+      "delivery_verified": false
+    }
+  },
+  {
+    "name": "offline",
+    "expected_exit": 0,
+    "actual_exit": 0,
+    "status": "PASS_OFFLINE",
+    "actual": {
+      "mode": "offline",
+      "status": "CONFIG_VALID_NOT_RUN",
+      "network_launch_allowed_by_this_gate": true,
+      "data_delivery_enabled": false,
+      "demand_endpoint_configured": false,
+      "telemetry_endpoint_configured": false,
+      "key_source": "disabled",
+      "delivery_verified": false
+    }
+  },
+  {
+    "name": "dry_run",
+    "expected_exit": 0,
+    "actual_exit": 0,
+    "status": "PASS_OFFLINE",
+    "actual": {
+      "mode": "dry-run",
+      "status": "CONFIG_VALID_NOT_RUN",
+      "network_launch_allowed_by_this_gate": false,
+      "data_delivery_enabled": false,
+      "demand_endpoint_configured": false,
+      "telemetry_endpoint_configured": false,
+      "key_source": "disabled",
+      "delivery_verified": false
+    }
+  },
+  {
+    "name": "dry_run_with_url",
+    "expected_exit": 2,
+    "actual_exit": 2,
+    "status": "PASS_OFFLINE",
+    "actual": {
+      "status": "CONFIG_REJECTED_NOT_RUN",
+      "error": "offline/dry-run forbids Data delivery URLs and explicit API key",
+      "delivery_verified": false
+    }
+  }
+]

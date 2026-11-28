@@ -1,0 +1,96 @@
+2026-11-28T09:37:35.6059847Z Tested checkout: 29b95149e728078fd8f1840ffd021afb37536c7f
+2026-11-28T09:38:20.7925897Z 289 passed, 7 warnings in 44.06s
+2026-11-28T09:38:21.4540122Z  PostgreSQL 17.12 (Debian 17.12-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit | sdn_qa
+2026-11-28T09:38:21.5759144Z  version 
+2026-11-28T09:38:21.5759575Z ---------
+2026-11-28T09:38:21.5759932Z        1
+2026-11-28T09:38:21.5760336Z        2
+2026-11-28T09:38:21.5760646Z        3
+2026-11-28T09:38:21.5760938Z        4
+2026-11-28T09:38:21.5761300Z (4 rows)
+2026-11-28T09:38:22.0394573Z test_health_and_routes (data.ingestion.test_management_api.ManagementContractTest.test_health_and_routes) ... ok
+2026-11-28T09:38:22.0427767Z test_noop_decision_completes_and_replays_without_apply_result (data.ingestion.test_management_api.ManagementContractTest.test_noop_decision_completes_and_replays_without_apply_result) ... ok
+2026-11-28T09:38:22.0429351Z test_origins_and_ml_context (data.ingestion.test_management_api.ManagementContractTest.test_origins_and_ml_context) ... ok
+2026-11-28T09:38:22.0430769Z test_terminal_run_cannot_be_reopened_or_rewritten (data.ingestion.test_management_api.ManagementContractTest.test_terminal_run_cannot_be_reopened_or_rewritten) ... ok
+2026-11-28T09:38:22.0432103Z test_unknown_result_cannot_claim_verified_path (data.ingestion.test_management_api.ManagementContractTest.test_unknown_result_cannot_claim_verified_path) ... ok
+2026-11-28T09:38:22.0516044Z test_writer_role_is_enforced (data.ingestion.test_management_api.ManagementContractTest.test_writer_role_is_enforced) ... ok
+2026-11-28T09:38:22.1595119Z test_links_matches_collector_shape_and_topology (data.ingestion.test_online_ingestion.OnlineIngestionTest.test_links_matches_collector_shape_and_topology) ... ok
+2026-11-28T09:38:23.9462603Z test_mock_48_flow_pipeline (data.ingestion.test_online_ingestion.OnlineIngestionTest.test_mock_48_flow_pipeline) ... ok
+2026-11-28T09:38:24.0317552Z test_network_concurrent_retry_and_invalid_timestamps (data.ingestion.test_online_ingestion.OnlineIngestionTest.test_network_concurrent_retry_and_invalid_timestamps) ... ok
+2026-11-28T09:38:24.3311745Z test_routing_and_snapshot_causality (data.ingestion.test_online_ingestion.OnlineIngestionTest.test_routing_and_snapshot_causality) ... ok
+2026-11-28T09:38:24.4306568Z test_sdn_bootstrap_and_measurement_history (data.ingestion.test_online_ingestion.OnlineIngestionTest.test_sdn_bootstrap_and_measurement_history) ... ok
+2026-11-28T09:38:24.4766152Z test_traffic_fk_rolls_back_batch (data.ingestion.test_online_ingestion.OnlineIngestionTest.test_traffic_fk_rolls_back_batch) ... ok
+2026-11-28T09:38:24.5348677Z {"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:25.8669559Z {"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/network/demand", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:25.8739653Z {"actual": 95, "check": "demand_observations after retry and same-ID conflict", "expected": 95, "run_id": "qa-contract-12e28f53921d4e739221eb79a41bcdfe", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+2026-11-28T09:38:25.9180180Z {"actual": {"bins": [158, 159], "rows": 95}, "check": "history at first as_of", "expected": {"bins": [158, 159], "rows": 95}, "run_id": "qa-contract-12e28f53921d4e739221eb79a41bcdfe", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+2026-11-28T09:38:25.9504272Z {"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/sdn/snapshots", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:26.0060828Z {"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/ml/forecasts", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:26.0434551Z {"actual": true, "check": "original as_of returns identical history after late ingest and schedule edit", "expected": true, "run_id": "qa-contract-12e28f53921d4e739221eb79a41bcdfe", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+2026-11-28T09:38:26.1121086Z {"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/sdn/snapshots", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:26.1445671Z {"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/sdn/snapshots", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:26.1664938Z {"actual": [96, 97], "check": "history at newer as_of and PostgreSQL observations", "expected": [96, 97], "run_id": "qa-contract-12e28f53921d4e739221eb79a41bcdfe", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+2026-11-28T09:38:26.2781406Z {"test": "test_i02_cutoff_late_missing_and_future_schedule", "request": "POST /v1/sdn/snapshots", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:26.2974918Z {"actual": 2, "check": "snapshot counts after exact replay: incomplete plus valid", "expected": 2, "run_id": "qa-contract-12e28f53921d4e739221eb79a41bcdfe", "status": "PASS", "test": "test_i02_cutoff_late_missing_and_future_schedule"}
+2026-11-28T09:38:27.7018166Z test_i02_cutoff_late_missing_and_future_schedule (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_i02_cutoff_late_missing_and_future_schedule) ... ok
+2026-11-28T09:38:27.7020182Z TC-I02: 95 as-of rows; 96 after refresh; M1–M3 invariant to future schedule
+2026-11-28T09:38:27.7150169Z {"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.0916585Z {"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/sdn/snapshots", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.1687991Z {"actual": [160, 100], "check": "PostgreSQL traffic bin and measurement bin", "expected": [160, 100], "run_id": "qa-contract-67101d99938e4ccc90baa68fc495584e", "status": "PASS", "test": "test_i03_warmup_and_forecast_horizon"}
+2026-11-28T09:38:29.1826492Z {"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/ml/forecasts", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.1829974Z {"actual": true, "check": "raw ML float bin rejected by field validator", "expected": true, "run_id": "qa-contract-67101d99938e4ccc90baa68fc495584e", "status": "PASS", "test": "test_i03_warmup_and_forecast_horizon"}
+2026-11-28T09:38:29.2049446Z {"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/ml/forecasts", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.2190165Z {"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/ml/forecasts", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.2330470Z {"actual": [0, 0], "check": "invalid forecast leaves no batches and no predictions", "expected": [0, 0], "run_id": "qa-contract-67101d99938e4ccc90baa68fc495584e", "status": "PASS", "test": "test_i03_warmup_and_forecast_horizon"}
+2026-11-28T09:38:29.3298002Z {"test": "test_i03_warmup_and_forecast_horizon", "request": "POST /v1/ml/forecasts", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:29.3444672Z {"actual": [1, 240], "check": "forecast_batches and predictions after replay and conflict", "expected": [1, 240], "run_id": "qa-contract-67101d99938e4ccc90baa68fc495584e", "status": "PASS", "test": "test_i03_warmup_and_forecast_horizon"}
+2026-11-28T09:38:29.3802571Z TC-I03: cutoff traffic=160, measurement=100; 48 groups × H=5 → 240 rows
+2026-11-28T09:38:29.3803932Z test_i03_warmup_and_forecast_horizon (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_i03_warmup_and_forecast_horizon) ... ok
+2026-11-28T09:38:29.3926550Z {"test": "test_runner_and_event_replay", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.4159421Z {"test": "test_runner_and_event_replay", "request": "POST /v1/runs/qa-contract-1cede08b2e8f4c8b9411b595a4e08279/events/network", "expected_http": 401, "actual_http": 401}
+2026-11-28T09:38:29.4530962Z {"test": "test_runner_and_event_replay", "request": "POST /v1/runs/qa-contract-1cede08b2e8f4c8b9411b595a4e08279/events/network", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:29.4599979Z {"actual": 1, "check": "network event rows after replay and same-ID conflict", "expected": 1, "run_id": "qa-contract-1cede08b2e8f4c8b9411b595a4e08279", "status": "PASS", "test": "test_runner_and_event_replay"}
+2026-11-28T09:38:29.4960443Z {"test": "test_runner_and_event_replay", "request": "PATCH /v1/runs/qa-contract-1cede08b2e8f4c8b9411b595a4e08279/status", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:29.4965101Z test_runner_and_event_replay (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_runner_and_event_replay) ... ok
+2026-11-28T09:38:29.5077043Z {"test": "test_runner_registration_replay", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.5403623Z {"actual": 1, "check": "registered run rows after identical replay", "expected": 1, "run_id": "qa-contract-9e87bffdd96e4f07a5ebb1f2c8d96f41", "status": "PASS", "test": "test_runner_registration_replay"}
+2026-11-28T09:38:29.5406002Z {"actual": {"body": {"inserted": 0}, "http": 200}, "check": "HTTP and ACK for identical run registration", "expected": {"body": {"inserted": 0}, "http": 200}, "run_id": "qa-contract-9e87bffdd96e4f07a5ebb1f2c8d96f41", "status": "PASS", "test": "test_runner_registration_replay"}
+2026-11-28T09:38:29.5408162Z test_runner_registration_replay (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_runner_registration_replay) ... ok
+2026-11-28T09:38:29.5528529Z {"test": "test_sdn_history_and_verification_events_persist_and_replay", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.6272490Z test_sdn_history_and_verification_events_persist_and_replay (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_sdn_history_and_verification_events_persist_and_replay) ... ok
+2026-11-28T09:38:29.6393895Z {"test": "test_telemetry_retry_and_topology", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.6744118Z {"test": "test_telemetry_retry_and_topology", "request": "POST /v1/sdn/links", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.7280436Z {"actual": 24, "check": "link_samples after replay", "expected": 24, "run_id": "qa-contract-ce4e9b1a08844aa4a9d55c892c3e624b", "status": "PASS", "test": "test_telemetry_retry_and_topology"}
+2026-11-28T09:38:29.7416062Z {"test": "test_telemetry_retry_and_topology", "request": "POST /v1/sdn/links", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:29.7548597Z {"test": "test_telemetry_retry_and_topology", "request": "POST /v1/sdn/links", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:29.7621100Z {"actual": 24, "check": "link_samples after invalid and conflicting payloads", "expected": 24, "run_id": "qa-contract-ce4e9b1a08844aa4a9d55c892c3e624b", "status": "PASS", "test": "test_telemetry_retry_and_topology"}
+2026-11-28T09:38:29.7623420Z test_telemetry_retry_and_topology (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_telemetry_retry_and_topology) ... ok
+2026-11-28T09:38:29.7750416Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/runs", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:31.0999724Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/snapshots", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:31.2519089Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/ml/forecasts", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:31.2655230Z {"actual": [1, 240], "check": "forecast_batches and predictions after replay and conflict", "expected": [1, 240], "run_id": "qa-contract-355d35af2f5e44c4a459bfd78bc4e835", "status": "PASS", "test": "test_version_change_deadline_and_apply_replay"}
+2026-11-28T09:38:31.3045097Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/optimization/decisions", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:31.3179827Z {"actual": [0, 0], "check": "control_ticks and decision_batches after expired deadline", "expected": [0, 0], "run_id": "qa-contract-355d35af2f5e44c4a459bfd78bc4e835", "status": "PASS", "test": "test_version_change_deadline_and_apply_replay"}
+2026-11-28T09:38:31.3835179Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/apply-results", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:31.3960797Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/routing", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:31.4589950Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/optimization/decisions", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:31.4923772Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/snapshots", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:31.5324856Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/apply-results", "expected_http": 422, "actual_http": 422}
+2026-11-28T09:38:31.5944236Z {"test": "test_version_change_deadline_and_apply_replay", "request": "POST /v1/sdn/apply-results", "expected_http": 409, "actual_http": 409}
+2026-11-28T09:38:31.6079680Z {"actual": [2, 1, 47], "check": "stored state_version, APPLIED count, KEPT count", "expected": [2, 1, 47], "run_id": "qa-contract-355d35af2f5e44c4a459bfd78bc4e835", "status": "PASS", "test": "test_version_change_deadline_and_apply_replay"}
+2026-11-28T09:38:31.6147982Z {"actual": [1, 2], "check": "routing_versions after switch and retries", "expected": [1, 2], "run_id": "qa-contract-355d35af2f5e44c4a459bfd78bc4e835", "status": "PASS", "test": "test_version_change_deadline_and_apply_replay"}
+2026-11-28T09:38:31.6493133Z test_version_change_deadline_and_apply_replay (testing.scripts.test_postgresql_contracts.PostgreSQLContracts.test_version_change_deadline_and_apply_replay) ... ok
+2026-11-28T09:38:31.6499810Z Ran 19 tests in 9.680s
+2026-11-28T09:38:31.8692670Z OK
+2026-11-28T09:38:32.3309761Z       "quality_status": "VALID",
+2026-11-28T09:38:32.3315609Z       "quality_status": "VALID",
+2026-11-28T09:38:32.3319556Z       "quality_status": "INCOMPLETE",
+2026-11-28T09:38:32.3323967Z       "quality_status": "STALE",
+2026-11-28T09:38:32.8296375Z test_cf21_ml_l30_snapshot_48x30_1440_observations (sdn.tests.integration_postgres_v14.SDNRealPostgresV14IntegrationTest.test_cf21_ml_l30_snapshot_48x30_1440_observations)
+2026-11-28T09:38:33.8636359Z CF-21 Real PostgreSQL Integration Test for ML L=30 Model: ... ok
+2026-11-28T09:38:34.1881031Z test_end_to_end_contracts_1_2_3_against_real_postgres (sdn.tests.integration_postgres_v14.SDNRealPostgresV14IntegrationTest.test_end_to_end_contracts_1_2_3_against_real_postgres) ... ok
+2026-11-28T09:38:34.1883108Z test_stale_snapshot_rejected_for_optimization_decision (sdn.tests.integration_postgres_v14.SDNRealPostgresV14IntegrationTest.test_stale_snapshot_rejected_for_optimization_decision)
+2026-11-28T09:38:34.9346846Z CF-28 Negative Test: ... ok
+2026-11-28T09:38:34.9353623Z Ran 3 tests in 2.432s
+2026-11-28T09:38:34.9354205Z OK
+

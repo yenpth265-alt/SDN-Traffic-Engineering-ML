@@ -1,14 +1,26 @@
 # Kiểm thử SDN Traffic Engineering
 
-[Đợt PostgreSQL gần nhất](results/README.md) ghi 16/17 ca đạt tại `44acd20`. Bản rà soát tài liệu dùng `main@db2dacd` ngày 24/11/2026. Nghiệm thu TC-I01 và benchmark M0–M4 đang chờ.
+## Baseline 28/11/2026
 
-| Tài liệu | Nội dung |
+Bộ tài liệu đồng bộ QA tại [baseline 28/11/2026](baselines/2026_11_28/README.md), đối chiếu checkout `main@29b95149`.
+
+[GitHub Actions](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46131298984): 289 ca module, 19 ca hợp đồng Data/QA và 3 ca SDN–PostgreSQL đạt; migrations 1–4, SDN không skip. G1 có bằng chứng kiểm thử nhưng chờ owner xác nhận; TC-I01 live và benchmark M0–M4 chưa được nghiệm thu.
+
+| Đầu ra | Đường dẫn |
 | --- | --- |
-| [Kế hoạch kiểm thử](docs/test_plan_v2.md) | Ma trận ca, đối chứng M0–M4 và quy trình thực nghiệm. |
-| [Tiêu chí nghiệm thu](docs/acceptance_criteria_v2.md) | Điều kiện đạt và bằng chứng bắt buộc theo module. |
-| [Giao diện](docs/interfaces_v2.md) | Hợp đồng đích và các điểm cần chốt so với Data API v1. |
-| [Yêu cầu tích hợp](docs/integration_requirements.md) | Trạng thái REQ-01–REQ-16 và điều kiện đóng. |
-| [Sổ quyết định API](../docs/architecture/Online_API_Team_Decisions.md) | Commit, fixture, đầu mối và kết quả đọc lại DB. |
-| [Fixture producer](fixtures/online_contract/README.md) | Nguồn dữ liệu và các ca tái hiện. |
+| Kế hoạch kiểm thử | [test_plan.md](baselines/2026_11_28/test_plan.md) |
+| Hợp đồng giao diện | [interfaces.md](baselines/2026_11_28/interfaces.md) |
+| Tiêu chí nghiệm thu | [acceptance_criteria.md](baselines/2026_11_28/acceptance_criteria.md) |
+| Sổ quyết định | [decision_log.md](baselines/2026_11_28/decision_log.md) |
+| Baseline manifest | [baseline_manifest.json](baselines/2026_11_28/baseline_manifest.json) |
+| Danh mục ca kiểm thử | [test_cases.md](baselines/2026_11_28/test_cases.md) |
+| Fixture và provenance | [fixtures/](baselines/2026_11_28/fixtures/README.md) |
+| Readiness checklist | [readiness_checklist.md](baselines/2026_11_28/readiness_checklist.md) |
 
-Hướng dẫn tái hiện nằm trong [sổ quyết định](../docs/architecture/Online_API_Team_Decisions.md#tái-hiện-trên-postgresql) và [workflow CI](../.github/workflows/postgresql_interface_contracts.yml).
+## Tài liệu và kết quả lịch sử
+
+- [Kế hoạch v2](docs/test_plan_v2.md), [tiêu chí v2](docs/acceptance_criteria_v2.md), [giao diện v2](docs/interfaces_v2.md), [yêu cầu tích hợp](docs/integration_requirements.md).
+- [Sổ quyết định API](../docs/architecture/Online_API_Team_Decisions.md), [fixture producer](fixtures/online_contract/README.md), [kết quả kiểm thử ngày 24/11](results/README.md).
+- [Ánh xạ ID v2 sang baseline mới](baselines/2026_11_28/reference/legacy_id_crosswalk.md).
+
+Hướng dẫn tái hiện: [workflow PostgreSQL CI](../.github/workflows/postgresql_interface_contracts.yml) và [runbook runtime hiện hành](../integration/orchestration/README.md).

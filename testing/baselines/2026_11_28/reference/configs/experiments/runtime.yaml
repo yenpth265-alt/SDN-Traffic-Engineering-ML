@@ -1,0 +1,17 @@
+# Development profile. Timing values require a measured pilot before benchmark sign-off.
+data_base_url: http://127.0.0.1:8000
+sdn_base_url: http://127.0.0.1:18080
+network_config_dir: configs/network
+optimization_config: configs/optimization/optimization.yaml
+ml_deployment_config: configs/ml/selected.yaml
+telemetry_jsonl: logs/link_samples.jsonl
+network_outbox_dir: logs
+state_dir: logs/runtime
+http_timeout_s: 0.2
+snapshot_wait_s: 0.2
+forecast_timeout_ms: 300
+apply_max_polls: 2
+drain_timeout_s: 10
+first_tick_policy: wait_for_measurement_history
+fallback_policy: skip
+

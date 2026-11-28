@@ -1,0 +1,40 @@
+schema_version: ml_deployment_v1
+artifact_dir: .
+target: requested_mbps
+delta_s: 1
+model_version: rf_v1
+lookback_L: 30
+horizon_H: 5
+ma_window: 5
+epsilon: 0.0
+baseline_epsilon: 0.0
+selection_metric: validation_pooled_vector_mae_mbps
+rf_params:
+  n_estimators: 150
+  max_depth: 24
+  min_samples_leaf: 4
+random_state: 2026
+feature_schema_version: demand_lags_stats_flow_v1
+model_sha256: 4c65aaed87073901889489c8ee216fa91f1dd106161438793a074c168d26fb27
+ml_config_sha256: 7b479afe521483de9a187ca769a08016cfcac668c06deea289b26a4f0db7fd22
+selection:
+  validation_mae_mbps: 0.05829789718631269
+  rf_trial_count: 1
+  fit_sample_count: 50000
+  train_sample_count: 204480
+  bundle_sha256: d6622b45c156aeb4223514110294f86ad112f246a7d2fa62f251a5241ea54009
+  search_config_sha256: 1c2faa1dede7d16dc65910b558038a523e6049f52c24efd77498a1575c68139e
+  test_used_for_selection: false
+  data_provenance:
+    kind: offline_network_schedule
+    online_eligible: false
+    time_origin_kind: artificial_utc_coordinate_not_execution_time
+    schedule_sha256: 25efaa3679ad921fd7bdd55beee5b07bbdd957ae759a85bb5e790f1485c5cf4c
+    seed_manifest_sha256: 3e878e9c443eb82df42378c5beabebcdf1f2c5a8e06ec5b0dc9435e42ca1e908
+    warmup_seconds: 60
+    measurement_seconds: 360
+    family_policy: CSV parent_family_id when present; otherwise conservatively group
+      by seed. Network must confirm family independence before benchmark.
+    note: Requested demand plan only; no measured network delivery, release or route
+      evidence. Timing arguments are explicit offline assumptions, not a change to
+      Network config.

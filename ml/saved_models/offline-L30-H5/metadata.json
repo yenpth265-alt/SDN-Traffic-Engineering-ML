@@ -1,0 +1,43 @@
+{
+  "created_at_utc": "2026-11-28T16:21:59.330611Z",
+  "model_sha256": "4c65aaed87073901889489c8ee216fa91f1dd106161438793a074c168d26fb27",
+  "ml_config_sha256": "7b479afe521483de9a187ca769a08016cfcac668c06deea289b26a4f0db7fd22",
+  "bundle_sha256": "d6622b45c156aeb4223514110294f86ad112f246a7d2fa62f251a5241ea54009",
+  "bundle_files": {
+    "train.npz": "7df801025af0fe1d5cb0035f5c85b768841c4530b1391a592d72fcbd8c526191",
+    "train.csv": "40922cf43141dbb6561c77134f79223469428424f031b27c62f3287db847562e",
+    "validation.npz": "4695767602f184feed8ccca31fef41d82d7710a5dd63fe5c388685c5e826070c",
+    "validation.csv": "d8012315fd2d2606615694650935ab7b24452fa3d03ce6032a4fc0be2af544ca",
+    "test.npz": "9cd9b7371331c4675d5a578a6a5fbe1425096d02fd1bfbf262bf4fc7bb51ed04",
+    "test.csv": "77bbe995d42e6aa83386afd289ffe85b52aafa274aea61ab4a6c8693f128c8a7"
+  },
+  "search_config_sha256": "1c2faa1dede7d16dc65910b558038a523e6049f52c24efd77498a1575c68139e",
+  "libraries": {
+    "python": "3.11.9",
+    "numpy": "2.0.2",
+    "scikit_learn": "1.6.1",
+    "joblib": "1.5.3"
+  },
+  "train_sample_count": 204480,
+  "fit_sample_count": 50000,
+  "fit_sample_ids_sha256": "c0b0b78fe55d9149329d30ce76faba5042a241e583bc59bd50724dc2890b5f6a",
+  "validation_sample_ids_sha256": "87565b94bc16a913b97bfecd128bd798bcbf88cd08e8986c141845d762e657d2",
+  "refit_train_validation": false,
+  "test_used_for_selection": false,
+  "source_hashes": {
+    "history": "3c445f0452b6823202c8c854aa801c001dd517b7d8c67c87af6edccb41698fea",
+    "runs": "c3afeac557e2445ce7dfbdc2523948a75cc3aae998dc3ba07c63b9e07da2b801",
+    "catalog": "5d9ce0f611062ce5c5235a3a3271af5b39a4f955f3ae003f5a9532199f7d9f17"
+  },
+  "data_provenance": {
+    "kind": "offline_network_schedule",
+    "online_eligible": false,
+    "time_origin_kind": "artificial_utc_coordinate_not_execution_time",
+    "schedule_sha256": "25efaa3679ad921fd7bdd55beee5b07bbdd957ae759a85bb5e790f1485c5cf4c",
+    "seed_manifest_sha256": "3e878e9c443eb82df42378c5beabebcdf1f2c5a8e06ec5b0dc9435e42ca1e908",
+    "warmup_seconds": 60,
+    "measurement_seconds": 360,
+    "family_policy": "CSV parent_family_id when present; otherwise conservatively group by seed. Network must confirm family independence before benchmark.",
+    "note": "Requested demand plan only; no measured network delivery, release or route evidence. Timing arguments are explicit offline assumptions, not a change to Network config."
+  }
+}

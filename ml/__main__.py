@@ -72,6 +72,8 @@ def parser():
     online.add_argument("--fallback-epsilon", type=float, default=0.0)
     online.add_argument("--http-timeout-s", type=float, default=5.0)
     online.add_argument("--max-retries", type=int, default=2)
+    online.add_argument("--replay-db", default=None,
+                        help="Durable ML replay SQLite file; defaults to SDN_ML_REPLAY_DB or ml/artifacts/online-replay.sqlite3")
     online.add_argument("--emit-event", action="store_true")
     online.add_argument("--dry-run", action="store_true")
     online.add_argument("--out", default=None, help="Optional file for ForecastBatch JSON in single-tick mode")
@@ -146,7 +148,7 @@ def main(argv=None):
                 timeout_s=args.http_timeout_s,
                 max_retries=args.max_retries,
             )
-            runner = OnlineForecastRunner(args.artifact, client)
+            runner = OnlineForecastRunner(args.artifact, client, replay_db=args.replay_db)
             if args.watch_stdin:
                 for raw_line in sys.stdin:
                     line = raw_line.strip()

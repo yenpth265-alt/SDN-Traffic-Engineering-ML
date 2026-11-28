@@ -7,8 +7,10 @@ import io
 import json
 from pathlib import Path
 import sys
+import sqlite3
 import urllib.error
 import urllib.parse
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -22,6 +24,11 @@ from ml.preprocessing.bundle import prepare_bundle
 from ml.training.train import train
 
 CATALOG = Path(__file__).resolve().parents[2] / "configs/network/flow_groups.csv"
+
+
+@pytest.fixture(autouse=True)
+def isolate_replay_journal(tmp_path, monkeypatch):
+    monkeypatch.setenv("SDN_ML_REPLAY_DB", str(tmp_path / "replay.sqlite3"))
 
 
 def make_v14_snapshot(cfg, cutoff: datetime, *, quality_status: str = "VALID",
@@ -470,3 +477,156 @@ def test_online_rejects_wrong_snapshot_id_and_wrong_run_method(model_dir):
         assert result["audit"]["snapshot_id"] == wrong_id
     with pytest.raises(ContractError, match="registered run"):
         resolve_method("rf", {"method_id": "M1"})
+
+
+def test_restart_after_lost_ack_replays_identical_forecast_bytes(model_dir, tmp_path):
+    predictor = Predictor(model_dir)
+    run, snapshots, cutoff = _live_run_fixture(predictor)
+    db = tmp_path / "durable.sqlite3"
+    bodies = []
+    with MockDataServer(run, snapshots) as server:
+        def lost_ack(req, timeout=None):
+            response = server.open(req, timeout)
+            if req.get_method() == "POST" and req.full_url.endswith("/ml/forecasts"):
+                bodies.append(req.data)
+                if len(bodies) == 1:
+                    raise urllib.error.URLError("connection lost after Data committed")
+            return response
+
+        client = DataApiClient(server.base_url, ml_api_key=server.ml_key,
+                               reader_api_key=server.reader_key, opener=lost_ack, max_retries=0)
+        runner = OnlineForecastRunner(model_dir, client, replay_db=db)
+        now = cutoff + timedelta(milliseconds=350)
+        with pytest.raises(DataApiError):
+            runner.process_snapshot(run["run_id"], "snap:online-test:t100:v1", clock=lambda: now)
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT delivered FROM messages WHERE kind='forecast'").fetchone() == (0,)
+        restarted = OnlineForecastRunner(model_dir, client, replay_db=db)
+        with patch.object(restarted.predictor, "predict_batch", side_effect=AssertionError("must not infer again")):
+            result = restarted.process_snapshot(run["run_id"], "snap:online-test:t100:v1",
+                                                 clock=lambda: now + timedelta(milliseconds=100))
+        assert result["status"] == "OK" and result["inserted"] == 0
+        assert result["audit"]["replayed"] is True
+        assert bodies[0] == bodies[1] and len(server.forecasts) == 1
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT delivered FROM messages WHERE kind='forecast'").fetchone() == (1,)
+
+
+def test_repeated_tick_and_event_loss_keep_original_event_bytes(model_dir, tmp_path):
+    predictor = Predictor(model_dir)
+    run, snapshots, cutoff = _live_run_fixture(predictor)
+    events = []
+    with MockDataServer(run, snapshots) as server:
+        def lose_event_ack(req, timeout=None):
+            response = server.open(req, timeout)
+            if req.get_method() == "POST" and "/events/ml" in req.full_url:
+                events.append(req.data)
+                if len(events) == 1:
+                    raise urllib.error.URLError("lost event ACK")
+            return response
+
+        client = DataApiClient(server.base_url, ml_api_key=server.ml_key,
+                               reader_api_key=server.reader_key, opener=lose_event_ack, max_retries=0)
+        path = tmp_path / "events.sqlite3"
+        runner = OnlineForecastRunner(model_dir, client, replay_db=path)
+        first = runner.process_snapshot(run["run_id"], "snap:online-test:t100:v1", emit_event=True,
+                                         clock=lambda: cutoff + timedelta(milliseconds=350))
+        assert first["status"] == "OK" and first["audit"]["event_delivery"]["status"] == "PENDING"
+        restarted = OnlineForecastRunner(model_dir, client, replay_db=path)
+        with patch.object(restarted.predictor, "predict_batch", side_effect=AssertionError("duplicate inference")):
+            second = restarted.process_snapshot(run["run_id"], "snap:online-test:t100:v1", emit_event=True,
+                                                  clock=lambda: cutoff + timedelta(milliseconds=450))
+        assert second["inserted"] == 0 and second["audit"]["event_delivery"]["status"] == "DELIVERED"
+        assert len(events) == 2 and events[0] == events[1]
+        assert json.loads(events[1])["detail"]["inserted"] == first["inserted"]
+
+
+def test_expired_replay_skips_without_reinference_or_post(model_dir, tmp_path):
+    predictor = Predictor(model_dir)
+    run, snapshots, cutoff = _live_run_fixture(predictor)
+    with MockDataServer(run, snapshots) as server:
+        client = DataApiClient(server.base_url, ml_api_key=server.ml_key,
+                               reader_api_key=server.reader_key, opener=server.open)
+        runner = OnlineForecastRunner(model_dir, client, replay_db=tmp_path / "expired.sqlite3")
+        runner.process_snapshot(run["run_id"], "snap:online-test:t100:v1",
+                                  clock=lambda: cutoff + timedelta(milliseconds=350))
+        server.post_attempts = 0
+        with patch.object(runner.predictor, "predict_batch", side_effect=AssertionError("must not refresh issued_at")):
+            result = runner.process_snapshot(run["run_id"], "snap:online-test:t100:v1",
+                                               clock=lambda: cutoff + timedelta(seconds=run["horizon_bins"]))
+        assert result["status"] == "SKIPPED" and result["reason"] == "FORECAST_EXPIRED_REPLAY"
+        assert server.post_attempts == 0
+
+
+def test_replay_binding_rejects_changed_snapshot_and_journal_corruption(model_dir, tmp_path):
+    from copy import deepcopy
+    predictor = Predictor(model_dir)
+    run, snapshots, cutoff = _live_run_fixture(predictor)
+    path = tmp_path / "integrity.sqlite3"
+    sid = "snap:online-test:t100:v1"
+    with MockDataServer(run, snapshots) as server:
+        client = DataApiClient(server.base_url, ml_api_key=server.ml_key,
+                               reader_api_key=server.reader_key, opener=server.open)
+        runner = OnlineForecastRunner(model_dir, client, replay_db=path)
+        now = cutoff + timedelta(milliseconds=350)
+        runner.process_snapshot(run["run_id"], sid, clock=lambda: now)
+        original = deepcopy(snapshots[sid])
+        snapshots[sid]["sdn"]["history"][0]["requested_mbps"] += 1
+        snapshots[sid]["sdn"].pop("content_hash")
+        snapshots[sid]["sdn"]["content_hash"] = digest(snapshots[sid]["sdn"])
+        server.post_attempts = 0
+        result = runner.process_snapshot(run["run_id"], sid, clock=lambda: now)
+        assert result["status"] == "SKIPPED" and "already bound" in result["reason"]
+        assert server.post_attempts == 0
+        snapshots[sid] = original
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE messages SET payload='{}' WHERE kind='forecast'")
+        result = runner.process_snapshot(run["run_id"], sid, clock=lambda: now)
+        assert result["status"] == "SKIPPED" and "payload hash mismatch" in result["reason"]
+        assert server.post_attempts == 0
+
+
+@pytest.mark.parametrize("field", ["config_version", "model_version"])
+def test_runner_rejects_registered_version_mismatch(model_dir, tmp_path, field):
+    predictor = Predictor(model_dir)
+    run, snapshots, cutoff = _live_run_fixture(predictor)
+    run[field] = "wrong-registered-version"
+    with MockDataServer(run, snapshots) as server:
+        client = DataApiClient(server.base_url, ml_api_key=server.ml_key,
+                               reader_api_key=server.reader_key, opener=server.open)
+        runner = OnlineForecastRunner(model_dir, client, replay_db=tmp_path / "versions.sqlite3")
+        result = runner.process_snapshot(run["run_id"], "snap:online-test:t100:v1",
+                                           clock=lambda: cutoff + timedelta(milliseconds=350))
+        assert result["status"] == "SKIPPED" and field in result["reason"]
+        assert server.post_attempts == 0 and not runner.journal.filename.exists()
+
+
+def test_dry_run_does_not_create_replay_state(model_dir, tmp_path):
+    predictor = Predictor(model_dir)
+    run, snapshots, cutoff = _live_run_fixture(predictor)
+    with MockDataServer(run, snapshots) as server:
+        client = DataApiClient(server.base_url, ml_api_key=server.ml_key,
+                               reader_api_key=server.reader_key, opener=server.open)
+        runner = OnlineForecastRunner(model_dir, client, replay_db=tmp_path / "dry.sqlite3")
+        result = runner.process_snapshot(run["run_id"], "snap:online-test:t100:v1", dry_run=True,
+                                           clock=lambda: cutoff + timedelta(milliseconds=350))
+        assert result["status"] == "OK" and server.post_attempts == 0
+        assert not runner.journal.filename.exists()
+
+
+def test_shared_journal_freezes_one_message_for_competing_workers(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    from ml.inference.replay import ReplayJournal
+    built = []
+    path = tmp_path / "shared.sqlite3"
+    def submit(worker):
+        def build():
+            built.append(worker)
+            time.sleep(0.02)
+            return {"worker": worker, "issued_at": str(worker)}, {"source": "test"}
+        return ReplayJournal(path).freeze("api", "forecast", "run", "batch", {"snapshot": "s"}, build)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(submit, [1, 2]))
+    assert len(built) == 1 and results[0][0] == results[1][0]
+    assert sorted(r[2] for r in results) == [False, True]

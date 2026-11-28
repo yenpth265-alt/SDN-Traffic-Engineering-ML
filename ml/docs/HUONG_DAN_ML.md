@@ -8,6 +8,8 @@ Bạn chỉ cần bắt đầu từ ba chỗ: `ml/README.md` để chạy lệnh
 
 ### Luồng A: học mô hình, chạy offline
 
+`history.csv` và `runs.json` thuộc luồng này khi chuẩn bị bộ dữ liệu offline mới hoặc huấn luyện/đánh giá lại. Chúng không cần cho inference với model đã khóa; không yêu cầu Data xuất thêm hai file trước khi chạy luồng online ở dưới.
+
 ```mermaid
 flowchart LR
     A["CSV/ZIP schedule Network"] --> B["Kiểm split, thời gian, 48 flow"]

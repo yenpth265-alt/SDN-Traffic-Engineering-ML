@@ -1,4 +1,4 @@
-"""Test SDN's unmodified native L=10 fixture, separately from the L=30 deployment."""
+"""Native SDN contract fixtures, including the actual frozen L=30 model."""
 from copy import deepcopy
 from datetime import timedelta
 import hashlib
@@ -13,6 +13,7 @@ from ml.inference.predict import Predictor
 from ml.preprocessing.bundle import prepare_bundle
 from ml.tests.test_online import make_context_for_v14
 from ml.training.train import train
+from ml.inference.online import build_forecast_batch
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "sdn/fixtures/data_v14"
@@ -70,3 +71,25 @@ def test_deployed_l30_rejects_native_l10_without_padding():
     now = utc(payload["sdn"]["snapshot_as_of_utc"]) + timedelta(milliseconds=100)
     with pytest.raises(ContractError, match="lookback_L mismatch"):
         predictor.predict_batch(payload, context(payload, predictor), clock=lambda: now)
+
+
+def test_frozen_model_consumes_native_sdn_l30_producer(monkeypatch):
+    """Real producer and frozen model; synthetic demand/in-memory OVS only."""
+    from sdn.fixtures.data_v14 import verify_contract_fixtures as producer
+    from data.ingestion.online_models import ForecastBatch
+    predictor = Predictor(ROOT / "configs/ml/selected.yaml")
+    monkeypatch.setattr(producer, "LOOKBACK_L", predictor.config["lookback_L"])
+    fixtures = producer.build_all_fixtures()
+    import json
+    payload = json.loads(fixtures["snapshot_valid_body.json"])
+    Snapshot.model_validate(payload)
+    sdn = payload["sdn"]
+    assert sdn["lookback_L"] == 30 and len(sdn["history"]) == 1440
+    assert sdn["quality_status"] == "VALID" and len(sdn["routing_state"]) == 48
+    now = utc(sdn["snapshot_as_of_utc"]) + timedelta(milliseconds=100)
+    rows = predictor.predict_batch(payload, context(payload, predictor), clock=lambda: now)
+    batch = build_forecast_batch(sdn["run_id"], sdn["snapshot_id"], rows,
+                                 snapshot=payload, horizon_H=predictor.config["horizon_H"])
+    accepted = ForecastBatch.model_validate(batch)
+    assert len(accepted.rows) == 48
+    assert {r.forecast_start for r in accepted.rows} == {100}

@@ -19,12 +19,14 @@ Demo tạo dữ liệu **tổng hợp**, chia 20 seed theo 10/5/5, chuẩn bị 
 
 File dữ liệu mẫu đầy đủ nằm trong ml/artifacts/demo-local/input/. Snapshot và context do demo tạo chỉ dùng kiểm thử, sẽ hết hạn rất nhanh; không lấy làm snapshot online thật.
 
-## 2. Khi có dữ liệu thật: chạy một lệnh
+## 2. Khi cần chuẩn bị dữ liệu offline mới hoặc huấn luyện lại
 
-Nhờ Data xuất hai file theo [hợp đồng đầu vào](docs/DATA_CONTRACT.md):
+Chỉ với phạm vi offline mới, ML mới phối hợp Data xuất hai file theo [hợp đồng đầu vào](docs/DATA_CONTRACT.md):
 
 - history.csv: nhu cầu theo run, flow và bin một giây, gồm cả warm-up.
 - runs.json: nguồn thời gian, scenario, seed, family và split đã thống nhất.
+
+**Hai file này không cần cho tích hợp/inference với model đã huấn luyện.** Luồng online ở mục 5 nạp `selected.yaml` và artifact đã khóa, lấy run metadata cùng snapshot SDN qua Data API; lịch sử L bins nằm trong snapshot. Không yêu cầu Data bổ sung export CSV/JSON như điều kiện chạy model hiện tại. Bộ offline Network đã dùng để huấn luyện cũng không cần xuất lại chỉ để inference.
 
 ~~~powershell
 python -m ml run --history data/exports/history.csv --runs data/exports/runs.json --out ml/artifacts/run001
@@ -113,6 +115,12 @@ YAML chứa `lookback_L`, `horizon_H`, `ma_window`, epsilon và hash model/confi
 
 Chi tiết endpoint, `X-API-Key` và schema v1.4 xem tại [Hợp đồng tích hợp online v1.4](docs/ONLINE_INTEGRATION_CONTRACT.md).
 
+Để chạy model bàn giao trên môi trường mới, cài đúng lock của artifact; loader kiểm phiên bản NumPy, scikit-learn và joblib thay vì tự chấp nhận mọi phiên bản trong requirements huấn luyện:
+
+~~~powershell
+python -m pip install -r ml/saved_models/offline-L30-H1/requirements-lock.txt
+~~~
+
 ~~~powershell
 $env:SDN_ML_KEY = "<ml-key>"
 $env:SDN_READER_KEY = "<reader-key>"
@@ -120,6 +128,12 @@ python -m ml online --deployment-config configs/ml/selected.yaml --base-url http
 # Hoặc giữ model nạp 1 lần cho Runner đọc từng dòng snapshot_id từ stdin:
 python -m ml online --deployment-config configs/ml/selected.yaml --base-url http://127.0.0.1:8000 --run-id run001 --watch-stdin --emit-event
 ~~~
+
+Adapter lưu forecast và audit event vào journal SQLite cục bộ **trước POST**, mặc định `ml/artifacts/online-replay.sqlite3`. Dùng `--replay-db <path>` hoặc `SDN_ML_REPLAY_DB` để đặt đường dẫn bền vững do Runner quản lý. Đây là cache replay của ML, Data vẫn ghi các bảng dữ liệu thí nghiệm.
+
+Khi Runner gửi lại cùng run/snapshot/batch sau mất ACK hoặc restart, ML dùng nguyên payload và `issued_at` đã lưu, không inference lại. Cùng ID mà đổi snapshot/model/context bị từ chối; forecast hết hạn vẫn skip, không được làm mới timestamp để gửi lại. `--dry-run` không ghi journal. Journal giữ ACK và payload đã gửi; hiện chưa tự quét/gửi mọi mục pending khi khởi động, Runner cần gửi lại đúng tick IDs. Audit `event_delivery=PENDING` cho biết event cần được retry khi còn đủ điều kiện; không làm mất kết quả forecast Data đã ACK.
+
+Trước runtime cần thống nhất: Data/SDN về tick đầu và history warm-up; SDN cung cấp producer snapshot L=30; Optimization dùng đúng H và không áp epsilon lần hai; QA/Runner chốt cách gọi worker, replay, timeout/fallback và ngân sách deadline. Chi tiết phân vai nằm ở mục 10 của hợp đồng online.
 
 ### 5.2. Chế độ file cục bộ (`python -m ml predict`)
 

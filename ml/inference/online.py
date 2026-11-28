@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+from pathlib import Path
 import time
 import urllib.error
 import urllib.parse
@@ -13,6 +14,7 @@ import urllib.request
 
 from ml.common import ContractError, ROW_FIELDS, numbers, require, stamp, utc, whole
 from ml.inference.predict import Predictor, unwrap_snapshot
+from ml.inference.replay import ReplayJournal
 
 METHOD_BY_ID = {
     "M1": "persistence",
@@ -114,6 +116,12 @@ def build_context(
     if run_info.get("config_hash"):
         require(inner.get("config_hash") == run_info["config_hash"],
                 "Snapshot config_hash differs from registered run")
+    if run_info.get("config_version"):
+        require(inner.get("config_version") == run_info["config_version"],
+                "Snapshot config_version differs from registered run")
+    if run_info.get("model_version"):
+        require(run_info["model_version"] == predictor.config["model_version"],
+                "Run model_version differs from frozen ML config")
     if run_info.get("lookback_bins") is not None:
         require(whole(run_info["lookback_bins"], "lookback_bins", 1) == predictor.config["lookback_L"],
                 "Run lookback_bins differs from frozen ML config")
@@ -287,14 +295,18 @@ class DataApiClient:
 class OnlineForecastRunner:
     """Keep one frozen Predictor loaded and execute causal online forecast ticks."""
 
-    def __init__(self, artifact_path, client: DataApiClient):
+    def __init__(self, artifact_path, client: DataApiClient, *, replay_db=None):
         self.predictor = Predictor(artifact_path)
         self.client = client
+        default_db = Path(__file__).resolve().parents[1] / "artifacts/online-replay.sqlite3"
+        self.journal = ReplayJournal(replay_db or os.getenv("SDN_ML_REPLAY_DB") or default_db)
         self._runs: dict[str, dict] = {}
 
     def get_run(self, run_id: str, *, refresh: bool = False) -> dict:
         if refresh or run_id not in self._runs:
-            self._runs[run_id] = self.client.get_run(run_id)
+            run = self.client.get_run(run_id)
+            require(run.get("run_id") == run_id, "Downloaded run_id differs from requested run_id")
+            self._runs[run_id] = run
         return self._runs[run_id]
 
     def process_snapshot(
@@ -312,12 +324,13 @@ class OnlineForecastRunner:
         dry_run: bool = False,
         clock=None,
     ) -> dict:
-        """Fetch snapshot, run Predictor, and POST ForecastBatch to Data API."""
+        """Freeze each forecast before POST; a repeated tick reuses its payload."""
         run_info = self.get_run(run_id)
         self.predictor.last_audit = {"status": "INVALID", "snapshot_id": snapshot_id, "fallback": False}
         resolved_method = resolve_method(method, run_info)
         batch_id = forecast_batch_id or f"{run_id}:{snapshot_id}:{resolved_method}"
         snapshot_payload, raw_sha256 = self.client.get_snapshot(run_id, snapshot_id)
+        audit = None
         try:
             require(unwrap_snapshot(snapshot_payload).get("snapshot_id") == snapshot_id,
                     "Downloaded snapshot_id differs from requested snapshot_id")
@@ -330,15 +343,48 @@ class OnlineForecastRunner:
                 fallback_policy=fallback_policy,
                 fallback_epsilon=fallback_epsilon,
             )
-            rows = self.predictor.predict_batch(
-                snapshot_payload, context, method=resolved_method, clock=clock
-            )
+            binding = {
+                "snapshot_id": snapshot_id,
+                "snapshot_http_sha256": raw_sha256,
+                "method": resolved_method,
+                "context": {key: context[key] for key in (
+                    "run_id", "config_hash", "topology_hash", "ml_config_sha256",
+                    "model_sha256", "measurement_started_at_utc", "measurement_end_utc",
+                )},
+            }
+
+            def build():
+                rows = self.predictor.predict_batch(
+                    snapshot_payload, context, method=resolved_method, clock=clock
+                )
+                batch = build_forecast_batch(
+                    run_id, snapshot_id, rows, forecast_batch_id=batch_id,
+                    method=resolved_method, snapshot=snapshot_payload,
+                    horizon_H=self.predictor.config["horizon_H"],
+                )
+                audit = dict(self.predictor.last_audit)
+                audit.update(snapshot_http_sha256=raw_sha256, forecast_batch_id=batch_id)
+                return batch, audit
+
+            if dry_run:
+                batch_payload, audit = build()
+                replayed = False
+            else:
+                batch_payload, audit, replayed = self.journal.freeze(
+                    self.client.base_url, "forecast", run_id, batch_id, binding, build,
+                )
+            cutoff = utc(unwrap_snapshot(snapshot_payload)["history_cutoff_utc"])
+            delivery_now = clock() if clock else datetime.now(timezone.utc)
+            require(delivery_now < cutoff + timedelta(seconds=self.predictor.config["horizon_H"]),
+                    "FORECAST_EXPIRED_REPLAY" if replayed else "FORECAST_EXPIRED")
+            require((delivery_now - cutoff).total_seconds() <= float(max_snapshot_age_s),
+                    "STALE_HISTORY_REPLAY" if replayed else "STALE_HISTORY_AT_DELIVERY")
         except ContractError as exc:
-            audit = dict(self.predictor.last_audit)
+            audit = dict(audit if audit is not None else self.predictor.last_audit)
             audit.update(status="INVALID", reason=str(exc), snapshot_id=snapshot_id)
             audit["snapshot_http_sha256"] = raw_sha256
             if emit_event and not dry_run:
-                self._try_emit_event(
+                audit["event_delivery"] = self._try_emit_event(
                     run_id,
                     f"ml:{run_id}:{snapshot_id}:{resolved_method}:skipped",
                     "ML_FORECAST_SKIPPED",
@@ -354,23 +400,15 @@ class OnlineForecastRunner:
                 "audit": audit,
             }
 
-        batch_payload = build_forecast_batch(
-            run_id,
-            snapshot_id,
-            rows,
-            forecast_batch_id=batch_id,
-            method=resolved_method,
-            snapshot=snapshot_payload,
-            horizon_H=self.predictor.config["horizon_H"],
-        )
         ack = {"inserted": 0} if dry_run else self.client.post_forecast_batch(batch_payload)
-        audit = dict(self.predictor.last_audit)
-        audit["snapshot_http_sha256"] = raw_sha256
-        audit["forecast_batch_id"] = batch_id
+        if not dry_run:
+            self.journal.mark_delivered(self.client.base_url, "forecast", run_id, batch_id)
+        audit["replayed"] = replayed
+        audit["target_expired"] = False
         audit["inserted"] = ack.get("inserted")
         if emit_event and not dry_run:
             event_type = "ML_FORECAST_FALLBACK" if audit.get("fallback") else "ML_FORECAST_PUBLISHED"
-            self._try_emit_event(
+            audit["event_delivery"] = self._try_emit_event(
                 run_id,
                 f"ml:{run_id}:{snapshot_id}:{resolved_method}:published",
                 event_type,
@@ -383,7 +421,7 @@ class OnlineForecastRunner:
             "snapshot_id": snapshot_id,
             "forecast_batch_id": batch_id,
             "method": resolved_method,
-            "row_count": len(rows),
+            "row_count": len(batch_payload["rows"]),
             "inserted": ack.get("inserted"),
             "audit": audit,
             "batch": batch_payload,
@@ -396,9 +434,26 @@ class OnlineForecastRunner:
         event_type: str,
         detail: dict,
         event_at_utc: str | None = None,
-    ) -> None:
+    ) -> dict:
         try:
-            self.client.post_ml_event(run_id, event_id, event_type, detail, event_at_utc)
-        except DataApiError:
-            # Diagnostic event failure must not mask the primary forecast decision.
-            pass
+            def build():
+                return {
+                    "event_id": event_id,
+                    "event_at_utc": event_at_utc or stamp(),
+                    "event_type": event_type,
+                    "detail": dict(detail),
+                }, {}
+
+            binding = {"snapshot_http_sha256": detail.get("snapshot_http_sha256"),
+                       "model_sha256": self.predictor.metadata["model_sha256"],
+                       "event_type": event_type}
+            payload, _, _ = self.journal.freeze(
+                self.client.base_url, "event", run_id, event_id, binding, build,
+            )
+            self.client.post_ml_event(run_id, payload["event_id"], payload["event_type"],
+                                      payload["detail"], payload["event_at_utc"])
+            self.journal.mark_delivered(self.client.base_url, "event", run_id, event_id)
+            return {"status": "DELIVERED"}
+        except (DataApiError, ContractError) as exc:
+            # Event recovery must not disguise a forecast that Data already ACKed.
+            return {"status": "PENDING", "reason": str(exc)}

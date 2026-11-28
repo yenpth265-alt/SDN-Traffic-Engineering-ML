@@ -68,7 +68,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: python sdn/fixtures/data_v14_v10/verify_v10_fixtures.py --verify
       - name: Run SDN v1.4 PostgreSQL integration with zero skips
-        if: ${{ !cancelled() }}
         run: |
           python - <<'PY'
           import unittest

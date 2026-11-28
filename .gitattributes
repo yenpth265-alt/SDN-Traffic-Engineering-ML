@@ -1,0 +1,4 @@
+# These frozen artifacts are verified by byte hashes recorded in deployment metadata.
+# Preserve their exact bytes across Windows and Linux checkouts.
+ml/saved_models/**/model.joblib -text
+ml/saved_models/**/ml_config.json -text whitespace=cr-at-eol

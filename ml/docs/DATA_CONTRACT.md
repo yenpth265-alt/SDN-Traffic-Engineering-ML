@@ -1,8 +1,14 @@
-# File adapter ML v1 — dữ liệu Data/SDN/Runner cần cung cấp
+# File adapter ML v1 — đầu vào offline và snapshot inference
 
-Semantics theo Architecture v1.4 và Testing IF04–IF06. Chi tiết đóng gói file/hash dưới đây là adapter đề xuất; chưa xác nhận API liên role đã khóa. ML không truy cập DB, tạo snapshot sản xuất hoặc tự sửa nguồn dữ liệu.
+> **Cập nhật 26/11/2026:** Tài liệu hợp đồng API online v1.4 đầy đủ (endpoint HTTP, `X-API-Key`, envelope `{"sdn": ...}`, `ForecastBatch` với offset số nguyên và cách chạy `python -m ml online`) nằm tại [ONLINE_INTEGRATION_CONTRACT.md](ONLINE_INTEGRATION_CONTRACT.md). Tài liệu dưới đây giữ đặc tả chi tiết cho file adapter offline và `Predictor` lõi.
+
+**Làm rõ phạm vi ngày 28/11/2026:** `history.csv` và `runs.json` trong mục A chỉ phục vụ tạo TrainingBundle cho bộ dữ liệu offline mới, huấn luyện lại hoặc đánh giá offline trên dữ liệu mới. Hai file không phải đầu vào của `python -m ml online`/`Predictor` và không phải đầu ra Data bắt buộc bổ sung cho model hiện tại. Inference dùng artifact đã khóa, run metadata và snapshot có history do SDN tạo/Data lưu và trả qua API. Nếu dùng lệnh `predict` bằng file, đầu vào là snapshot/context JSON, không phải cặp file huấn luyện này.
+
+Semantics theo Architecture v1.4 và Testing IF04–IF06. ML không truy cập DB, tạo snapshot sản xuất hoặc tự sửa nguồn dữ liệu.
 
 **Nguồn chuẩn split:** thống nhất với Network và Architecture v1.4 ngày 22/11/2026: 10/5/5 (50/25/25). Với 20 seed trong `configs/experiments/runner_manifest.json`: 1–10 train, 11–15 validation, 16–20 test. ML giữ nguyên nhãn nguồn và kiểm tra split trước khi tạo window.
+
+**Khóa model offline (26/11/2026):** Chọn L/H bằng validation pooled vector MAE; test không chọn tham số. Online đọc `configs/ml/selected.yaml` và model được pin trong đó. Runner đăng ký L/H tương ứng; không tự thay H theo từng tick. `ml_config_hash` khi đăng ký run lấy từ `ml_config_sha256` trong YAML.
 
 ## A. Export ngoại tuyến
 
@@ -82,7 +88,7 @@ Data có thể gọi ml.preprocessing.bundle.prepare_bundle(...) để thống n
 
 ## C. Snapshot online
 
-Snapshot **SDN tạo, Data lưu và trả nguyên bản**:
+Snapshot **SDN tạo, Data lưu và trả nguyên bản** dưới envelope `{"sdn": SDNSnapshotV14}` (công cụ `Predictor` hỗ trợ cả envelope `{"sdn": ...}` lẫn object phẳng bên trong; xem chi tiết trường v1.4 ở [ONLINE_INTEGRATION_CONTRACT.md](ONLINE_INTEGRATION_CONTRACT.md)):
 
 | Trường | Yêu cầu |
 | --- | --- |
@@ -143,6 +149,6 @@ Thay dấu <...> bằng hash thật. Hai hash model/config lấy từ model/meta
 
 ## E. Payload trả Data
 
-Chỉ list 48×H* object có đúng run_id,flow_group_id,issued_at,forecast_start,forecast_end,predicted_mbps,source. Mỗi row là một bin, end=start+1. Chung issued_at/source, đủ flow/step. Raw, epsilon, model/config ref, lý do lỗi và latency chỉ ở artifact/audit riêng.
+`Predictor.predict_batch()` trả list `48 × H*` object có đúng 7 trường `run_id,flow_group_id,issued_at,forecast_start,forecast_end,predicted_mbps,source`, với `forecast_start` và `forecast_end` là **số nguyên (`int` strict)**, `end = start + 1`, chung `issued_at`/`source`, đủ flow/step. Raw, epsilon, model/config ref, lý do lỗi và latency chỉ ở artifact/audit riêng.
 
-Data tự tạo ForecastBatchRef/READY và ghi DB. Optimization tự tính mean H từ các hàng final, không áp lại epsilon.
+Khi gửi tới Data API (`POST /v1/ml/forecasts`), client online (`ml/inference/online.py` hoặc Runner) bọc `rows` thành `ForecastBatch` (`run_id`, `forecast_batch_id`, `snapshot_id`, `rows`). Data tự kiểm READY và ghi DB. Optimization tự tính mean H từ các hàng final, không áp lại epsilon.

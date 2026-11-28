@@ -27,6 +27,9 @@ def parser():
     ev.add_argument("--bundle", required=True)
     ev.add_argument("--artifact", required=True)
     ev.add_argument("--out", required=True)
+    freeze = cmds.add_parser("export-config", help="Freeze an offline-selected artifact as online deployment YAML")
+    freeze.add_argument("--artifact", required=True)
+    freeze.add_argument("--out", required=True)
     run = cmds.add_parser("run", help="One command: prepare, train/validate, then evaluate test")
     run.add_argument("--history", required=True)
     run.add_argument("--runs", required=True)
@@ -44,12 +47,37 @@ def parser():
     schedule.add_argument("--stride", type=int, default=5)
     schedule.add_argument("--out", required=True)
     pred = cmds.add_parser("predict", help="Read SDN snapshot supplied by Data; write seven-field rows")
-    pred.add_argument("--artifact", required=True)
+    pred.add_argument("--artifact", "--deployment-config", dest="artifact", required=True,
+                      help="Model directory or frozen deployment YAML")
     pred.add_argument("--snapshot", required=True)
     pred.add_argument("--context", required=True)
     pred.add_argument("--method", choices=["rf", "persistence", "moving_average"], default="rf")
     pred.add_argument("--out", required=True)
     pred.add_argument("--audit", required=True, help="Separate ML-local diagnostic JSON")
+    online = cmds.add_parser("online", help="Fetch Snapshot v1.4 from Data API, predict, and POST ForecastBatch")
+    online.add_argument("--artifact", "--deployment-config", dest="artifact", required=True,
+                        help="Model directory or frozen deployment YAML")
+    online.add_argument("--base-url", required=True)
+    online.add_argument("--run-id", required=True)
+    online.add_argument("--snapshot-id")
+    online.add_argument("--forecast-batch-id")
+    online.add_argument("--watch-stdin", action="store_true",
+                        help="Keep model loaded and read snapshot IDs or JSON ticks line-by-line from stdin")
+    online.add_argument("--method", choices=["auto", "rf", "persistence", "moving_average"], default="auto")
+    online.add_argument("--ml-api-key", default=None, help="Defaults to SDN_ML_KEY env var")
+    online.add_argument("--reader-api-key", default=None, help="Defaults to SDN_READER_KEY env var")
+    online.add_argument("--max-snapshot-age-s", type=float, default=2.0)
+    online.add_argument("--forecast-timeout-ms", type=float, default=500.0)
+    online.add_argument("--fallback-policy", choices=["skip", "persistence"], default="skip")
+    online.add_argument("--fallback-epsilon", type=float, default=0.0)
+    online.add_argument("--http-timeout-s", type=float, default=5.0)
+    online.add_argument("--max-retries", type=int, default=2)
+    online.add_argument("--replay-db", default=None,
+                        help="Durable ML replay SQLite file; defaults to SDN_ML_REPLAY_DB or ml/artifacts/online-replay.sqlite3")
+    online.add_argument("--emit-event", action="store_true")
+    online.add_argument("--dry-run", action="store_true")
+    online.add_argument("--out", default=None, help="Optional file for ForecastBatch JSON in single-tick mode")
+    online.add_argument("--audit", default=None, help="Optional file for audit JSON in single-tick mode")
     demo = cmds.add_parser("demo", help="Synthetic end-to-end smoke run; NOT benchmark data")
     demo.add_argument("--out", required=True)
     return p
@@ -72,6 +100,10 @@ def main(argv=None):
             from ml.validation.evaluate import evaluate
             result = evaluate(args.bundle, args.artifact, args.out)
             print(f"Test evaluation written to {args.out}/evaluation.json")
+        elif args.command == "export-config":
+            from ml.deployment import export_deployment
+            result = export_deployment(args.artifact, args.out)
+            print(f"Frozen L={result['lookback_L']} H={result['horizon_H']} in {args.out}")
         elif args.command in ("run", "from-schedule"):
             import yaml
             from ml.preprocessing.bundle import prepare_bundle
@@ -104,6 +136,78 @@ def main(argv=None):
             write_json(args.audit, predictor.last_audit)
             write_json(args.out, rows)
             print(f"Published {len(rows)} rows, source={rows[0]['source']}")
+        elif args.command == "online":
+            import json
+            from ml.inference.online import DataApiClient, DataApiError, OnlineForecastRunner
+            require(bool(args.snapshot_id) != bool(args.watch_stdin),
+                    "Specify exactly one of --snapshot-id or --watch-stdin")
+            client = DataApiClient(
+                args.base_url,
+                ml_api_key=args.ml_api_key,
+                reader_api_key=args.reader_api_key,
+                timeout_s=args.http_timeout_s,
+                max_retries=args.max_retries,
+            )
+            runner = OnlineForecastRunner(args.artifact, client, replay_db=args.replay_db)
+            if args.watch_stdin:
+                for raw_line in sys.stdin:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    tick = json.loads(line) if line.startswith("{") else {"snapshot_id": line}
+                    tick_run = tick.get("run_id", args.run_id)
+                    tick_snap = tick["snapshot_id"]
+                    tick_batch = tick.get("forecast_batch_id")
+                    try:
+                        res = runner.process_snapshot(
+                            tick_run,
+                            tick_snap,
+                            forecast_batch_id=tick_batch,
+                            method=tick.get("method", args.method),
+                            max_snapshot_age_s=tick.get("max_snapshot_age_s", args.max_snapshot_age_s),
+                            forecast_timeout_ms=tick.get("forecast_timeout_ms", args.forecast_timeout_ms),
+                            fallback_policy=tick.get("fallback_policy", args.fallback_policy),
+                            fallback_epsilon=tick.get("fallback_epsilon", args.fallback_epsilon),
+                            emit_event=args.emit_event,
+                            dry_run=args.dry_run,
+                        )
+                    except DataApiError as exc:
+                        res = {"status": "API_ERROR", "run_id": tick_run, "snapshot_id": tick_snap,
+                               "status_code": exc.status_code, "reason": str(exc)}
+                    except ContractError as exc:
+                        res = {"status": "SKIPPED", "run_id": tick_run, "snapshot_id": tick_snap,
+                               "reason": str(exc)}
+                    print(json.dumps({k: v for k, v in res.items() if k != "batch"}, ensure_ascii=False),
+                          flush=True)
+                return 0
+            try:
+                res = runner.process_snapshot(
+                    args.run_id,
+                    args.snapshot_id,
+                    forecast_batch_id=args.forecast_batch_id,
+                    method=args.method,
+                    max_snapshot_age_s=args.max_snapshot_age_s,
+                    forecast_timeout_ms=args.forecast_timeout_ms,
+                    fallback_policy=args.fallback_policy,
+                    fallback_epsilon=args.fallback_epsilon,
+                    emit_event=args.emit_event,
+                    dry_run=args.dry_run,
+                )
+            except DataApiError as exc:
+                if args.audit:
+                    write_json(args.audit, {"status": "API_ERROR", "status_code": exc.status_code,
+                                            "reason": str(exc)})
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+            if args.audit:
+                write_json(args.audit, res["audit"])
+            if res["status"] != "OK":
+                print(f"SKIPPED: {res['reason']}", file=sys.stderr)
+                return 2
+            if args.out and res.get("batch") is not None:
+                write_json(args.out, res["batch"])
+            print(f"Published {res['row_count']} rows, batch={res['forecast_batch_id']}, "
+                  f"inserted={res['inserted']}")
         else:
             from ml.demo import create_demo_inputs, synthetic_snapshot
             from ml.inference.predict import Predictor

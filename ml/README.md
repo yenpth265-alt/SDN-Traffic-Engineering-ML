@@ -19,12 +19,14 @@ Demo tạo dữ liệu **tổng hợp**, chia 20 seed theo 10/5/5, chuẩn bị 
 
 File dữ liệu mẫu đầy đủ nằm trong ml/artifacts/demo-local/input/. Snapshot và context do demo tạo chỉ dùng kiểm thử, sẽ hết hạn rất nhanh; không lấy làm snapshot online thật.
 
-## 2. Khi có dữ liệu thật: chạy một lệnh
+## 2. Khi cần chuẩn bị dữ liệu offline mới hoặc huấn luyện lại
 
-Nhờ Data xuất hai file theo [hợp đồng đầu vào](docs/DATA_CONTRACT.md):
+Chỉ với phạm vi offline mới, ML mới phối hợp Data xuất hai file theo [hợp đồng đầu vào](docs/DATA_CONTRACT.md):
 
 - history.csv: nhu cầu theo run, flow và bin một giây, gồm cả warm-up.
 - runs.json: nguồn thời gian, scenario, seed, family và split đã thống nhất.
+
+**Hai file này không cần cho tích hợp/inference với model đã huấn luyện.** Luồng online ở mục 5 nạp `selected.yaml` và artifact đã khóa, lấy run metadata cùng snapshot SDN qua Data API; lịch sử L bins nằm trong snapshot. Không yêu cầu Data bổ sung export CSV/JSON như điều kiện chạy model hiện tại. Bộ offline Network đã dùng để huấn luyện cũng không cần xuất lại chỉ để inference.
 
 ~~~powershell
 python -m ml run --history data/exports/history.csv --runs data/exports/runs.json --out ml/artifacts/run001
@@ -79,6 +81,7 @@ Với lệnh run, kết quả nằm dưới ml/artifacts/run001/:
 | bundle/bundle.json | Schema, run/split, source hashes, hash các file dữ liệu |
 | model/model.joblib | RF đã huấn luyện |
 | model/ml_config.json | L*, H*, epsilon*, W*, feature order, thứ tự flow và baseline config |
+| model/deployment.yaml | YAML đóng băng cấu hình đã chọn, đường dẫn model tương đối và hash để online nạp |
 | model/metadata.json | Model/config hash, phiên bản thư viện, provenance và sample hash |
 | model/requirements-lock.txt | Phiên bản thư viện để tái tạo môi trường |
 | model/validation.json | Các lượt tìm kiếm và so sánh RF/Persistence/MA |
@@ -96,6 +99,44 @@ Chọn H bằng MAE không chứng minh H đó tối ưu hiệu năng mạng. Mu
 
 ## 5. Dự báo online
 
+### 5.0. Khóa L/H bằng offline và dùng lại YAML khi online
+
+L/H được chọn bằng **validation pooled vector MAE** trong lưới offline; test chỉ đánh giá sau khi chọn xong. Online dùng nguyên cấu hình đã đóng băng, không tự chọn lại L/H theo từng tick. File dùng chung của lần chạy 26/11/2026 là `configs/ml/selected.yaml`, tham chiếu model tại `ml/saved_models/offline-L30-H1/`.
+
+Mỗi lần `train` tự sinh `model/deployment.yaml`. Để xuất YAML sang vị trí bàn giao:
+
+~~~powershell
+python -m ml export-config --artifact ml/saved_models/offline-L30-H1 --out configs/ml/selected.yaml
+~~~
+
+YAML chứa `lookback_L`, `horizon_H`, `ma_window`, epsilon và hash model/config. Loader kiểm chúng khớp model đã huấn luyện; sửa riêng L/H trong YAML sẽ bị từ chối. Cần bàn giao cả YAML lẫn thư mục model được tham chiếu, giữ cấu trúc đường dẫn tương đối. Runner đăng ký `lookback_bins`/`horizon_bins` từ cấu hình đã nạp và lấy `ml_config_hash` từ `ml_config_sha256` trong YAML, không dùng hash bytes YAML thay thế.
+
+### 5.1. Qua Data API (`python -m ml online`, khuyến nghị khi tích hợp)
+
+Chi tiết endpoint, `X-API-Key` và schema v1.4 xem tại [Hợp đồng tích hợp online v1.4](docs/ONLINE_INTEGRATION_CONTRACT.md).
+
+Để chạy model bàn giao trên môi trường mới, cài đúng lock của artifact; loader kiểm phiên bản NumPy, scikit-learn và joblib thay vì tự chấp nhận mọi phiên bản trong requirements huấn luyện:
+
+~~~powershell
+python -m pip install -r ml/saved_models/offline-L30-H1/requirements-lock.txt
+~~~
+
+~~~powershell
+$env:SDN_ML_KEY = "<ml-key>"
+$env:SDN_READER_KEY = "<reader-key>"
+python -m ml online --deployment-config configs/ml/selected.yaml --base-url http://127.0.0.1:8000 --run-id run001 --snapshot-id snap_run001_100 --emit-event
+# Hoặc giữ model nạp 1 lần cho Runner đọc từng dòng snapshot_id từ stdin:
+python -m ml online --deployment-config configs/ml/selected.yaml --base-url http://127.0.0.1:8000 --run-id run001 --watch-stdin --emit-event
+~~~
+
+Adapter lưu forecast và audit event vào journal SQLite cục bộ **trước POST**, mặc định `ml/artifacts/online-replay.sqlite3`. Dùng `--replay-db <path>` hoặc `SDN_ML_REPLAY_DB` để đặt đường dẫn bền vững do Runner quản lý. Đây là cache replay của ML, Data vẫn ghi các bảng dữ liệu thí nghiệm.
+
+Khi Runner gửi lại cùng run/snapshot/batch sau mất ACK hoặc restart, ML dùng nguyên payload và `issued_at` đã lưu, không inference lại. Cùng ID mà đổi snapshot/model/context bị từ chối; forecast hết hạn vẫn skip, không được làm mới timestamp để gửi lại. `--dry-run` không ghi journal. Journal giữ ACK và payload đã gửi; hiện chưa tự quét/gửi mọi mục pending khi khởi động, Runner cần gửi lại đúng tick IDs. Audit `event_delivery=PENDING` cho biết event cần được retry khi còn đủ điều kiện; không làm mất kết quả forecast Data đã ACK.
+
+Trước runtime cần thống nhất: Data/SDN về tick đầu và history warm-up; SDN cung cấp producer snapshot L=30; Optimization dùng đúng H và không áp epsilon lần hai; QA/Runner chốt cách gọi worker, replay, timeout/fallback và ngân sách deadline. Chi tiết phân vai nằm ở mục 10 của hợp đồng online.
+
+### 5.2. Chế độ file cục bộ (`python -m ml predict`)
+
 ~~~powershell
 python -m ml predict --artifact ml/artifacts/run001/model --snapshot data/exports/snapshot_tick100.json --context data/exports/context_tick100.json --out ml/artifacts/forecast_tick100.json --audit ml/artifacts/audit_tick100.json
 ~~~
@@ -108,7 +149,7 @@ Trong vòng điều khiển, giữ một instance để model chỉ nạp một 
 from ml.inference.predict import Predictor
 from ml.common import ContractError
 
-predictor = Predictor("ml/artifacts/run001/model")
+predictor = Predictor("configs/ml/selected.yaml")
 # snapshot do Data.get_stored_snapshot(...) cung cấp; context do Runner cung cấp.
 try:
     rows = predictor.predict_batch(snapshot, run_context, method="rf")
@@ -123,7 +164,7 @@ else:
 Rows gồm 48×H* hàng như:
 
 ~~~json
-{"run_id":"run001","flow_group_id":"0x103","issued_at":"2026-11-12T09:02:40.150000Z","forecast_start":100.0,"forecast_end":101.0,"predicted_mbps":4.4,"source":"rf_v1"}
+{"run_id":"run001","flow_group_id":"0x103","issued_at":"2026-11-12T09:02:40.150000Z","forecast_start":100,"forecast_end":101,"predicted_mbps":4.4,"source":"rf_v1"}
 ~~~
 
 Forecast start/end là offset theo **measurement origin**. Issued_at lấy lúc phát hành, chung cho batch. ML áp max(0, (1+epsilon) × raw) đúng một lần. Dự báo hữu hạn trên 10 Mbps không bị cắt về dung lượng link.

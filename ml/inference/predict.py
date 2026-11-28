@@ -1,4 +1,5 @@
 """Online inference: consume an immutable snapshot; emit seven fields only."""
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import time
 import numpy as np
@@ -12,7 +13,18 @@ from ml.training.train import rf_predict
 from ml.validation.metrics import calibrate
 
 
+def unwrap_snapshot(snapshot):
+    """Accept flat snapshots or canonical Data API v1.4 envelopes (`{"sdn": ...}`)."""
+    require(isinstance(snapshot, Mapping), "Snapshot must be a JSON object")
+    if "sdn" in snapshot:
+        require(set(snapshot) == {"sdn"} and isinstance(snapshot["sdn"], Mapping),
+                "Canonical snapshot envelope must contain only the 'sdn' object")
+        return snapshot["sdn"]
+    return snapshot
+
+
 def validate_snapshot(snapshot, context, cfg, metadata, now):
+    snapshot = unwrap_snapshot(snapshot)
     for key in ("config_version", "topology_version"):
         require(isinstance(snapshot.get(key), str) and snapshot[key], f"Missing snapshot {key}")
     for key in ("run_id", "snapshot_id", "config_hash", "topology_hash"):
@@ -39,10 +51,29 @@ def validate_snapshot(snapshot, context, cfg, metadata, now):
                 and r["path_id"] in (r["flow_group_id"] + "_P1", r["flow_group_id"] + "_P2"),
                 "Unverified/inconsistent routing state")
     L, H = cfg["lookback_L"], cfg["horizon_H"]
+    if "delta_s" in snapshot:
+        require(whole(snapshot["delta_s"], "delta_s", 1) == 1, "Unsupported snapshot delta_s")
+    if "lookback_L" in snapshot:
+        require(whole(snapshot["lookback_L"], "lookback_L", 1) == L, "Snapshot lookback_L mismatch")
     origin, end = utc(context["measurement_started_at_utc"]), utc(context["measurement_end_utc"])
     cutoff, asof = utc(snapshot["history_cutoff_utc"]), utc(snapshot["snapshot_as_of_utc"])
     require(origin <= cutoff <= asof <= now, "Invalid snapshot cutoff/availability time")
     anchor = whole((cutoff - origin).total_seconds(), "forecast_start")
+    if "cutoff_offset_s" in snapshot:
+        require(whole(snapshot["cutoff_offset_s"], "cutoff_offset_s") == anchor,
+                "Snapshot cutoff_offset_s mismatch")
+    if "origin_refs" in snapshot:
+        origins = snapshot["origin_refs"]
+        require(isinstance(origins, Mapping), "Snapshot origin_refs must be an object")
+        require(utc(origins.get("measurement_started_at_utc")) == origin,
+                "Snapshot origin_refs.measurement_started_at_utc mismatch")
+        if "traffic_started_at_utc" in origins and "warmup_s" in origins:
+            warmup_s = whole(origins["warmup_s"], "origin_refs.warmup_s")
+            require(utc(origins["traffic_started_at_utc"]) + timedelta(seconds=warmup_s) == origin,
+                    "Snapshot origin_refs warmup mismatch")
+        if "delta_s" in origins:
+            require(whole(origins["delta_s"], "origin_refs.delta_s", 1) == 1,
+                    "Unsupported origin_refs.delta_s")
     require(cutoff + timedelta(seconds=H) <= end, "FORECAST_OUTSIDE_MEASUREMENT")
     max_age = float(context["max_snapshot_age_s"])
     timeout_ms = float(context["forecast_timeout_ms"])
@@ -69,6 +100,9 @@ def validate_snapshot(snapshot, context, cfg, metadata, now):
         require(we <= released <= available <= asof, "Future/unavailable history")
         col = whole((ws - start).total_seconds(), "history bin")
         require(col < L and np.isnan(matrix[positions[fg], col]), "Duplicate history bin")
+        if "bin_index" in r:
+            require(whole(r["bin_index"], "history bin_index") == anchor - L + col,
+                    "History bin_index does not match measurement-relative window")
         record = r["release_record_id"]
         require(isinstance(record, str) and record and record not in release_ids,
                 "Missing/duplicate release_record_id")
@@ -95,10 +129,12 @@ class Predictor:
         clock = clock or (lambda: datetime.now(timezone.utc))
         started = time.perf_counter()
         self.counts["eligible"] += 1
-        audit = {"method": method, "snapshot_id": snapshot.get("snapshot_id"),
+        audit = {"method": method, "snapshot_id": None,
                  "status": "INVALID", "fallback": False}
         self.last_audit = audit
         try:
+            inner = unwrap_snapshot(snapshot)
+            audit["snapshot_id"] = inner.get("snapshot_id")
             require(method in ("rf", "persistence", "moving_average"), "Unknown method")
             now = clock()
             history, anchor, cutoff = validate_snapshot(
@@ -128,8 +164,8 @@ class Predictor:
             require(final.shape == (48, H), "Invalid complete forecast shape")
             # Construct the complete batch before selecting the real issue time.
             rows = [
-                dict(zip(ROW_FIELDS, (context["run_id"], fg, "", float(anchor + h),
-                                     float(anchor + h + 1), float(final[i, h]), source)))
+                dict(zip(ROW_FIELDS, (context["run_id"], fg, "", int(anchor + h),
+                                     int(anchor + h + 1), float(final[i, h]), source)))
                 for i, fg in enumerate(cfg["flow_group_ids"]) for h in range(H)
             ]
             issue_time = clock()

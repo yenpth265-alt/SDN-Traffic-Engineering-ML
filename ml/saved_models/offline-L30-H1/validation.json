@@ -1,0 +1,84 @@
+{
+  "common_sample_ids_sha256": "87565b94bc16a913b97bfecd128bd798bcbf88cd08e8986c141845d762e657d2",
+  "trials": [
+    {
+      "lookback_L": 30,
+      "horizon_H": 1,
+      "epsilon": 0.0,
+      "rf_params": {
+        "n_estimators": 150,
+        "max_depth": 24,
+        "min_samples_leaf": 4
+      },
+      "validation_mae_mbps": 0.054550811567132845
+    }
+  ],
+  "moving_average_trials": [
+    {
+      "W": 3,
+      "mae": 0.058604483568075114
+    },
+    {
+      "W": 5,
+      "mae": 0.05854726897496088
+    },
+    {
+      "W": 10,
+      "mae": 0.0645577479460094
+    },
+    {
+      "W": 30,
+      "mae": 0.098878663308555
+    }
+  ],
+  "selected_comparison": {
+    "rf": {
+      "samples": 102240,
+      "horizon": 1,
+      "pooled_mae_mbps": 0.054550811567132845,
+      "pooled_rmse_mbps": 0.09213213818545123,
+      "per_step_mae_mbps": [
+        0.054550811567132845
+      ],
+      "per_step_rmse_mbps": [
+        0.09213213818545123
+      ],
+      "mean_h_mae_mbps": 0.054550811567132845,
+      "mean_h_rmse_mbps": 0.09213213818545123,
+      "bias_mbps": -0.00017299170915940006,
+      "underprediction_fraction": 0.49019953051643195
+    },
+    "persistence": {
+      "samples": 102240,
+      "horizon": 1,
+      "pooled_mae_mbps": 0.06724449921752737,
+      "pooled_rmse_mbps": 0.10685352798151788,
+      "per_step_mae_mbps": [
+        0.06724449921752737
+      ],
+      "per_step_rmse_mbps": [
+        0.10685352798151788
+      ],
+      "mean_h_mae_mbps": 0.06724449921752737,
+      "mean_h_rmse_mbps": 0.10685352798151788,
+      "bias_mbps": -2.7284820031299028e-05,
+      "underprediction_fraction": 0.5000586854460094
+    },
+    "moving_average": {
+      "samples": 102240,
+      "horizon": 1,
+      "pooled_mae_mbps": 0.05854726897496088,
+      "pooled_rmse_mbps": 0.10684810074203092,
+      "per_step_mae_mbps": [
+        0.05854726897496088
+      ],
+      "per_step_rmse_mbps": [
+        0.10684810074203092
+      ],
+      "mean_h_mae_mbps": 0.05854726897496088,
+      "mean_h_rmse_mbps": 0.10684810074203092,
+      "bias_mbps": -0.00034975332550860755,
+      "underprediction_fraction": 0.5007140062597809
+    }
+  }
+}

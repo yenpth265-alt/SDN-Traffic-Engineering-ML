@@ -1,0 +1,217 @@
+# Hợp đồng Tích hợp Online v1.4 — Luồng `SDN → Data → ML → Data → Optimization`
+
+**Ngày cập nhật:** 28/11/2026
+**Phạm vi:** Thống nhất giao diện online giữa **ML**, **Data**, **SDN**, **Optimization**, **Network**, **Runner** và **Testing/QA** theo `Data_Integration_Contracts.md` (25/11), `data/ingestion/online_api.py` / `online_models.py` / `management_api.py`, và gói đề xuất G0 của ML (26/11).
+
+Tài liệu mô tả hợp đồng ML đang triển khai. Xác nhận liên role, baseline runtime và điều kiện G1 thuộc sổ quyết định QA; nội dung này không thay sign-off của nhóm.
+
+---
+
+## 1. Các quy tắc chung đã thống nhất
+
+| Hạng mục | Quy ước chuẩn | Căn cứ triển khai |
+| --- | --- | --- |
+| **ID canonical (`A01`)** | 48 `flow_group_id` dạng hex (`0x103`…`0x806`), `path_id` dạng `<flow_group_id>_P1` / `_P2`, kiểm theo `topology_bundle.json`. Không quy đổi ngầm sang `h1_h3`. | `configs/network/flow_groups.csv`, `topology_bundle.json` |
+| **Thời gian & Origin (`A02`)** | Chuẩn UTC RFC3339 (`Z` hoặc `+00:00`, tối đa 6 chữ số phần thập phân). `demand` lưu theo **traffic origin** (`traffic_started_at_utc`); `snapshot` (`cutoff_offset_s`, `bin_index`) và `forecast` (`forecast_start`, `forecast_end`) tính theo **measurement origin** (`measurement_started_at_utc = traffic_started_at_utc + warmup_s`). | `online_store.py`, `ml/inference/predict.py` |
+| **Split & Phase (`A12`)** | Split **10/5/5** (`train` seeds 1–10, `validation` 11–15, `test` 16–20); phase **60s warmup / 360s measurement / 10s drain**. | `configs/experiments/runner_manifest.json` |
+| **Owner `epsilon` & `mean H` (`A07`)** | ML áp `max(0, (1 + epsilon) * raw)` **đúng một lần**. Data lưu nguyên `48 × H` dòng. Optimization đọc từ Data và tự tính trung bình theo `H` bước, không áp lại `epsilon`. | `ml/inference/predict.py`, `online_store.py` |
+
+---
+
+## 2. API & Xác thực (`Data API v1`)
+
+Mọi request tới Data API (trừ `/health/*`) bắt buộc có header `X-API-Key` tương ứng với vai trò:
+
+| Bước | Endpoint | Method | Role Key (`env`) | Đầu vào / Đầu ra chính |
+| --- | --- | --- | --- | --- |
+| 0 | `/health/ready` | `GET` | Không cần | Kiểm tra DB đã áp đủ migration `1..4` (`200` / `503`). |
+| 1 | `/v1/runs/{run_id}` | `GET` | `RUNNER`, `READER`, `SDN`, `ML`, `OPTIMIZATION` | Trả thông tin run đã đăng ký (`method_id`, `measurement_started_at_utc`, `measurement_s`, `warmup_s`, `lookback_bins`, `horizon_bins`, `config_hash`, `ml_config_hash`, `topology_id`). |
+| 2 | `/v1/sdn/snapshots` | `POST` | `SDN` (`SDN_SDN_KEY`) | SDN gửi canonical `{"sdn": SDNSnapshotV14}` kèm `X-Content-SHA256` (SHA-256 của raw HTTP bytes). |
+| 3 | `/v1/runs/{run_id}/snapshots/{snapshot_id}` | `GET` | `SDN`, `READER` (`SDN_READER_KEY`) | Data trả nguyên bytes đã lưu kèm header `X-Content-SHA256`. ML kiểm `sha256(raw_bytes) == X-Content-SHA256` trước khi parse JSON. |
+| 4 | `/v1/ml/forecasts` | `POST` | `ML` (`SDN_ML_KEY`) | ML/Runner gửi `ForecastBatch` gồm `48 × H` dòng (`forecast_start`, `forecast_end` là **integer strict**). |
+| 5 | `/v1/runs/{run_id}/forecasts/{forecast_batch_id}` | `GET` | `OPTIMIZATION` (`SDN_OPTIMIZATION_KEY`) | Optimization đọc batch đã READY (`404` nếu chưa sẵn sàng/chưa đủ). |
+| 6 | `/v1/runs/{run_id}/events/ml` | `POST` | `ML` (`SDN_ML_KEY`) | ML gửi sự kiện audit (`ML_FORECAST_PUBLISHED`, `ML_FORECAST_FALLBACK`, `ML_FORECAST_SKIPPED`) theo `event_id` idempotent. |
+
+### Quy tắc Retry & Mã lỗi HTTP
+- **`200` (`{"inserted": N}` hoặc `{"inserted": 0}`):** `N > 0` là ghi mới; `0` là replay idempotent cùng ID và cùng nội dung.
+- **`409 Conflict`:** Trùng ID (`forecast_batch_id` hoặc `event_id`) nhưng khác nội dung, hoặc snapshot không `VALID` / chưa sẵn sàng. **Tuyệt đối không retry.**
+- **`422 Unprocessable Entity`:** Sai schema/kiểu dữ liệu (ví dụ gửi `100.0` thay vì `100`, thiếu dòng, sai horizon). **Tuyệt đối không retry.**
+- **`500/502/503/504` hoặc lỗi mạng:** Có thể retry hữu hạn với **nguyên cùng `forecast_batch_id` và payload JSON**.
+
+---
+
+## 3. Hợp đồng Snapshot v1.4 (`SDN → Data → ML`)
+
+### 3.1. Envelope & Hai loại Hash
+Data API gửi/trả JSON dạng:
+
+```json
+{
+  "sdn": {
+    "snapshot_id": "snap:run001:t100:v1",
+    "run_id": "run001",
+    "snapshot_as_of_utc": "2026-11-12T09:02:40.200000Z",
+    "history_cutoff_utc": "2026-11-12T09:02:40Z",
+    "cutoff_offset_s": 100,
+    "lookback_L": 30,
+    "delta_s": 1,
+    "state_version": 1,
+    "config_version": "1.0",
+    "config_hash": "...",
+    "topology_version": "1.0",
+    "topology_hash": "<64-hex>",
+    "content_hash": "<64-hex>",
+    "origin_refs": {
+      "run_started_at_utc": "2026-11-12T09:00:00Z",
+      "traffic_started_at_utc": "2026-11-12T09:00:00Z",
+      "measurement_started_at_utc": "2026-11-12T09:01:00Z",
+      "warmup_s": 60,
+      "delta_s": 1
+    },
+    "flow_group_ids": ["0x103", "... (48 flows)"],
+    "history": ["... (48 * L rows)"],
+    "routing_state": ["... (48 verified routes)"],
+    "routing_history": ["..."],
+    "link_sample_refs": [],
+    "quality_status": "VALID",
+    "missing_groups": [],
+    "routing_state_complete": true,
+    "unknown_flow_group_ids": [],
+    "provenance": { "..." : "..." },
+    "reason": null,
+    "expected_bin_count": 1440,
+    "valid_bin_count": 1440
+  }
+}
+```
+
+1. **`X-Content-SHA256` (HTTP header):** `SHA-256` trên **nguyên raw HTTP bytes** của body `{"sdn": ...}`.
+2. **`sdn.content_hash` (bên trong payload):** `SHA-256` của `json.dumps(sdn_without_content_hash, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")`.
+
+### 3.2. Quy tắc nhân quả & Chất lượng
+- **Causal history:** `origin <= cutoff <= snapshot_as_of <= now`. Với mỗi dòng thuộc `[cutoff - L, cutoff)`, yêu cầu `window_end - window_start == 1s`, `window_end <= released_at <= available_at <= snapshot_as_of`, và `bin_index == cutoff_offset_s - L + col` (measurement origin).
+- **Thiếu dữ liệu (`INCOMPLETE` / `STALE` / `INVALID`):** Không được điền `0` giả vào `requested_mbps`; giữ `requested_mbps = null`, `released_at_utc = null`, `available_at_utc = null`, `release_record_id = null`, `valid = false`; `reason` giữ đúng giá trị producer/Data, có thể là `null` khi không có observation.
+- **Hành vi ML (`ml/inference/predict.py`):** Chấp nhận cả envelope `{"sdn": ...}` lẫn dict phẳng; chỉ dự báo khi `quality_status == "VALID"` và mọi kiểm tra hash/origin/routing/causal đạt. Mọi trạng thái khác đều skip sạch sẽ (không phát hành dự báo, ghi audit).
+
+---
+
+## 4. Hợp đồng Forecast (`ML → Data → Optimization`)
+
+### 4.1. Envelope `ForecastBatch` gửi `POST /v1/ml/forecasts`
+
+```json
+{
+  "run_id": "run001",
+  "forecast_batch_id": "run001:snap:run001:t100:v1:rf",
+  "snapshot_id": "snap:run001:t100:v1",
+  "rows": [
+    {
+      "run_id": "run001",
+      "flow_group_id": "0x103",
+      "issued_at": "2026-11-12T09:02:40.250000Z",
+      "forecast_start": 100,
+      "forecast_end": 101,
+      "predicted_mbps": 4.4,
+      "source": "rf_v1"
+    }
+  ]
+}
+```
+
+### 4.2. Ràng buộc kiểm tra phía Data (`online_models.py`, `online_store.py`)
+- **`rows`:** Đúng `48 × H` phần tử (`H = run.horizon_bins`), mỗi phần tử có **đúng 7 trường**: `run_id`, `flow_group_id`, `issued_at`, `forecast_start`, `forecast_end`, `predicted_mbps`, `source`.
+- **`forecast_start`, `forecast_end`:** Bắt buộc kiểu **`int` strict trong JSON** (ví dụ `100`, `101`; không được xuất `100.0`, `101.0`), thỏa `anchor <= forecast_start < anchor + H` và `forecast_end == forecast_start + 1`, trong đó `anchor = cutoff_offset_s` (measurement origin) và `anchor + H <= measurement_s`.
+- **`issued_at`:** UTC RFC3339 tối đa 6 chữ số microsecond, giống nhau trên cả `48 × H` dòng, và phải thỏa `issued_at >= snapshot.available_at_utc`.
+- **`predicted_mbps`:** Số thực hữu hạn `>= 0.0` (đã áp `epsilon` một lần ở ML).
+- **`source`:** Giống nhau trên cả batch (`rf_v1`, `persistence`, `moving_avg`, hoặc `fallback_persistence`).
+- **`method_id` ánh xạ từ Run:** `M1 → persistence`, `M2 → moving_average`, `M3 → rf`.
+
+---
+
+## 5. Vận hành luồng Online của ML (`ml/inference/online.py`)
+
+### 5.1. Chạy một tick qua CLI
+```powershell
+$env:SDN_ML_KEY = "<ml-key>"
+$env:SDN_READER_KEY = "<reader-key>"
+python -m ml online `
+  --deployment-config configs/ml/selected.yaml `
+  --base-url http://127.0.0.1:8000 `
+  --run-id run001 `
+  --snapshot-id snap:run001:t100:v1 `
+  --emit-event
+```
+
+### 5.2. Chạy persistent worker cho Runner (`--watch-stdin`)
+Giữ model nạp một lần trong RAM, nhận mỗi dòng từ `stdin` là `snapshot_id` hoặc JSON `{"snapshot_id": "...", "forecast_batch_id": "..."}` và trả về 1 dòng JSON kết quả trên `stdout`:
+
+```powershell
+python -m ml online `
+  --deployment-config configs/ml/selected.yaml `
+  --base-url http://127.0.0.1:8000 `
+  --run-id run001 `
+  --watch-stdin `
+  --emit-event
+```
+
+### 5.3. Gọi trực tiếp bằng Python (`Runner`)
+```python
+from ml.inference.online import DataApiClient, OnlineForecastRunner
+
+client = DataApiClient("http://127.0.0.1:8000", ml_api_key="...", reader_api_key="...")
+runner = OnlineForecastRunner("configs/ml/selected.yaml", client)
+result = runner.process_snapshot("run001", "snap:run001:t100:v1", emit_event=True)
+```
+
+---
+
+## 6. L/H khóa bằng offline và các tham số vận hành còn lại
+- **L/H cho M1–M3:** Theo quyết định 26/11/2026, chọn bằng validation pooled vector MAE trên split 10/5/5; không áp điều kiện H tối thiểu từ vòng điều khiển vào lượt chọn offline. Kết quả xuất thành `configs/ml/selected.yaml`, gồm L/H/W/epsilon cùng đường dẫn và hash model/config; online nạp YAML và không tuning lại. File search (`training.yaml`) và file đã chọn (`selected.yaml`) có vai trò riêng.
+- **Đăng ký run:** Runner/SDN dùng `lookback_L` và `horizon_H` từ YAML cho `lookback_bins`/`horizon_bins`; `ml_config_hash` là `ml_config_sha256` đã pin trong YAML. M1–M3 dùng cùng L/H; W của MA và epsilon được đóng băng cùng model. Sửa L/H mà không huấn luyện lại model tương ứng bị loader từ chối.
+- **Thời hạn thực thi:** Forecast quá hạn vẫn bị bỏ theo cơ chế hiện có; online không tự tăng H hoặc lấy lịch tương lai để bù. Lợi ích điều khiển mạng được kiểm chứng riêng bằng runtime/benchmark.
+- **Ngưỡng `context` online mặc định:** `max_snapshot_age_s`, `forecast_timeout_ms`, `fallback_policy` (`skip` hay `persistence`), và `fallback_epsilon`.
+- **Kênh dữ liệu offline mới (`I03`, tùy chọn):** Model hiện tại đã được huấn luyện từ nguồn Network qua `from-schedule`; inference không đọc `history.csv`/`runs.json`. Chỉ khi nhóm yêu cầu bộ dữ liệu offline mới, huấn luyện lại hoặc đánh giá offline mới cần quyết định giữ nguồn Network hay nối Data export sang cặp file này. Đây không phải điều kiện Data phải bổ sung trước tích hợp hiện tại.
+
+## 7. Cấu hình bàn giao offline và trạng thái pilot
+
+Theo quyết định người phụ trách ngày 26/11/2026: **L=30, H=1, epsilon=0, W=5**. YAML dùng chung là `configs/ml/selected.yaml`; Optimization tham chiếu qua `ml_deployment_config`. Đây là cấu hình offline đã khóa của ML, chưa phải xác nhận rằng toàn vòng điều khiển đáp ứng deadline với H=1.
+
+Model bàn giao được huấn luyện lại với cặp L/H đã chọn, 50.000 mẫu train, RF 150 cây, depth 24, min_samples_leaf 4. Lượt tìm kiếm toàn lưới trước bị ngắt; không tuyên bố đã hoàn tất 24 cấu hình. Khi nhận ForecastBatch dạng rows, Runner bổ sung measurement origin từ run và deadline thực tế; adapter không tự tạo origin/deadline.
+
+SDN báo apply/verify Live OVS khoảng 607–661 ms, chưa gồm inference, solve và Data API. Đề xuất pilot H=1/3/5 trên cùng môi trường vẫn chờ thực thi và phê duyệt baseline runtime. Các H khác cần model tương ứng đã huấn luyện, không sửa riêng H trong YAML của model H=1. Chưa có số đo toàn vòng nên không kết luận H=1 khả thi hoặc bất khả thi.
+
+CLI hiện mặc định `max_snapshot_age_s=2.0`, `forecast_timeout_ms=500`, `fallback_policy=skip`, `fallback_epsilon=0.0`. Đây là mặc định triển khai, chưa phải SLA được pilot xác nhận; Runner có thể truyền chính sách đã thống nhất. Khi H=1, kiểm tra forecast expiry vẫn giới hạn tuổi dự báo dù max_snapshot_age_s là 2.
+
+## 8. Kiểm chứng yêu cầu Data
+
+Batch đầy đủ và snapshot/context tương ứng nằm ở `testing/fixtures/ml_data_v14/`. Test `ml/tests/test_data_handoff.py` kiểm schema, strict integer, run/snapshot/cutoff, 48×H, HTTP 200 cho batch hợp lệ và 422 cho float; tầng DB dùng cursor kiểm thử. Chưa phải xác nhận PostgreSQL/live network.
+
+Adapter có journal SQLite cục bộ cho forecast và audit event. Forecast được ghi bền vững trước POST, khóa theo Data API namespace/run/batch và bind snapshot raw hash, method, model/config hashes, origin/window. Rerun hoặc restart với cùng IDs dùng nguyên payload/issued_at; không inference lại. Competing writers dùng transaction SQLite để một payload duy nhất được chốt trước khi gửi. Event ID cũng giữ nguyên timestamp và detail, không đổi vì lần ACK sau trả `inserted: 0`.
+
+CLI nhận `--replay-db`; thứ tự cấu hình là flag, `SDN_ML_REPLAY_DB`, rồi `ml/artifacts/online-replay.sqlite3`. File này cần tồn tại qua restart và không được chia sang Data API khác bằng cách sửa namespace. Dry-run không tạo record. 409/422 không retry trong cùng request; lỗi mạng/5xx retry hữu hạn cùng bytes. Lỗi event được trả qua `audit.event_delivery`, không che forecast đã ACK.
+
+Replay vẫn kiểm snapshot hash và run/model context trước gửi. Nếu target đã hết hạn hoặc history quá cũ, ML skip và giữ record cũ để đối soát, không làm mới issued_at hoặc tự tăng H. Hiện Runner phải gửi lại đúng tick IDs; journal chưa là tiến trình tự động drain mọi pending message. Chính sách đối soát ACK sau expiry, retention/pruning và nguồn trigger retry cần QA/Runner và Data chốt trước vận hành. Quy tắc tick đầu/bin history âm vẫn cần Data–SDN–ML thống nhất.
+
+## 9. Xác nhận fixture SDN commit 2ec0a583
+
+Test `ml/tests/test_native_sdn_fixture.py` đọc nguyên fixture trong `sdn/fixtures/data_v14/`, không sửa schema hoặc hash của producer. Snapshot VALID có L=10 và 480 dòng history; model triển khai có L=30 và yêu cầu 1.440 dòng history. Không padding, lặp history hoặc điền 0 để làm hai cấu hình khớp nhau.
+
+Test sử dụng một model L=10/H=1 nhỏ, huấn luyện trên dữ liệu tổng hợp chỉ phục vụ kiểm hợp đồng, để chứng minh Predictor đọc trực tiếp fixture VALID và xuất 48 dòng integer 100/101. Model kiểm thử này không thay model bàn giao. Các trạng thái INCOMPLETE/STALE/INVALID và sai hash bị từ chối.
+
+Với model thật trong `selected.yaml`, fixture L=10 phải bị từ chối do `Snapshot lookback_L mismatch`. Để xác nhận tích hợp model bàn giao, SDN cần sinh Snapshot L=30 từ producer và demand evidence tương ứng. Chạy lại test bằng đồng hồ kiểm thử tại thời điểm fixture; fixture lịch sử không được dùng cho tick live.
+
+Test mới `test_frozen_model_consumes_native_sdn_l30_producer` gọi generator SDN với L=30 trong bộ nhớ, dùng đúng `SnapshotCreator`/adapter production và model bàn giao `selected.yaml`. Test kiểm 1.440 history rows, 48 routes và 48 forecast rows qua schema Data. Demand và driver vẫn là synthetic/in-memory; không thay fixture live/SQL read-back do SDN–Data–QA bàn giao và không xác nhận TC-I01.
+
+## 10. Nội dung ML có thể sửa ngay và nội dung cần liên role chốt
+
+| Phần việc | ML chịu trách nhiệm | Bên cần thống nhất | Nội dung cần chốt |
+| --- | --- | --- | --- |
+| Replay và idempotency (`CF-20`) | Journal trước POST, payload/issued_at bất biến, kiểm restart/mất ACK/event replay | Data + QA/Runner | Runner gửi lại đúng tick IDs, xử lý ACK sau expiry và retention; API wire hiện có đủ để sửa ML trước |
+| Snapshot model thật (`CF-21`) | Consumer/test model L30/H1; không padding fixture L10 | SDN + Data + QA | Snapshot L30 có causal demand, đúng origin/hash/config và persistence read-back trên baseline chung |
+| Tick đầu (`CF-22`) | Kiểm theo policy được chọn, không lấy lịch tương lai bù history | Data + SDN + QA/Runner | Bin âm từ warm-up hoặc chờ đủ L bins measurement; audit các tick chưa đủ dữ liệu |
+| Forecast/config (`CF-09/12/19`) | Giữ 7 trường, integer bins, 48×H; bàn giao selected.yaml/model/hash | Optimization + Data + QA/Runner | H theo deployment; mean trên final forecast, epsilon áp tại ML một lần; Data–Optimization chốt readiness wrapper ngoài PredictionRow |
+| Gọi worker/timeout (`CF-07/08/23`) | Cung cấp API/CLI persistent worker, skip/fallback/audit rõ ràng | QA/Runner + Optimization + SDN + Data | snapshot_id/batch_id, method mapping, age/timeout/fallback và deadline toàn vòng; không tự đổi H1 |
+| Offline export (`CF-34`, tùy chọn) | Chỉ khi có yêu cầu dữ liệu/huấn luyện/đánh giá offline mới: kiểm metadata, origin/split/provenance và X/y | Data + Network + QA | Không yêu cầu Data xuất history.csv/runs.json cho inference hiện tại; lập task adapter riêng nếu nhóm mở phạm vi offline mới |
+| Bàn giao/môi trường (`CF-02/43`) | Model/config hashes, requirements-lock, test và change set | QA/Runner | Baseline SHA, đường dẫn artifact/journal bền vững và profile chạy chung |
+
+Các phần ML độc lập có thể được sửa/kiểm trước; triển khai tích hợp runtime và kiểm toàn hệ thống thực hiện sau khi nhóm chấp thuận điều kiện chuyển giai đoạn.

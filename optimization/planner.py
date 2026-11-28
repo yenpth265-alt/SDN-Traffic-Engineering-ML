@@ -42,6 +42,12 @@ def run_planner(
         merged_config["topology_hash"] = topology["topology_hash"]
 
     F = topology["F"]
+    if config.get("ml_deployment_config"):
+        from optimization.ml_contract import normalize_forecast
+        try:
+            forecast_data = normalize_forecast(forecast_data, F, config["ml_deployment_config"])
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            return {"status": "FORECAST_INVALID", "reason": str(exc)}
     routes = normalize_routing_entries(routing_state)
 
     # 1. Kiểm tra routing state trước (chặn UNKNOWN / INCONSISTENT / IN_FLIGHT / sai path)

@@ -6,6 +6,7 @@
 config_version: "1.0"
 topology_version: "1.0"
 network_config_dir: "configs/network"
+ml_deployment_config: "configs/ml/selected.yaml" # L/H/epsilon are frozen offline by ML
 
 TH: 0.85              # Ngưỡng utilization kích hoạt kiểm tra nghẽn (85%)
 N: 3                  # Số chu kỳ liên tiếp U_current vượt ngưỡng TH để kích hoạt trigger

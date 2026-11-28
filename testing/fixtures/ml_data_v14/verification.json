@@ -1,0 +1,28 @@
+{
+  "fixture_kind": "SYNTHETIC_SNAPSHOT_REAL_FROZEN_PREDICTOR_NOT_LIVE_NETWORK",
+  "run_id": "online-test-run",
+  "snapshot_id": "snap:online-test:t100:v1",
+  "L": 30,
+  "H": 1,
+  "rows": 48,
+  "flow_count": 48,
+  "anchor": 100,
+  "strict_integer_offsets": true,
+  "prediction_fields": [
+    "run_id",
+    "flow_group_id",
+    "issued_at",
+    "forecast_start",
+    "forecast_end",
+    "predicted_mbps",
+    "source"
+  ],
+  "content_hash": "a64125ba79214858dca6a4a8859fc2f9f0c1bc1e8a6130308546cdb1cc9e9ded",
+  "snapshot_http_sha256": "f985f107be225c89a4859f44020679d13a1144e860af0ba7ec2a4d4fd7d076a1",
+  "file_sha256": {
+    "snapshot.json": "f985f107be225c89a4859f44020679d13a1144e860af0ba7ec2a4d4fd7d076a1",
+    "context.json": "164fd8b3843487fc5fc449d73bafa052188bb445101902c2a22633d3b573b2b5",
+    "forecast_batch.json": "c2ce38a2c901bdc53220dbdac1d1c746b84fc9f279531e646c318c4e5091145f"
+  },
+  "model_sha256": "cc3e7a24a5ad9f2e39471efca210650b1f6562cc06505c06592f9404970726d1"
+}

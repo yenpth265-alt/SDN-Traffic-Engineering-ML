@@ -1,3 +1,5 @@
+> **TÀI LIỆU LỊCH SỬ — không dùng làm đặc tả runtime hiện hành.** Giữ nguyên nội dung và bằng chứng tại mốc ghi bên dưới. Đối chiếu [baseline QA 28/11/2026](../baselines/2026_11_28/README.md), [ánh xạ ID](../baselines/2026_11_28/reference/legacy_id_crosswalk.md) và [runtime contract](../../integration/orchestration/README.md). [CI main@71f120a](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46134738871) đạt 289 module, 19 Data/QA và 3 SDN–PostgreSQL; không đồng nghĩa sign-off/live.
+
 # Tiêu chí nghiệm thu từng module
 
 - Phiên bản `testing_v2 2026-11-10`.
@@ -161,3 +163,4 @@ Mỗi module có producer xác nhận evidence và QA đối chiếu; Testing t�
 Lượt PostgreSQL ở `44acd20` có 16/17 ca đạt. Replay đăng ký run thất bại. TC-I02 đạt trong phạm vi kiểm lịch sử và đầu vào ML dựng từ fixture. TC-I03 xác minh gốc thời gian và số dòng forecast với bin nguyên do bộ test chuẩn hóa. Apply đủ 48 nhóm đạt với tùy chọn mở rộng của adapter và routing được ghi trước. Các kết quả này hỗ trợ đánh giá từng tiêu chí, còn nghiệm thu liên module cần đầu ra nguyên dạng của producer và `TC-I01` trên vòng tích hợp. [Kết quả và giới hạn](../results/README.md)
 
 Trình tự: owner xác nhận contract và sửa file mình → giao fixtures/schema/mã → QA chạy case và lập defect → pilot/S0 khóa phép đo → freeze → benchmark → tái tính metric/paired analysis → sign-off. QA có thể nghiệm thu chức năng khi RF không thắng baseline; kết quả nghiên cứu vẫn phải giữ và phân tích trung thực.
+

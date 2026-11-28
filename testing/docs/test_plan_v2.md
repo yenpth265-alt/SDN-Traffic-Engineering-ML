@@ -1,3 +1,5 @@
+> **TÀI LIỆU LỊCH SỬ — không dùng làm đặc tả runtime hiện hành.** Giữ nguyên nội dung và bằng chứng tại mốc ghi bên dưới. Đối chiếu [baseline QA 28/11/2026](../baselines/2026_11_28/README.md), [ánh xạ ID](../baselines/2026_11_28/reference/legacy_id_crosswalk.md) và [runtime contract](../../integration/orchestration/README.md). [CI main@71f120a](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46134738871) đạt 289 module, 19 Data/QA và 3 SDN–PostgreSQL; không đồng nghĩa sign-off/live.
+
 > Cập nhật triển khai 28/11/2026: [hợp đồng runtime hiện hành](../../integration/orchestration/README.md). G1–G6 dưới đây là gate nghiệm thu QA; “G1 Network/S0” trong tài liệu module là gate nội bộ khác namespace. Chưa có xác nhận PASS_SYSTEM.
 
 # Kế hoạch kiểm thử và thực nghiệm SDN
@@ -273,3 +275,4 @@ Bàn giao hiện tại: ba tài liệu thiết kế, checklist acceptance và h�
 Bản v2 thay các giả định lỗi thời: N2→N3 đề xuất; scalar-only→vector H bước/mean;72 lượt→225 lượt đề xuất theo Network; S5 mở rộng→chính; path/link IDs theo SDN; version nhiều lần→tối đa1 lần/batch. Loại tham chiếu trang PDF chưa kiểm tra. Giữ metric/cohort/raw/paired analysis còn đúng; sửa acceptance và interfaces tương ứng.
 
 Decision log khi họp: conflict_id,chosen_contract,source_sections,owner_names,confirmed_at_utc,protocol_version,config_hash,evidence_refs,status. Đầu mối đã được ghi trong sổ quyết định. Mốc xác nhận và quyết định cuối vẫn chờ từng module.
+

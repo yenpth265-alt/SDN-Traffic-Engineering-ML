@@ -1,3 +1,5 @@
+> **TÀI LIỆU LỊCH SỬ — không dùng làm đặc tả runtime hiện hành.** Giữ nguyên nội dung và bằng chứng tại mốc ghi bên dưới. Đối chiếu [baseline QA 28/11/2026](../baselines/2026_11_28/README.md), [ánh xạ ID](../baselines/2026_11_28/reference/legacy_id_crosswalk.md) và [runtime contract](../../integration/orchestration/README.md). [CI main@71f120a](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46134738871) đạt 289 module, 19 Data/QA và 3 SDN–PostgreSQL; không đồng nghĩa sign-off/live.
+
 # Giao diện tích hợp tổng hợp cho kiểm thử SDN
 
 - Phiên bản `testing_v2 2026-11-10`.
@@ -268,3 +270,4 @@ Owner sign-off C01–C16 dùng decision log trong test_plan. Mọi mục còn OP
 | SDN → Data, routing và apply-result | Data cần routing version trước result và số nhóm trong result khớp decision. Kết quả mặc định một dòng bị từ chối 422. Đường publish hiện tại xếp result trước routing. | Kiểm đường publish runtime với ACK routing trước result và đủ nhóm đã xác minh. Bổ sung đường rollback và UNKNOWN qua DB. |
 
 [Bằng chứng PostgreSQL](../results/README.md) và [rà soát adapter Data v1](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/blob/ca405ecf6f6f595df979656d490e96e2fdce3cb8/sdn/SDN_DATA_INTEGRATION_CONTRACT_REVIEW.md).
+

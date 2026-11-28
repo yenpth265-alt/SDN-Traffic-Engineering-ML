@@ -1,3 +1,5 @@
+> **Bằng chứng repair lịch sử:** 288 module PASS tại lượt local, không thay cho [CI main@71f120a](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46134738871) (289 module, 19 Data/QA, 3 SDN–PostgreSQL). Các trạng thái nguồn giữ nguyên để truy vết; xem [decision log hiện hành](../../baselines/2026_11_28/decision_log.md).
+
 # Kết quả sửa các mục CF — 28/11/2026
 
 Nhánh: `fix/integration-conflicts-20261128`. Commit mã sửa: `a64916e`. Bản gộp lấy `main@baa4967`, SDN `d7b9bce`, G0 `b3a85bb`; đã giải hết 8 file conflict. Bản làm việc gốc ở nhánh `feat-ml` được giữ nguyên. Chưa push, chưa thay đổi remote main hoặc tạo PR.
@@ -39,3 +41,4 @@ Kiểm chứng: **288 ca module đạt**, **22 ca PostgreSQL đạt, không skip
 [cf-status.json](cf-status.json) đối chiếu đủ 29 mục còn mở từ báo cáo đầu vào. Các trạng thái “có code”, “đã kiểm thử contract” và “đã nghiệm thu live” được ghi riêng. Các mục policy/pilot/sign-off ở trên vẫn mở; việc sửa mã chưa thay thế các bằng chứng đó.
 
 Chi tiết vận hành: [runtime contract và runbook](../../../integration/orchestration/README.md). Thời gian timeout trong runtime.yaml là profile phát triển, chưa được chứng nhận đáp ứng H1 trên mạng thật.
+

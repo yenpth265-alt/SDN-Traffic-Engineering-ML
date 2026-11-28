@@ -1,3 +1,5 @@
+> **TÀI LIỆU LỊCH SỬ — không dùng làm đặc tả runtime hiện hành.** Giữ nguyên nội dung và bằng chứng tại mốc ghi bên dưới. Đối chiếu [baseline QA 28/11/2026](../baselines/2026_11_28/README.md), [ánh xạ ID](../baselines/2026_11_28/reference/legacy_id_crosswalk.md) và [runtime contract](../../integration/orchestration/README.md). [CI main@71f120a](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46134738871) đạt 289 module, 19 Data/QA và 3 SDN–PostgreSQL; không đồng nghĩa sign-off/live.
+
 # Bàn giao phần ML — 18/11/2026
 
 Đã hoàn thiện đường chạy ML độc lập từ dữ liệu đầu vào đến model, đánh giá và payload dự báo; chạy được trên schedule Network hiện có ở main. Chưa nghiệm thu tích hợp với Data/SDN runtime hoặc benchmark mạng. Nhánh controller chưa được merge; các lỗi Network/manifest đã audit không bị sửa trong công việc ML này.
@@ -92,3 +94,4 @@ ML không truy cập DB, không tạo snapshot sản xuất, không dùng future
 - Cần đồng bộ guide main đang ghi split 10/5/5 với allocation/CSV 14/3/3; kiểm độc lập family/demand release và hash trước benchmark chính thức.
 - Model pilot chưa qua tìm kiếm đầy đủ, số đo mạng thật hoặc benchmark M1/M2/M3 cùng MILP. Chưa có bằng chứng giảm nghẽn/loss hoặc tăng goodput.
 - Timeout hiện chặn công bố dự báo quá hạn; cưỡng bức dừng RF đang chạy cần Runner quản lý worker process.
+

@@ -1,3 +1,5 @@
+> **TÀI LIỆU LỊCH SỬ — không dùng làm đặc tả runtime hiện hành.** Giữ nguyên nội dung và bằng chứng tại mốc ghi bên dưới. Đối chiếu [baseline QA 28/11/2026](../baselines/2026_11_28/README.md), [ánh xạ ID](../baselines/2026_11_28/reference/legacy_id_crosswalk.md) và [runtime contract](../../integration/orchestration/README.md). [CI main@71f120a](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46134738871) đạt 289 module, 19 Data/QA và 3 SDN–PostgreSQL; không đồng nghĩa sign-off/live.
+
 # Yêu cầu thống nhất thiết kế và giải quyết xung đột tích hợp SDN
 
 **Phiên bản:** requirements_v1 2026-11-11  
@@ -353,3 +355,4 @@ Các nhóm dưới đây bao phủ REQ-01–REQ-16. Kết quả thực thi thu�
 | REQ-10, REQ-11, REQ-14 | Có manifest và fixture telemetry. Ca CI dùng telemetry dry-run. | QA và các module chốt split, đo counter trên OVS và khóa ma trận đối chứng trước benchmark. |
 
 **Lỗi đăng ký run thuộc REQ-10/13.** Data và Runner cần xác nhận replay của manifest cùng nội dung và ý nghĩa của trạng thái run khi đăng ký lại. Điều kiện đóng gồm HTTP 200 với `inserted: 0`, còn đúng một run trong DB và 409 khi thay dữ liệu đăng ký với cùng ID. [Bằng chứng và các lỗi giao diện](../results/README.md).
+

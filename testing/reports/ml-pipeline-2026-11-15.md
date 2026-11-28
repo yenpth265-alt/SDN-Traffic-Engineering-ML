@@ -1,3 +1,5 @@
+> **TÀI LIỆU LỊCH SỬ — không dùng làm đặc tả runtime hiện hành.** Giữ nguyên nội dung và bằng chứng tại mốc ghi bên dưới. Đối chiếu [baseline QA 28/11/2026](../baselines/2026_11_28/README.md), [ánh xạ ID](../baselines/2026_11_28/reference/legacy_id_crosswalk.md) và [runtime contract](../../integration/orchestration/README.md). [CI main@71f120a](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46134738871) đạt 289 module, 19 Data/QA và 3 SDN–PostgreSQL; không đồng nghĩa sign-off/live.
+
 # Kiểm tra pipeline ML — 15/11/2026
 
 Phạm vi: module ML mới theo Architecture v1.4 và Testing v2, với adapter file CSV/JSON/NPZ. Chưa có dữ liệu vận hành thật hoặc API Data/SDN để nghiệm thu tích hợp.
@@ -30,3 +32,4 @@ Phạm vi: module ML mới theo Architecture v1.4 và Testing v2, với adapter 
 Chưa kiểm chứng độ chính xác trên dữ liệu thật, hiệu năng mạng, ngân sách latency môi trường triển khai, API vận chuyển, hoặc tính tương thích với serializer snapshot tương lai của Data/SDN. Các role cần thống nhất adapter và canonical hash tại ml/docs/DATA_CONTRACT.md.
 
 Timeout hiện chặn công bố kết quả muộn, không cưỡng bức ngắt hàm RF đồng bộ. Hard deadline thuộc worker/Runner. Không coi test module đạt là các gate tích hợp G3/G4 hoặc benchmark đã nghiệm thu.
+

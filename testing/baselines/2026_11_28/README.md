@@ -14,6 +14,10 @@ Mục tiêu: thống nhất một nguồn tham chiếu cho QA sau merge SDN/G0 v
 | [fixtures/](fixtures/README.md) | Fixture nguyên bytes của producer + negative QA + manifest SHA |
 | [readiness_checklist.md](readiness_checklist.md) | Điều kiện mở gate tích hợp và benchmark |
 
+## Xác nhận sau merge
+
+PR #8 đưa bộ tài liệu vào `main@71f120a`; [CI main@71f120a](https://github.com/yenpth265-alt/SDN-Traffic-Engineering-ML/actions/runs/46134738871) chạy thành công trên đúng SHA (289 module, 19 Data/QA, 3 SDN–PostgreSQL, zero skip SDN). 78/78 pin nguồn và 20/20 pin fixture khớp. Mốc frozen và artifact cũ không thay đổi; owner sign-off/live vẫn pending.
+
 ## Kết luận hiện trạng
 - CI đúng SHA trên Ubuntu/Python 3.11/PostgreSQL 17.12: **289/289 module**, **19/19 Data/QA**, **3/3 SDN–PostgreSQL**, migrations 1–4, zero skip cho SDN. Không cộng số lịch sử 288 vào số mới.
 - H=1 dùng triển khai, **48** dự báo/tick. H=5/240 là ca regression TC-I03, không được thay đổi model để qua kiểm thử. L30 = 1.440 history rows.
@@ -23,3 +27,4 @@ Mục tiêu: thống nhất một nguồn tham chiếu cho QA sau merge SDN/G0 v
 
 
 [Mã truy vết v2 sang baseline mới](reference/legacy_id_crosswalk.md). Các ID hiện hành thuộc namespace qa_20261128; dùng crosswalk khi đối chiếu lịch sử.
+

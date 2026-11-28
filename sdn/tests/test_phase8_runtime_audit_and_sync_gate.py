@@ -544,3 +544,170 @@ def test_p9_corrupted_durable_jsonl_fail_closed_and_bounded_404_retry(tmp_path: 
     assert gate_404["optimization_tick_eligible"] is False
     assert "DECISION_BATCH_404_RETRIES_EXHAUSTED" in (pub_404.status_summary()["last_error"] or "")
 
+
+def test_p14_reconcile_audit_targeted_recovery_auth_and_integration_profile(tmp_path: Path) -> None:
+    """
+    Phase 14 Task A & Task C regression:
+    - `S0AppConfig.validate_integration_profile()` fails closed on missing/mixed data_v1 config
+      while keeping `legacy` default untouched.
+    - Authenticated `POST /reconcile-audit` retries ONLY the targeted `(run_id, decision_batch_id)`
+      after DecisionBatch 404 exhaustion, leaves unrelated batches untouched, never fabricates ACK,
+      and opens `optimization_tick_eligible` ONLY after valid Data ACK.
+    """
+    from sdn.apps.ryu_s0_app import S0AppConfig
+
+    # 1. Legacy default passes without strict errors
+    S0AppConfig().validate_integration_profile()
+    # 2. Strict integration profile fails closed on legacy mode, mixed SQLite demand, or missing API auth token
+    with pytest.raises(ValueError):
+        S0AppConfig(strict_integration_profile=True, data_api_mode="legacy", demand_provider_mode="data_v1").validate_integration_profile()
+    with pytest.raises(ValueError):
+        S0AppConfig(strict_integration_profile=True, data_api_mode="data_v1", demand_provider_mode="http_sqlite").validate_integration_profile()
+    with pytest.raises(ValueError):
+        S0AppConfig(
+            strict_integration_profile=True,
+            data_api_mode="data_v1",
+            demand_provider_mode="data_v1",
+            data_endpoint_url="http://127.0.0.1:8000",
+            data_api_key="env-secret-key",
+            data_outbox_dir=tmp_path / "ob_no_tok",
+            idempotency_db_path=tmp_path / "idem_no_tok.sqlite3",
+            northbound_enable=True,
+            northbound_auth_token=None,
+        ).validate_integration_profile()
+    # 3. Valid strict integration profile passes
+    S0AppConfig(
+        strict_integration_profile=True,
+        data_api_mode="data_v1",
+        demand_provider_mode="data_v1",
+        data_endpoint_url="http://127.0.0.1:8000",
+        data_api_key="env-secret-key",
+        northbound_enable=True,
+        northbound_auth_token="env-sdn-api-token",
+        data_outbox_dir=tmp_path / "ob_ok",
+        idempotency_db_path=tmp_path / "idem.sqlite3",
+    ).validate_integration_profile()
+
+    # 4. Targeted reconcile_pending_audit & POST /reconcile-audit
+    run_id = "run_p14_reconcile"
+    available_batches: set[str] = set()
+    topo, sm, _, _, _, _, now = _setup_runtime(
+        tmp_path,
+        run_id,
+        sender_fn=lambda u, p, h, t: (200, '{"inserted": 1}'),
+        decision_lookup_fn=lambda r, b: [],
+        outbox_subdir="ob_p14_unused",
+    )
+    rs = sm.get_routing_state(run_id)
+    dec_rows = _make_decision_rows(topo)
+
+    def _lookup(rid: str, bid: str) -> list[dict[str, Any]]:
+        if bid not in available_batches:
+            raise DataV1ContractBlockedError(f"DecisionBatch lookup '{bid}' returned HTTP 404")
+        return dec_rows
+
+    def _sender(url: str, payload: dict[str, Any], headers: dict[str, str], timeout_s: float) -> tuple[int, str]:
+        return (200, '{"updated": 1}') if url.endswith(DATA_V1_ENDPOINT_APPLY_RESULTS) else (200, '{"inserted": 1}')
+
+    pub = DataEventPublisher(
+        DataPublisherConfig(
+            endpoint_base_url="http://data.local:8000",
+            outbox_dir=tmp_path / "ob_p14",
+            api_mode="data_v1",
+            api_key="k",
+            max_retries=1,
+            max_decision_lookup_404_retries=1,
+        ),
+        sender_fn=_sender,
+        decision_lookup_fn=_lookup,
+    )
+    dp = HTTPDemandReleaseProvider()
+    sc = SnapshotCreator(topo, sm, dp)
+    dh = DecisionHandler(topo, sm, RuleInstaller(RouteCompiler(topo, FlowMatcher(topo)), InMemorySwitchDriver(topo), RuleVerifier(RouteCompiler(topo, FlowMatcher(topo)), InMemorySwitchDriver(topo))), config=DecisionHandlerConfig.for_integration())
+    app = SDNNorthboundHTTPApp(
+        state_manager=sm,
+        decision_handler=dh,
+        snapshot_creator=sc,
+        demand_provider=dp,
+        data_publisher=pub,
+        config=NorthboundAPIConfig(auth_token="tok-p8", default_run_id=run_id),
+    )
+
+    pub.publish_routing_state(rs, deliver_now=True)
+    for bid in ("batch_a", "batch_b"):
+        pub.publish_apply_response_v1_runtime(
+            ApplyResponse(
+                run_id=run_id,
+                decision_batch_id=bid,
+                status=BatchStatus.APPLIED,
+                state_version=rs.state_version,
+                completed_at=_fmt_utc(now),
+                results=(),
+                rule_count=0,
+            ),
+            post_apply_routing_state=rs,
+            deliver_now=False,
+        )
+    # Both batch_a and batch_b are now 404-exhausted and durably pending
+    assert pub.sync_gate_status(run_id, current_state_version=rs.state_version)["optimization_tick_eligible"] is False
+
+    # Endpoint MUST NEVER be accidentally exposed without auth_token configured (403 Forbidden)
+    app_no_auth = SDNNorthboundHTTPApp(
+        state_manager=sm,
+        decision_handler=dh,
+        snapshot_creator=sc,
+        demand_provider=dp,
+        data_publisher=pub,
+        config=NorthboundAPIConfig(auth_token=None, default_run_id=run_id),
+    )
+    env_unprotected = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/reconcile-audit",
+        "QUERY_STRING": "",
+        "CONTENT_LENGTH": str(len(json.dumps({"run_id": run_id, "decision_batch_id": "batch_a"}))),
+        "wsgi.input": io.BytesIO(json.dumps({"run_id": run_id, "decision_batch_id": "batch_a"}).encode("utf-8")),
+    }
+    st_unprot: dict[str, int] = {}
+    app_no_auth(env_unprotected, lambda s, h: st_unprot.__setitem__("code", int(s.split(" ", 1)[0])))
+    assert st_unprot["code"] == 403
+
+    # Missing or invalid token MUST be rejected with 401
+    for hdr in ({}, {"HTTP_X_SDN_TOKEN": "wrong-token"}):
+        env_noauth = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/reconcile-audit",
+            "QUERY_STRING": "",
+            "CONTENT_LENGTH": "2",
+            "wsgi.input": io.BytesIO(b"{}"),
+            **hdr,
+        }
+        st_out: dict[str, int] = {}
+        app(env_noauth, lambda s, h: st_out.__setitem__("code", int(s.split(" ", 1)[0])))
+        assert st_out["code"] == 401
+
+    pending_file = tmp_path / "ob_p14" / "pending_apply_audits.jsonl"
+    assert pending_file.exists()
+
+    # Make ONLY batch_a available in Data -> reconcile batch_a -> batch_a delivered, batch_b STILL pending!
+    available_batches.add("batch_a")
+    c_a, b_a = _wsgi_call(app, "POST", "/reconcile-audit", body={"run_id": run_id, "decision_batch_id": "batch_a"})
+    assert c_a == 200
+    assert b_a["reconciled"] is True
+    assert b_a["sync_gate"]["optimization_tick_eligible"] is False  # batch_b still pending!
+    assert b_a["sync_gate"]["pending_apply_audit_batches"] == ["batch_b"]
+    assert pending_file.exists()  # Durable pending audit file is never deleted by reconciliation
+
+    # Make batch_b available -> reconcile batch_b -> now optimization_tick_eligible turns True!
+    available_batches.add("batch_b")
+    c_b, b_b = _wsgi_call(app, "POST", "/reconcile-audit", body={"run_id": run_id, "decision_batch_id": "batch_b"})
+    assert c_b == 200
+    assert b_b["reconciled"] is True
+    assert b_b["sync_gate"]["optimization_tick_eligible"] is True
+    assert b_b["sync_gate"]["pending_apply_audit_batches"] == []
+    assert pending_file.exists()
+
+    # Idempotent replay on already-reconciled batch_a stays clean
+    c_a2, b_a2 = _wsgi_call(app, "POST", "/reconcile-audit", body={"run_id": run_id, "decision_batch_id": "batch_a"})
+    assert c_a2 == 200 and b_a2["reconciled"] is True
+
+

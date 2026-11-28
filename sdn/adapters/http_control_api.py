@@ -23,6 +23,7 @@ Design guarantees:
 
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import threading
@@ -531,6 +532,11 @@ class SDNNorthboundHTTPApp:
                 if err is not None:
                     return err
                 return self._handle_apply(body, query, start_response)
+            if method == "POST" and path == "/reconcile-audit":
+                body, err = self._read_json_body(environ, start_response)
+                if err is not None:
+                    return err
+                return self._handle_reconcile_audit(body, start_response)
 
             return self._json_response(
                 start_response,
@@ -600,10 +606,10 @@ class SDNNorthboundHTTPApp:
         if not expected:
             return True
         tok = environ.get("HTTP_X_SDN_TOKEN")
-        if isinstance(tok, str) and tok == expected:
+        if isinstance(tok, str) and hmac.compare_digest(tok, expected):
             return True
         auth = environ.get("HTTP_AUTHORIZATION")
-        if isinstance(auth, str) and auth == f"Bearer {expected}":
+        if isinstance(auth, str) and hmac.compare_digest(auth, f"Bearer {expected}"):
             return True
         return False
 
@@ -1358,3 +1364,51 @@ class SDNNorthboundHTTPApp:
         except Exception:
             # Never fail or crash finalized OVS apply due to Data publisher error
             pass
+
+    def _handle_reconcile_audit(
+        self,
+        body: dict[str, Any],
+        start_response: Callable[[str, list[tuple[str, str]]], Any],
+    ) -> list[bytes]:
+        # Fail-closed: NEVER expose administrative reconciliation without an explicit auth token.
+        if not self._config.auth_token or not self._config.auth_token.strip():
+            return self._json_response(
+                start_response,
+                "403 Forbidden",
+                {
+                    "error": "ADMIN_AUTH_TOKEN_REQUIRED",
+                    "message": "POST /reconcile-audit is disabled unless SDN_NORTHBOUND_TOKEN (auth_token) is configured.",
+                },
+            )
+        if self._data_publisher is None:
+            return self._json_response(
+                start_response,
+                "409 Conflict",
+                {"error": "DATA_PUBLISHER_NOT_CONFIGURED"},
+            )
+        run_id = str(body.get("run_id") or self._config.default_run_id).strip()
+        batch_id = str(body.get("decision_batch_id") or "").strip()
+        if not run_id or not batch_id:
+            raise ContractSerializationError(
+                "Fields 'run_id' and 'decision_batch_id' are required for /reconcile-audit."
+            )
+        try:
+            snap = self._state_manager.get_routing_state(run_id)
+            cur_sv: Optional[int] = snap.state_version
+            ovs_verified = bool(snap.routing_state_complete)
+            ovs_rec = bool(snap.reconcile_required)
+        except (StateManagerError, KeyError):
+            cur_sv = None
+            ovs_verified = False
+            ovs_rec = False
+
+        res = self._data_publisher.reconcile_pending_audit(
+            run_id,
+            batch_id,
+            current_state_version=cur_sv,
+            ovs_verified=ovs_verified,
+            ovs_reconcile_required=ovs_rec,
+        )
+        if not res["found"]:
+            return self._json_response(start_response, "404 Not Found", res)
+        return self._json_response(start_response, "200 OK", res)

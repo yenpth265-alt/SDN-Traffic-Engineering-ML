@@ -400,6 +400,31 @@ def load_recv_packet_logs(indir: str) -> dict[tuple[int, str], dict]:
     return seq_stats
 
 
+def _compute_cohort_loss(
+    pkts_sent: int | None,
+    recv_pkts: int | None,
+) -> tuple[str, int | None, float | None]:
+    """Returns (cohort_status, packets_lost_cohort, loss_ratio_cohort).
+
+    Rules (CF-30):
+    - Missing evidence (None) -> ("MISSING_EVIDENCE", None, None)
+    - Overcount (recv_pkts > pkts_sent) -> ("INVALID_RECEIVE_COUNT", None, None)
+    - Zero sent packets (pkts_sent <= 0) -> ("NO_SENT_PACKETS" if recv_pkts == 0 else "INVALID_RECEIVE_COUNT", None, None)
+    - Valid (0 < recv_pkts <= pkts_sent) -> ("VALID", lost, round(lost / pkts_sent, 6))
+    """
+    if pkts_sent is None or recv_pkts is None:
+        return "MISSING_EVIDENCE", None, None
+    if recv_pkts < 0 or pkts_sent < 0:
+        return "INVALID_RECEIVE_COUNT", None, None
+    if recv_pkts > pkts_sent:
+        return "INVALID_RECEIVE_COUNT", None, None
+    if pkts_sent == 0:
+        return "NO_SENT_PACKETS", None, None
+
+    lost = pkts_sent - recv_pkts
+    return "VALID", lost, round(lost / pkts_sent, 6)
+
+
 def _resolve_recv_metrics(
     bysend_info: dict | None,
     seq_info: dict | None,
@@ -487,20 +512,11 @@ def build_correlated_rows(
             pkts_sent, bytes_sent, late_pkts = None, None, None
 
         actual_mbps = round((recv_bytes * 8.0) / 1e6, 6) if recv_bytes is not None else None
-        # CF-30: Denominator == 0 -> loss_ratio is None (N/A), never 0.0
-        cohort_status = "MISSING_EVIDENCE"
-        if pkts_sent is not None and recv_pkts is not None and recv_pkts > pkts_sent:
-            cohort_status = "INVALID_RECEIVE_COUNT"
-        elif pkts_sent is not None and recv_pkts is not None and pkts_sent > 0:
-            cohort_status = "VALID"
-        elif pkts_sent == 0 and recv_pkts == 0:
-            cohort_status = "NO_SENT_PACKETS"
-        if cohort_status == "VALID":
-            lost_cohort: int | None = pkts_sent - recv_pkts
-            loss_ratio: float | None = round(lost_cohort / pkts_sent, 6)
-        else:
-            lost_cohort = None
-            loss_ratio = None
+        # CF-30: Unique-sequence loss; None when sent == 0 or overcount/invalid
+        cohort_status, lost_cohort, loss_ratio = _compute_cohort_loss(
+            pkts_sent,
+            recv_pkts,
+        )
 
         detail_rows.append({
             "run_id": man["run_id"],

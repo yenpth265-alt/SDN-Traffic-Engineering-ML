@@ -6,7 +6,7 @@ import yaml
 
 from optimization.config_loader import load_optimization_config
 from optimization.input_validator import validate_forecast
-from optimization.planner import run_planner
+from optimization.planner import OptimizationController, run_planner
 from optimization.service_client import OptimizationServiceClient
 from optimization.load_estimator import load_topology_from_configs
 from optimization.tests.test_optimization_sdn_contract import (
@@ -85,8 +85,12 @@ def test_run_hash_is_distinct_from_optimizer_hash(tmp_path):
     forecast, routing = _build_forecast(topology), _build_routing_state(topology)
     forecast["config_hash"] = routing["config_hash"] = "run-network-hash"
     result = run_planner(forecast, routing, [.95] * 3, cfg, topology_override=topology,
-                         now_utc=NOW, apply_deadline_utc=(NOW + timedelta(milliseconds=900)).isoformat())
+                         now_utc=NOW, apply_deadline_utc=(NOW + timedelta(milliseconds=900)).isoformat(),
+                         tick_id="7")
     assert result["status"] == "KEPT"
+    opt = result["decision_batch"]["optimizer_result"]
+    assert opt["config_hash"] == "run-network-hash"
+    assert opt["optimizer_config_hash"] == cfg["optimizer_config_hash"] != opt["config_hash"]
 
 
 def test_frozen_model_bytes_and_horizon_are_verified(tmp_path):
@@ -103,3 +107,90 @@ def test_frozen_model_bytes_and_horizon_are_verified(tmp_path):
     cfg_file.write_text(yaml.safe_dump({"ml_deployment_config": str(corrupt)}))
     with pytest.raises(ValueError, match="model_sha256 mismatch"):
         load_optimization_config(cfg_file)
+
+
+def _kept_inputs():
+    topology = _build_topology()
+    return topology, _build_forecast(topology), _build_routing_state(topology)
+
+
+def test_missing_tick_id_never_generates_default():
+    # Data khóa control_ticks theo (run_id, tick_id); "tick_default" sẽ va chạm giữa các tick.
+    topology, forecast, routing = _kept_inputs()
+    result = run_planner(forecast, routing, [.95], _base_config(0), topology_override=topology,
+                         now_utc=NOW, apply_deadline_utc=(NOW + timedelta(milliseconds=900)).isoformat())
+    assert result["status"] == "MISSING_CONTEXT"
+    assert "decision_batch" not in result
+
+
+def test_no_trigger_records_trigger_evidence_and_never_calls_sdn():
+    topology, forecast, routing = _kept_inputs()
+    ctrl = OptimizationController(dict(_base_config(4), N=3), topology_override=topology)
+    res = ctrl.step(0.95, forecast, routing, now_utc=NOW, tick_id="1",
+                    apply_deadline_utc=(NOW + timedelta(milliseconds=900)).isoformat())
+    assert res["status"] == res["reason"] == "NO_TRIGGER"
+    assert "apply_request" not in res and "decision_batch" not in res
+    assert res["trigger"]["U_current"] == 0.95
+    assert res["trigger"]["consecutive_above_TH"] == 1 and res["trigger"]["N"] == 3
+    audit = ctrl.get_audit_records()[-1]
+    assert audit["trigger"] == res["trigger"]
+    assert audit["optimizer_config_hash"] == ctrl.config["optimizer_config_hash"]
+
+
+@pytest.mark.parametrize("solver_status", ["Infeasible", "Not Solved", "NoSolver"])
+def test_solver_failure_is_kept_with_fixed_reason_code(monkeypatch, solver_status):
+    import optimization.planner as planner
+    monkeypatch.setattr(planner, "solve_model", lambda *a, **kw: (solver_status, 0.0, 0.0, {}, {}, 1.0))
+    topology, forecast, routing = _kept_inputs()
+    result = run_planner(forecast, routing, [.95], _base_config(4), topology_override=topology,
+                         now_utc=NOW, tick_id="3",
+                         apply_deadline_utc=(NOW + timedelta(milliseconds=900)).isoformat())
+    assert result["status"] == "KEPT" and result["reason"] == "NO_SOLUTION"
+    assert result["apply_request"] is None
+    opt = result["decision_batch"]["optimizer_result"]
+    assert opt["reason"] == "NO_SOLUTION" and opt["solver_status"] == solver_status
+    assert all(not row["changed"] for row in result["decision_batch"]["rows"])
+
+
+def test_post_solve_invalid_keeps_bounded_reason_and_detail(monkeypatch):
+    import optimization.planner as planner
+    topology, forecast, routing = _kept_inputs()
+    monkeypatch.setattr(planner, "solve_model", lambda *a, **kw: ("Optimal", 0.1, 0.1, {}, {}, 1.0))
+    monkeypatch.setattr(planner, "validate_post_solve_solution",
+                        lambda **kw: (False, "x" * 1000, {}))
+    result = run_planner(forecast, routing, [.95], _base_config(4), topology_override=topology,
+                         now_utc=NOW, tick_id="4",
+                         apply_deadline_utc=(NOW + timedelta(milliseconds=900)).isoformat())
+    assert result["status"] == "KEPT" and result["reason"] == "INVALID_RESULT"
+    assert result["decision_batch"]["optimizer_result"]["reason"] == "INVALID_RESULT"
+    assert result["reason_detail"] == "x" * 1000
+
+
+_FIXTURES = Path("optimization/fixtures")
+
+
+@pytest.mark.parametrize("name", ["wire/apply_request_reroute.json", "apply_request_reroute.json",
+                                  "sdn_v14/apply_request_b_flows.json"])
+def test_apply_fixtures_pass_strict_sdn_contract(name):
+    # G0-02: fixture phải dùng flow/path canonical để SDN v1.4 chấp nhận nguyên dạng.
+    import json
+    from sdn.schemas.apply_models import ApplyRequest
+    payload = json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
+    request = ApplyRequest.from_dict(payload)
+    assert 1 <= len(request.changes) <= 4
+
+
+@pytest.mark.parametrize("name", ["wire/decision_batch_wire_reroute.json", "wire/decision_batch_wire_zero_b.json",
+                                  "sdn_v14/decision_batch_48_flows.json", "sdn_v14/decision_batch_b0_kept.json"])
+def test_decision_fixtures_pass_data_contract(name):
+    import json
+    psycopg2 = pytest.importorskip("psycopg2")  # noqa: F841 - Data API module imports it
+    from data.ingestion.management_api import Decision
+    from optimization.result_serializer import build_decision_wire_payload
+    payload = json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
+    wire = payload if name.startswith("wire/") else build_decision_wire_payload(payload)
+    decision = Decision.model_validate(wire)
+    assert len(decision.rows) == 48 and isinstance(wire["tick_id"], str)
+    opt = wire["optimizer_result"]
+    if name.startswith("wire/"):
+        assert opt["config_hash"] != opt["optimizer_config_hash"]

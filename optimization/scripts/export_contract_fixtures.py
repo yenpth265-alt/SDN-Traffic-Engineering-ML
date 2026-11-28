@@ -3,39 +3,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from optimization.load_estimator import load_topology_from_configs
 from optimization.planner import OptimizationController, run_planner
 from optimization.result_serializer import build_decision_wire_payload
 
 
 def _sample_topology() -> dict[str, Any]:
-    flows = [f"0x{100 + i:03x}" for i in range(48)]
-    paths = {fg: [f"p_{fg}_a", f"p_{fg}_b"] for fg in flows}
-    links = {
-        "l_core_1": {"capacity_mbps": 600.0},
-        "l_core_2": {"capacity_mbps": 2000.0},
-    }
-    path_links: dict[str, list[str]] = {}
-    for idx, fg in enumerate(flows):
-        path_links[f"p_{fg}_a"] = ["l_core_1"] if idx % 2 == 0 else ["l_core_2"]
-        path_links[f"p_{fg}_b"] = ["l_core_2"] if idx % 2 == 0 else ["l_core_1"]
-
-    return {
-        "topology_version": "1.0",
-        "topology_hash": "sha256:topo_v1_0_fixture",
-        "F": flows,
-        "P": paths,
-        "E": list(links.keys()),
-        "C": {"l_core_1": 600.0, "l_core_2": 2000.0},
-        "links": links,
-        "path_links": path_links,
-        "a_fpe": {
-            fg: {
-                path_id: {e: (1 if e in set(path_links.get(path_id, ())) else 0) for e in links}
-                for path_id in paths[fg]
-            }
-            for fg in flows
-        },
-    }
+    """Topology canonical v1.0 (G0-02): flow ID 0x{src}{dst}, path {flow}_P1/_P2, 32 directed links."""
+    topology = load_topology_from_configs(NETWORK_CONFIG_DIR)
+    if len(topology.get("F", ())) != 48:
+        raise RuntimeError(f"Topology canonical phải có 48 flow, nhận {len(topology.get('F', ()))}")
+    return topology
 
 
 def _sample_routing_state(topology: dict[str, Any]) -> dict[str, Any]:
@@ -70,13 +48,13 @@ def _sample_forecast(
     resolved_end = (forecast_start + h_bins) if forecast_end is None else forecast_end
     rows: list[dict[str, Any]] = []
     for idx, fg in enumerate(topology["F"]):
-        base_demand = 180.0 if idx < 8 else 40.0
+        base_demand = HIGH_DEMAND_MBPS if idx < 8 else BASE_DEMAND_MBPS
         for step in range(h_bins):
             rows.append(
                 {
                     "flow_group_id": fg,
                     "offset": step,
-                    "predicted_mbps": base_demand + step * 2.0,
+                    "predicted_mbps": round(base_demand + step * 0.1, 6),
                 }
             )
     return {
@@ -86,7 +64,7 @@ def _sample_forecast(
         "snapshot_as_of_utc": "2026-11-26T14:00:00Z",
         "history_cutoff_utc": "2026-11-26T13:59:00Z",
         "measurement_started_at_utc": "2026-11-26T14:00:00Z",
-        "delta_s": 10.0,
+        "delta_s": 1,
         "forecast_start": forecast_start,
         "forecast_end": resolved_end,
         "status": "READY",
@@ -94,9 +72,18 @@ def _sample_forecast(
     }
 
 
+NETWORK_CONFIG_DIR = "configs/network"
+HIGH_DEMAND_MBPS = 1.2
+BASE_DEMAND_MBPS = 0.2
+
+# Run config hash do Network/Runner cấp; khác optimizer_config_hash (tham số tối ưu).
+FIXTURE_RUN_CONFIG_HASH = "sha256:" + "c" * 64
+
+
 def _sample_config(budget_b: int = 4) -> dict[str, Any]:
     return {
         "config_version": "1.0",
+        "config_hash": FIXTURE_RUN_CONFIG_HASH,
         "H": 1,
         "TH": 0.5,
         "N": 1,
@@ -106,7 +93,6 @@ def _sample_config(budget_b: int = 4) -> dict[str, Any]:
         "lambda_weight": 0.001,
         "deadline_ms": 200,
         "apply_guard_ms": 200,
-        "C_e": 1000.0,
         "w_u": 1.0,
         "w_m": 0.01,
         "w_c": 0.01,
@@ -126,7 +112,7 @@ def export_fixtures(out_dir: str = "optimization/fixtures") -> None:
     fc = _sample_forecast(topo, h_bins=1)
     now_dt = datetime(2026, 11, 26, 14, 0, 0, tzinfo=timezone.utc)
     tick_at = "2026-11-26T14:00:00Z"
-    deadline = "2026-11-26T14:00:05Z"
+    deadline = "2026-11-26T14:00:00.900Z"
 
     # 1. Reroute (1..B flows)
     cfg_reroute = _sample_config(budget_b=4)

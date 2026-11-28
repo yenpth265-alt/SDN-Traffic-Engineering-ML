@@ -213,6 +213,14 @@ def bind_decision_batch_id(plan_result: dict[str, Any], decision_batch_id: str) 
     return plan_result
 
 
+def _require_tick_id(raw: Any) -> str:
+    """Data khóa control_ticks theo (run_id, tick_id): không được bịa ID mặc định (CF-11)."""
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        raise ValueError("MISSING_CONTEXT: Thiếu tick_id cho DecisionBatch")
+    return text
+
+
 def build_decision_wire_payload(decision_batch: Mapping[str, Any]) -> dict[str, Any]:
     raw_rows = decision_batch.get("rows") if "rows" in decision_batch else decision_batch.get("decision_rows", ())
     wire_rows = [
@@ -224,8 +232,7 @@ def build_decision_wire_payload(decision_batch: Mapping[str, Any]) -> dict[str, 
         for r in raw_rows
     ]
 
-    tick_raw = decision_batch.get("tick_id")
-    tick_id_str = str(tick_raw).strip() if tick_raw is not None and str(tick_raw).strip() else "tick_default"
+    tick_id_str = _require_tick_id(decision_batch.get("tick_id"))
     opt_res = decision_batch.get("optimizer_result")
     wire_opt = dict(opt_res) if isinstance(opt_res, Mapping) else {}
     fb_id = decision_batch.get("forecast_batch_id")
@@ -271,6 +278,8 @@ def serialize_decision_batch(
         resolved_tick_at = _to_rfc3339_utc(now_utc)
     else:
         raise ValueError("MISSING_CONTEXT: Thiếu tick_at_utc cho chu kỳ tối ưu online")
+
+    resolved_tick_id = _require_tick_id(tick_id if tick_id is not None else forecast_data.get("tick_id"))
 
     dt_tick = _parse_utc(resolved_tick_at, "tick_at_utc")
     dt_deadline = _parse_utc(apply_deadline_utc, "apply_deadline_utc")
@@ -322,7 +331,9 @@ def serialize_decision_batch(
         "topology_version": str(topology["topology_version"]),
         "topology_hash": topology.get("topology_hash"),
         "config_version": str(config.get("config_version", "1.0")),
+        # config_hash là run config hash (Network/Runner); tham số optimizer có namespace riêng.
         "config_hash": config.get("config_hash"),
+        "optimizer_config_hash": config.get("optimizer_config_hash"),
         "snapshot_as_of_utc": forecast_data.get("snapshot_as_of_utc"),
         "history_cutoff_utc": forecast_data.get("history_cutoff_utc"),
         "forecast_start": f_start,
@@ -332,7 +343,7 @@ def serialize_decision_batch(
     return {
         "run_id": str(forecast_data["run_id"]),
         "decision_batch_id": decision_batch_id,
-        "tick_id": str(tick_id) if tick_id is not None and str(tick_id).strip() else "tick_default",
+        "tick_id": resolved_tick_id,
         "tick_at_utc": resolved_tick_at,
         "snapshot_id": str(forecast_data["snapshot_id"]),
         "forecast_batch_id": _resolve_forecast_batch_id(forecast_data),
@@ -353,6 +364,7 @@ def serialize_decision_batch(
         "topology_hash": optimizer_result["topology_hash"],
         "config_version": optimizer_result["config_version"],
         "config_hash": optimizer_result["config_hash"],
+        "optimizer_config_hash": optimizer_result["optimizer_config_hash"],
         "snapshot_as_of_utc": optimizer_result["snapshot_as_of_utc"],
         "history_cutoff_utc": optimizer_result["history_cutoff_utc"],
         "forecast_start": f_start,

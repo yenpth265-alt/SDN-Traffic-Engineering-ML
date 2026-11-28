@@ -33,6 +33,50 @@ from optimization.routing_policies.trigger import check_trigger
 from optimization.solver.solver import solve_model
 
 
+# Mã reason cố định cho DecisionBatch/control tick (interfaces_v2 §12, Guide v1.4 §13.4).
+# Data lưu reason dạng ID (<=256 ký tự) nên không ghép thông điệp tự do vào reason.
+REASON_NO_SOLUTION = "NO_SOLUTION"
+REASON_INVALID_RESULT = "INVALID_RESULT"
+
+# Các status làm mất tính liên tục của chuỗi U_current: reset trigger counter.
+_HISTORY_RESET_STATUSES = frozenset(
+    {
+        "STATE_UNKNOWN",
+        "STATE_INCOMPLETE",
+        "INVALID_STATE_VERSION",
+        "PATH_MAPPING_ERROR",
+        "DATA_STALE",
+        "FORECAST_INVALID",
+        "FORECAST_NOT_READY",
+        "INVALID_FORECAST",
+        "INVALID_FORECAST_OFFSET",
+        "INVALID_FORECAST_WINDOW",
+        "CONTEXT_MISMATCH",
+        "INVALID_CONTEXT",
+        "MISSING_CONTEXT",
+        "INVALID_TIMESTAMP",
+        "INVALID_DEADLINE",
+    }
+)
+
+
+def _trigger_evidence(history: Sequence[float], th: float, n: int) -> dict[str, Any]:
+    window = [float(u) for u in history][-max(n, 0):] if n > 0 else []
+    consecutive = 0
+    for u in reversed([float(v) for v in history]):
+        if u > th:
+            consecutive += 1
+        else:
+            break
+    return {
+        "U_current": round(float(history[-1]), 6) if history else None,
+        "consecutive_above_TH": consecutive,
+        "TH": th,
+        "N": n,
+        "window": [round(u, 6) for u in window],
+    }
+
+
 def _split_error_code(exc: ValueError, default_code: str = "INVALID_CONTEXT") -> tuple[str, str]:
     msg = str(exc).strip()
     if ":" in msg:
@@ -262,8 +306,15 @@ def run_planner(
     if not fc_ok:
         return {"status": fc_status, "reason": fc_msg}
 
-    if not check_trigger(U_current_history, float(merged_config["TH"]), int(merged_config["N"])):
-        return {"status": "NO_TRIGGER"}
+    trigger_th = float(merged_config["TH"])
+    trigger_n = int(merged_config["N"])
+    if not check_trigger(U_current_history, trigger_th, trigger_n):
+        # Guide v1.4 §13.4: NO_TRIGGER phải lưu U_current và trigger counter, không gọi SDN.
+        return {
+            "status": "NO_TRIGGER",
+            "reason": "NO_TRIGGER",
+            "trigger": _trigger_evidence(U_current_history, trigger_th, trigger_n),
+        }
 
     b_f = calculate_mean_demand(forecast_data, F)
     default_ce = float(merged_config.get("C_e", 100.0))
@@ -361,7 +412,8 @@ def run_planner(
     )
 
     if status not in ["Optimal", "Feasible"]:
-        return _build_kept_result(f"Solver status: {status}", solver_status=status, solve_ms=solve_ms)
+        # Reason là mã cố định; trạng thái gốc của solver nằm trong solver_status.
+        return _build_kept_result(REASON_NO_SOLUTION, solver_status=status, solve_ms=solve_ms)
 
     # CF-15: Hậu kiểm nghiệm MILP độc lập trước khi kiểm tra hysteresis và serialize
     post_ok, post_msg, selected_paths = validate_post_solve_solution(
@@ -383,7 +435,9 @@ def run_planner(
         u_var=U,
     )
     if not post_ok:
-        return _build_kept_result(f"POST_SOLVE_INVALID: {post_msg}", solver_status=status, solve_ms=solve_ms)
+        kept = _build_kept_result(REASON_INVALID_RESULT, solver_status=status, solve_ms=solve_ms)
+        kept["reason_detail"] = post_msg
+        return kept
 
     n_changes = sum(1 for f in F if selected_paths[f] != current_selected[f])
     if not check_hysteresis(J_old, J_new, n_changes, float(merged_config["h"])):
@@ -502,8 +556,17 @@ class OptimizationController:
             "topology_version": self.topology.get("topology_version"),
             "topology_hash": self.topology.get("topology_hash"),
             "config_version": self.config.get("config_version"),
+            # run config hash (Network/Runner) và optimizer parameter hash là hai namespace riêng.
             "config_hash": self.config.get("config_hash"),
+            "optimizer_config_hash": self.config.get("optimizer_config_hash"),
         }
+        if res.get("reason_detail"):
+            record["reason_detail"] = res["reason_detail"]
+        if isinstance(res.get("trigger"), Mapping):
+            record["trigger"] = dict(res["trigger"])
+        if db:
+            record["solver_status"] = db.get("solver_status")
+            record["changed_flows_count"] = db.get("changed_flows_count")
         self._audit_records.append(record)
 
         audit_path = self.config.get("audit_log_path")
@@ -543,21 +606,7 @@ class OptimizationController:
         if res["status"] in ("DATA_NOT_SYNCED", "SKIPPED_IN_FLIGHT"):
             if self._u_history:
                 self._u_history.pop()
-        elif res["status"] in (
-            "STATE_UNKNOWN",
-            "STATE_INCOMPLETE",
-            "INVALID_STATE_VERSION",
-            "PATH_MAPPING_ERROR",
-            "DATA_STALE",
-            "FORECAST_INVALID",
-            "FORECAST_NOT_READY",
-            "INVALID_FORECAST_OFFSET",
-            "INVALID_FORECAST_WINDOW",
-            "CONTEXT_MISMATCH",
-            "MISSING_CONTEXT",
-            "INVALID_TIMESTAMP",
-            "INVALID_DEADLINE",
-        ):
+        elif res["status"] in _HISTORY_RESET_STATUSES:
             self._u_history.clear()
 
         self._emit_audit(res, forecast_data, routing_state, now_utc, tick_id)

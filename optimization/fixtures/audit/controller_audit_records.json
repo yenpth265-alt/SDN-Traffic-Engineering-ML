@@ -9,9 +9,12 @@
     "state_version": 5,
     "status": "APPLY_REQUESTED",
     "reason": "",
-    "topology_version": "1.0",
-    "topology_hash": "sha256:topo_v1_0_fixture",
+    "topology_version": "v1.0",
+    "topology_hash": "ec6c6969019b1c36744339fb54f0f608c95402ae972859b30710dc44b5dc3956",
     "config_version": "1.0",
-    "config_hash": "sha256:1fcd04aa072584f9b067e76b870f5c40f716081eb2b5569e5019caf3a1e21388"
+    "config_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "optimizer_config_hash": "sha256:b995cc65fa6839af7fea272b6aca4ac2eba228a8b325569a9b86dd200f9619ed",
+    "solver_status": "Optimal",
+    "changed_flows_count": 3
   }
 ]

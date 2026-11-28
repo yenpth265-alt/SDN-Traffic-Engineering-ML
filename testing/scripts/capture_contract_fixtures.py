@@ -99,7 +99,15 @@ def capture_sdn():
                          measurement_started_at_utc=stamp(MEASUREMENT), delta_s=1)
     full = creator.create_snapshot(RUN_ID, cutoff=100, lookback_L=2,
                                    snapshot_as_of_utc=stamp(AS_OF), origin_refs=origins)
-    compact, _, _ = map_snapshot_to_data_v1(full, use_traffic_origin_bins=True)
+    # Canonical HTTP body is nested v1.4. The compact record below is only
+    # test input for the explicit synthetic snapshot builder.
+    compact = dict(run_id=RUN_ID, snapshot_id=full.snapshot_id, cutoff_bin=160,
+                   state_version=full.state_version, schema_version="1.0", quality_status="VALID",
+                   history_cutoff_utc=stamp(CUTOFF), snapshot_as_of_utc=stamp(AS_OF),
+                   routing_state=routing_before["rows"],
+                   history=[dict(flow_group_id=r.flow_group_id, bin_index=r.bin_index + 60,
+                                 requested_mbps=r.requested_mbps, available_at_utc=r.available_at_utc)
+                            for r in full.history])
 
     versions = {"config_version": full.config_version, "topology_version": full.topology_version,
                 "topology_hash": full.topology_hash, "config_hash": full.config_hash}
@@ -107,21 +115,21 @@ def capture_sdn():
                     expected_state_version=full.state_version,
                     changes=[{"flow_group_id": ids[0], "old_path_id": ids[0] + "_P1",
                               "new_path_id": ids[0] + "_P2"}])
-    request = serialize_apply_request(
-        proposal, {"forecast_start": stamp(CUTOFF),
-                   "forecast_end": stamp(CUTOFF + timedelta(seconds=5)),
-                   "apply_deadline_utc": stamp(CUTOFF + timedelta(seconds=4)),
-                   "snapshot_as_of_utc": stamp(AS_OF),
-                   "history_cutoff_utc": stamp(CUTOFF)}, {})
+    def make_request(deadline, batch_id):
+        return serialize_apply_request(
+            decision_batch_id=batch_id,
+            decision_rows=[dict(flow_group_id=ids[0], old_path_id=ids[0]+"_P1",
+                                proposed_path_id=ids[0]+"_P2", changed=True)],
+            forecast_data=dict(run_id=RUN_ID, snapshot_id=full.snapshot_id,
+                               forecast_start=stamp(CUTOFF), forecast_end=stamp(CUTOFF+timedelta(seconds=5)),
+                               snapshot_as_of_utc=stamp(AS_OF), history_cutoff_utc=stamp(CUTOFF)),
+            state_version=full.state_version, config=versions, topology=versions,
+            apply_deadline_utc=stamp(deadline))
+    request = make_request(CUTOFF + timedelta(seconds=4), "capture-apply")
     handler = DecisionHandler(topo, state, installer,
                               config=DecisionHandlerConfig.for_mock_unit_tests())
     handler.register_snapshot(full)
-    expired_request = serialize_apply_request(
-        proposal, {"forecast_start": stamp(CUTOFF),
-                   "forecast_end": stamp(CUTOFF + timedelta(seconds=5)),
-                   "apply_deadline_utc": stamp(CUTOFF + timedelta(milliseconds=250)),
-                   "snapshot_as_of_utc": stamp(AS_OF),
-                   "history_cutoff_utc": stamp(CUTOFF)}, {})
+    expired_request = make_request(CUTOFF + timedelta(milliseconds=250), "capture-expired")
     expired = handler.handle_apply_request(
         ApplyRequest.from_dict(expired_request, strict=True), decision_time_utc=stamp(ISSUED))
     assert expired.reason == "DEADLINE_EXPIRED", expired.to_dict()
@@ -192,6 +200,15 @@ def main():
         write(args.output / "snapshot.json", {"sdn": full, "data_v1": compact})
         write(args.output / "apply.json", apply)
         write(args.output / "forecast.json", predict_forecast(forecast_model(directory), full))
+    import ml, optimization, sdn
+    write(args.output / "capture_provenance.json", {
+        "scope": "controlled producer capture; not live OVS",
+        "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "module_paths": {m.__name__: str(Path(m.__file__).resolve()) for m in (ml, optimization, sdn)},
+        "source_sha256": {str(p.relative_to(ROOT)): file_hash(p) for p in (
+            ROOT / "ml/inference/predict.py", ROOT / "optimization/result_serializer.py",
+            ROOT / "sdn/monitoring/snapshot_creator.py", ROOT / "network/telemetry/telemetry_collector.py")},
+    })
     for path in sorted(args.output.glob("*.json")):
         print(f"{file_hash(path)}  {path.name}")
 

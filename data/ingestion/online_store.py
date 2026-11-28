@@ -350,7 +350,11 @@ def ingest_snapshot(cursor, run, message, raw, digest):
             raise Conflict("Snapshot routing_history contains duplicate intervals")
         supplied_route_history.add(key)
     cursor.execute("""
-        SELECT h.flow_group_id, h.path_id, h.valid_from_utc, h.valid_to_utc
+        SELECT h.flow_group_id, h.path_id, h.valid_from_utc, h.valid_to_utc,
+               (SELECT v2.available_at_utc FROM public.routing_history h2
+                JOIN public.routing_versions v2 USING(run_id,state_version)
+                WHERE h2.run_id=h.run_id AND h2.flow_group_id=h.flow_group_id
+                  AND h2.valid_from_utc=h.valid_to_utc LIMIT 1) AS closed_available_at_utc
         FROM public.routing_history h
         JOIN public.routing_versions v
           ON v.run_id = h.run_id AND v.state_version = h.state_version
@@ -360,7 +364,9 @@ def ingest_snapshot(cursor, run, message, raw, digest):
     for row in cursor:
         # A closure published after snapshot_as_of was not yet knowable then.
         end = row["valid_to_utc"]
-        if end is not None and end > snapshot.snapshot_as_of_utc:
+        if end is not None and (end > snapshot.snapshot_as_of_utc
+                or (row["closed_available_at_utc"] is not None
+                    and row["closed_available_at_utc"] > snapshot.snapshot_as_of_utc)):
             end = None
         known_route_history.add((row["flow_group_id"], row["path_id"], row["valid_from_utc"], end))
     supplied_known_route_history = {row for row in supplied_route_history if row[1] is not None}

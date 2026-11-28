@@ -23,10 +23,13 @@ Key safety properties:
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
+from hashlib import sha256
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -423,6 +426,7 @@ class DataEventPublisher:
         with open(path, "a", encoding="utf-8") as fp:
             fp.write(line)
             fp.flush()
+            os.fsync(fp.fileno())
 
     def _enqueue(
         self,
@@ -563,22 +567,22 @@ class DataEventPublisher:
         deliver_now: bool = False,
     ) -> PublishResult:
         serialized = [iv.to_dict() for iv in intervals]
-        endpoint = (
-            "CONTRACT_BLOCKED:NO_DATA_V1_ROUTING_HISTORY_ENDPOINT"
-            if self._config.api_mode == "data_v1"
-            else "/v1/data/routing-history"
-        )
+        detail = {"run_id": run_id, "state_version": int(state_version), "intervals": serialized}
+        key = f"routing_history:{run_id}:v{state_version}:" + sha256(
+            serialize_canonical_json_bytes(detail)).hexdigest()
+        endpoint = "/v1/data/routing-history"
+        payload = detail
+        if self._config.api_mode == "data_v1":
+            endpoint = f"/v1/runs/{urllib.parse.quote(run_id, safe='')}/events/sdn"
+            payload = {"event_id": key, "event_at_utc": _utc_now_rfc3339(),
+                       "event_type": "RoutingHistory", "detail": detail}
         return self._enqueue(
-            dedup_key=f"routing_history:{run_id}:v{state_version}:n{len(serialized)}",
+            dedup_key=key,
             event_type="RoutingHistory",
             endpoint_path=endpoint,
             run_id=run_id,
-            payload={
-                "run_id": run_id,
-                "state_version": int(state_version),
-                "intervals": serialized,
-            },
-            deliver_now=False if self._config.api_mode == "data_v1" else deliver_now,
+            payload=payload,
+            deliver_now=deliver_now,
         )
 
     def publish_apply_response(
@@ -904,18 +908,21 @@ class DataEventPublisher:
         deliver_now: bool = False,
     ) -> PublishResult:
         ev_dict = evidence.to_dict()
-        endpoint = (
-            "CONTRACT_BLOCKED:NO_DATA_V1_VERIFICATION_EVIDENCE_ENDPOINT"
-            if self._config.api_mode == "data_v1"
-            else "/v1/data/verification-evidence"
-        )
+        endpoint = "/v1/data/verification-evidence"
+        detail = {"run_id": run_id, "evidence": ev_dict}
+        key = f"verification_evidence:{run_id}:{evidence.flow_group_id}:{evidence.verified_at_utc}"
+        payload = detail
+        if self._config.api_mode == "data_v1":
+            endpoint = f"/v1/runs/{urllib.parse.quote(run_id, safe='')}/events/sdn"
+            payload = {"event_id": key, "event_at_utc": evidence.verified_at_utc,
+                       "event_type": "VerificationEvidence", "detail": detail}
         return self._enqueue(
-            dedup_key=f"verification_evidence:{run_id}:{evidence.flow_group_id}:{evidence.verified_at_utc}",
+            dedup_key=key,
             event_type="VerificationEvidence",
             endpoint_path=endpoint,
             run_id=run_id,
-            payload={"run_id": run_id, "evidence": ev_dict},
-            deliver_now=False if self._config.api_mode == "data_v1" else deliver_now,
+            payload=payload,
+            deliver_now=deliver_now,
         )
 
     # ------------------------------------------------------------------

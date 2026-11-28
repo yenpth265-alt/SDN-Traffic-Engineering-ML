@@ -2,13 +2,9 @@ name: PostgreSQL interface contracts
 
 on:
   push:
-    branches: [qa/postgresql-interface-contracts]
-    paths:
-      - '.github/workflows/postgresql_interface_contracts.yml'
-      - 'data/ingestion/**'
-      - 'data/schemas/**'
-      - 'testing/fixtures/online_contract/**'
-      - 'testing/scripts/**'
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,37 +26,31 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       SDN_DATABASE_URL: postgresql://sdn_qa:local_qa@127.0.0.1:5432/sdn_qa
-      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/producer_src/ml:${{ github.workspace }}/producer_src/optimization:${{ github.workspace }}/producer_src/sdn
+      PYTHONPATH: ${{ github.workspace }}
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          ref: f6195442c202539f8973328cc899eaccfd767e09
-          path: producer_src/ml
-          sparse-checkout: ml
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          ref: f0aaa26cfb6febbf1361a3be39715764c0b097e9
-          path: producer_src/optimization
-          sparse-checkout: optimization
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          ref: 2ec0a583d6482d1ebcb749167d4fafeb22a8ec5e
-          path: producer_src/sdn
-          sparse-checkout: |
-            sdn
-            configs/network
-          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
       - name: Install Data API and producer dependencies
-        run: python -m pip install -r requirements-online.txt -r producer_src/ml/ml/requirements.txt
+        run: |
+          python -m pip install -r requirements-online.txt -r ml/saved_models/offline-L30-H1/requirements-lock.txt 'pulp==3.3.2' 'pytest>=8,<9'
+      - name: Assert all imports use this checkout
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import ml, optimization, sdn, data.ingestion.online_api
+          root = Path.cwd().resolve()
+          for module in (ml, optimization, sdn, data.ingestion.online_api):
+              assert Path(module.__file__).resolve().is_relative_to(root), module.__file__
+          print('Tested checkout:', subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
+          PY
+      - name: Module and orchestration regression tests
+        run: python -m pytest ml/tests optimization/tests sdn/tests integration/tests testing/tests network/tests -q
       - name: Initialize disposable database
         run: |
           psql "$SDN_DATABASE_URL" -X -v ON_ERROR_STOP=1 -c 'SELECT version(), current_database()'
@@ -76,7 +66,7 @@ jobs:
             data.ingestion.test_online_ingestion testing.scripts.test_postgresql_contracts
       - name: Verify SDN v1.4 fixtures
         if: ${{ !cancelled() }}
-        run: python producer_src/sdn/sdn/fixtures/data_v14/verify_contract_fixtures.py --verify
+        run: python sdn/fixtures/data_v14_v10/verify_v10_fixtures.py --verify
       - name: Run SDN v1.4 PostgreSQL integration with zero skips
         if: ${{ !cancelled() }}
         run: |

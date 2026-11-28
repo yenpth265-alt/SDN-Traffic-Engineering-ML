@@ -1,3 +1,5 @@
+> Cập nhật triển khai 28/11/2026: [hợp đồng runtime hiện hành](../../integration/orchestration/README.md). G1–G6 dưới đây là gate nghiệm thu QA; “G1 Network/S0” trong tài liệu module là gate nội bộ khác namespace. Chưa có xác nhận PASS_SYSTEM.
+
 # Kế hoạch kiểm thử và thực nghiệm SDN
 
 - Phiên bản `testing_v2 2026-11-10`.
@@ -40,7 +42,7 @@ P0: có thể sai dữ liệu/kết quả hoặc chặn tích hợp. P1: ảnh h
 
 | ID / mức | Căn cứ và ảnh hưởng | Đề xuất dùng trong testing v2 | Owner / điều kiện đóng |
 | --- | --- | --- | --- |
-| C01/P0 | Network §5/Phụ lục dùng cookie hex; ML §2.1 dùng hex làm ID; Optimization §V dùng h1-h5; Data §3 dùng h1_h3; SDN đã chuẩn hóa | h1_h3 / h1_h3_c1 / e1_to_c1; hex là flow_cookie; P1 là path_label | Network chủ trì, tất cả consumer; TC-I01/TC-N01 round-trip |
+| C01/P0 | Network §5/Phụ lục dùng cookie hex; ML §2.1 dùng hex làm ID; Optimization §V dùng h1-h5; Data §3 dùng h1_h3; SDN đã chuẩn hóa | `0x103` / `0x103_P1` / `e1>c1`; `flow_cookie` là field riêng; P1 chỉ là path_label | Network chủ trì, tất cả consumer; TC-I01/TC-N01 round-trip |
 | C02/P0 | Data pipeline mô tả y scalar; ML §2,6 là H bước; testing cũ cũng ép scalar | Data cấp y_vector và y_mean; giữ H dự báo, Optimization tính mean; không ép ML thêm cột mean | Data+ML+Optimization; TC-D04/TC-M01/TC-D06 |
 | C03/P0 | demand_plan không có available_at; lịch biết trước, snapshot chưa có chứng cứ hiện thực | Online release ledger/buffer chỉ lịch sử đã khép và sẵn có; M4 tách quyền | Network+Data+ML; TC-D04/TC-I02 |
 | C04/P0 | Optimization §V batch_id/decisions/P1/target_interval khác SDN §4 | Adapter thành decision_batch_id/changes/full path IDs/config_version/forecast UTC | Optimization+SDN; TC-I01/TC-S03 |
@@ -49,7 +51,7 @@ P0: có thể sai dữ liệu/kết quả hoặc chặn tích hợp. P1: ảnh h
 | C07/P0 | ML §6.5 đã hiệu chỉnh epsilon; Optimization R2 vẫn nhân (1+epsilon) | Theo ML hiện nhận: epsilon chỉ áp tại ML, Optimization k_e×mean(final); raw/adjusted metadata; fixture 4→4,4 | ML+Optimization+Data; TC-M04. Rà soát đề xuất opt-owned là phương án thay thế, không bật cả hai |
 | C08/P0 | Optimization R4 chỉ ≥; λ=0 có thể báo đổi giả; ví dụ J_new=.61 không khớp | y=1−x_current; J=U+λ n_changes/48; sửa ví dụ theo số đổi thật | Optimization; TC-O02/O03/O04 |
 | C09/P1 | Optimization N=3, TH/h có 2 lựa chọn; testing cũ/Rà soát khuyến nghị N=2 | Baseline đề xuất N=3,TH=.85,h=.05; các giá trị khác là sweep; một config/hash | Optimization+QA; TC-O01; sign-off trước pilot |
-| C10/P1 | Network 30s warm-up/20 seed chia10/5/5; ML L tới60; Data gợi ý70/15/15; testing cũ72 lượt và S5 phụ | Warm-up70s đề xuất, ≥L và đủ availability; split10/5/5 theo manifest; S5 chính; ma trận mục5 | Network+Data+ML+QA; TC-E02 |
+| C10/P1 | Network 30s warm-up/20 seed chia10/5/5; ML L tới60; Data gợi ý70/15/15; testing cũ72 lượt và S5 phụ | Warm-up60s theo Network hiện hành; đợi đủ L bin measurement; split10/5/5 theo manifest; S5 chính; ma trận mục5 | Network+Data+ML+QA; TC-E02 |
 | C11/P1 | S0 Network đòi RTT24±5%, CPU<80%, phát10Mbps; k_e chưa hiệu chuẩn | Giữ làm mục tiêu pilot; đo payload/overhead/qdisc; ngưỡng khóa có điều kiện, không hard-code goodput10 | Network+SDN+Data+Optimization; TC-N03/D05 |
 | C12/P1 | Thiếu MAC/ARP policy và initial_paths file; cùng-edge ngoài F | Một initial map/hash chung, static ARP hoặc handler kiểm soát; same-edge test riêng | Network+SDN; TC-N01/S01 |
 | C13/P0 | T_ctl1s nhưng chưa có transport/latency budget; APPLIED cần verify | Một batch flight, timeout hữu hạn, check expiry trước write; quá hạn sau write vẫn reconcile thật | ML+Optimization+SDN+Data; TC-S02/S03 |
@@ -102,7 +104,7 @@ Rà soát C03 đánh chỉ số “đến t / từ t+1”; bản ML hiện tại
 
 S1 rho=.4/.6/.8/1.0 giữ theo Network; rho1.0 là stress chạm giới hạn host. Rho=sum requested/80 chỉ mô tả tổng, không chứng minh host/fabric khả thi. S2b các pha độc lập không bảo đảm tổng rho luôn .3–.9; tính lại envelope từ lịch. S3/S4/S5 phải lưu cả demand trước/sau rescale/cap và thuật toán điều chỉnh; cap theo tổng gửi/tổng nhận từng host, không cap riêng từng flow. Với UDP payload, giới hạn10Mbps payload chưa bảo đảm không nghẽn host vì overhead. Gắn nhãn CORE hoặc HOST_STRESS theo calibration; giữ stress trong báo cáo riêng, không loại bất lợi sau test.
 
-Một lượt baseline đề xuất: warm-up70s + measurement360s + drain/reset đã hiệu chuẩn. 225×430s=96.750s≈26,88 giờ trước drain/reset; đây là dự toán, không phải thời lượng đã chạy. Nếu nguồn lực không đủ, khóa một ma trận rút gọn bằng protocol revision trước khi xem test; không âm thầm dùng72 lượt của bản cũ. Không chạy nhiều Mininet benchmark đồng thời trên cùng máy.
+Một lượt baseline hiện hành: warm-up60s + measurement360s + drain/reset đã hiệu chuẩn. 225×420s=94.500s=26,25 giờ trước drain/reset; đây là dự toán, không phải thời lượng đã chạy. Nếu nguồn lực không đủ, khóa một ma trận rút gọn bằng protocol revision trước khi xem test; không âm thầm dùng72 lượt của bản cũ. Không chạy nhiều Mininet benchmark đồng thời trên cùng máy.
 
 ## 6. Cấu hình khóa và quản lý seed
 
@@ -266,7 +268,7 @@ Bàn giao hiện tại: ba tài liệu thiết kế, checklist acceptance và h�
 
 ## 13. Truy vết thay đổi và điểm cần owner xác nhận
 
-Đối chiếu [sổ quyết định API online](../../docs/architecture/Online_API_Team_Decisions.md#các-mục-c01c16-liên-quan) để xem commit, fixture, ca kiểm thử PostgreSQL và đầu mối xác nhận. TC-I03 dùng warm-up 60 s. Cấu hình warm-up 70 s trong phần thiết kế thực nghiệm vẫn là đề xuất cần xác nhận riêng.
+Đối chiếu [sổ quyết định API online](../../docs/architecture/Online_API_Team_Decisions.md#các-mục-c01c16-liên-quan) để xem commit, fixture, ca kiểm thử PostgreSQL và đầu mối xác nhận. TC-I03 và runtime hiện hành dùng warm-up 60 s. Đề xuất 70 s trước đây được thay thế trong baseline này; mọi thay đổi mới cần protocol revision.
 
 Bản v2 thay các giả định lỗi thời: N2→N3 đề xuất; scalar-only→vector H bước/mean;72 lượt→225 lượt đề xuất theo Network; S5 mở rộng→chính; path/link IDs theo SDN; version nhiều lần→tối đa1 lần/batch. Loại tham chiếu trang PDF chưa kiểm tra. Giữ metric/cohort/raw/paired analysis còn đúng; sửa acceptance và interfaces tương ứng.
 

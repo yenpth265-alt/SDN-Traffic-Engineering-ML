@@ -246,7 +246,8 @@ def test_p8_runtime_b1_b4_causal_order_and_sync_gate_lifecycle(tmp_path: Path) -
     # Flush -> MUST deliver RoutingState FIRST, then 48-flow ApplyResult!
     pub.flush_pending()
     paths = [d["url"].split(":8000", 1)[1] for d in delivered]
-    assert paths == [DATA_V1_ENDPOINT_ROUTING, DATA_V1_ENDPOINT_APPLY_RESULTS]
+    assert [p for p in paths if not p.endswith("/events/sdn")] == [DATA_V1_ENDPOINT_ROUTING, DATA_V1_ENDPOINT_APPLY_RESULTS]
+    assert any(p.endswith("/events/sdn") for p in paths)
     app_payload = delivered[1]["payload"]
     assert len(app_payload["rows"]) == 48
     assert sum(1 for r in app_payload["rows"] if r["status"] == "APPLIED") == 1
@@ -274,7 +275,7 @@ def test_p8_runtime_b1_b4_causal_order_and_sync_gate_lifecycle(tmp_path: Path) -
     assert c_dup == 200
     assert b_dup["apply_response"]["idempotent_replay"] is True
     pub.flush_pending()
-    assert len(delivered) == 2
+    assert len(delivered) == 3
 
 
 def test_p8_outage_timeout_after_commit_restart_and_conflict_reconciliation(tmp_path: Path) -> None:
@@ -355,9 +356,9 @@ def test_p8_outage_timeout_after_commit_restart_and_conflict_reconciliation(tmp_
     # then retries with idempotent 200 {"inserted": 0} and is ACKed, while ApplyResult stays parked!
     state["down"] = False
     pub2.flush_pending()  # Attempt 1: RoutingState times out after DB commit
-    assert delivered == []
+    assert DATA_V1_ENDPOINT_APPLY_RESULTS not in delivered
     pub2.flush_pending()  # Attempt 2: RoutingState gets idempotent 200 {"inserted": 0}!
-    assert delivered == [DATA_V1_ENDPOINT_ROUTING]
+    assert [p for p in delivered if not p.endswith("/events/sdn")] == [DATA_V1_ENDPOINT_ROUTING]
 
     # Simulate controller restart #2 AFTER RoutingState ACK, BEFORE ApplyResult ACK!
     pub3 = DataEventPublisher(
@@ -382,7 +383,7 @@ def test_p8_outage_timeout_after_commit_restart_and_conflict_reconciliation(tmp_
     # Now DecisionBatch becomes available -> flush resolves durable pending audit & delivers 48-flow ApplyResult!
     state["decision_ready"] = True
     pub3.flush_pending()
-    assert delivered == [DATA_V1_ENDPOINT_ROUTING, DATA_V1_ENDPOINT_APPLY_RESULTS]
+    assert [p for p in delivered if not p.endswith("/events/sdn")] == [DATA_V1_ENDPOINT_ROUTING, DATA_V1_ENDPOINT_APPLY_RESULTS]
     gate_final = pub3.sync_gate_status(run_id, current_state_version=sv_after, ovs_verified=True)
     assert gate_final["optimization_tick_eligible"] is True
 

@@ -9,6 +9,8 @@ def normalize_forecast(forecast, groups, deployment_file):
     selected = read_deployment(deployment_file)
     H = selected["horizon_H"]
     result = dict(forecast)
+    require(forecast.get("delta_s", selected.get("delta_s", 1)) == selected.get("delta_s", 1),
+            "Forecast bin duration differs from frozen ML YAML")
     if "rows" in forecast:
         rows = forecast["rows"]
         require(len(rows) == len(groups) * H, "Forecast rows differ from frozen 48 x H")
@@ -28,14 +30,17 @@ def normalize_forecast(forecast, groups, deployment_file):
         origin = utc(forecast["measurement_started_at_utc"])
         result["predictions"] = {fg: {"predicted_mbps_array": [vectors[fg][i] for i in expected]}
                                  for fg in groups}
-        result["forecast_start"] = stamp(origin + timedelta(seconds=anchor))
-        result["forecast_end"] = stamp(origin + timedelta(seconds=anchor + H))
+        # Keep bins for Data's strict Decision wire; add UTC bounds for SDN.
+        result["forecast_start"] = anchor
+        result["forecast_end"] = anchor + H
+        result["forecast_start_utc"] = stamp(origin + timedelta(seconds=anchor))
+        result["forecast_end_utc"] = stamp(origin + timedelta(seconds=anchor + H))
     predictions = result.get("predictions", result)
     require(all(fg in predictions and len(predictions[fg].get("predicted_mbps_array", [])
                                         if isinstance(predictions[fg], Mapping) else predictions[fg]) == H
                 for fg in groups),
             "Forecast H differs from frozen ML YAML")
-    if result.get("forecast_start") and result.get("forecast_end"):
+    if isinstance(result.get("forecast_start"), str) and result.get("forecast_end"):
         require((utc(result["forecast_end"]) - utc(result["forecast_start"])).total_seconds() == H,
                 "Forecast time window differs from frozen H")
     return result

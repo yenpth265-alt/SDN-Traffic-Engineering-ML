@@ -550,7 +550,7 @@ def test_p12_03_northbound_auth_size_limit_and_sender_demand_releases(tmp_path: 
 # =============================================================================
 
 
-def test_p12_04_northbound_snapshot_48_flows_lookback_60(tmp_path: Path) -> None:
+def test_p12_04_northbound_snapshot_48_flows_lookback_60(tmp_path: Path, monkeypatch) -> None:
     stack = _build_mock_stack(tmp_path, max_request_bytes=4 * 1024 * 1024)
     run_id = stack["run_id"]
     meas_dt = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=60)
@@ -563,6 +563,9 @@ def test_p12_04_northbound_snapshot_48_flows_lookback_60(tmp_path: Path) -> None
             delta_s=1,
         ),
     )
+
+    monkeypatch.setattr("sdn.adapters.http_control_api._utc_now_rfc3339",
+                        lambda: format_utc_timestamp(meas_dt + timedelta(seconds=60, milliseconds=100)))
 
     fgs = [fg.flow_group_id for fg in stack["topo"].get_all_flow_groups()]
     assert len(fgs) == 48
@@ -589,7 +592,8 @@ def test_p12_04_northbound_snapshot_48_flows_lookback_60(tmp_path: Path) -> None
         stack["app"],
         "POST",
         "/snapshots",
-        body_obj={"run_id": run_id, "cutoff": 60, "lookback_L": 60},
+        body_obj={"run_id": run_id, "cutoff": 60, "lookback_L": 60,
+                  "snapshot_as_of_utc": format_utc_timestamp(meas_dt + timedelta(seconds=61))},
     )
     assert code == 200
     snap = Snapshot.from_dict(snap_dict, strict=True, verify_hash=True)

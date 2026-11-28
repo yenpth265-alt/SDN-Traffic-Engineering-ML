@@ -114,6 +114,8 @@ class DemandOutbox:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self._pending: dict[str, dict] = {}
         self._load()
+        if not os.path.exists(self.path):
+            self._rewrite()
 
     def _load(self) -> None:
         if not os.path.exists(self.path):
@@ -134,12 +136,16 @@ class DemandOutbox:
         with open(tmp_path, "w", encoding="utf-8") as f:
             for eid, payload in self._pending.items():
                 f.write(json.dumps({"event_id": eid, "payload": payload}, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, self.path)
 
     def add_if_missing(self, payload: dict) -> None:
         eid = payload["event_id"]
+        if eid in self._pending and self._pending[eid] != payload:
+            raise ValueError(f"Demand event ID reused with different content: {eid}")
         if eid not in self._pending:
-            self._pending[eid] = payload
+            self._pending[eid] = json.loads(json.dumps(payload))
             self._rewrite()
 
     def ack(self, event_id: str) -> None:
@@ -241,6 +247,7 @@ def _send_or_queue_event(
     if not release_url:
         return
 
+    outbox.add_if_missing(event)
     body_bytes = payload_str.encode("utf-8")
     last_outcome = "retryable"
     last_status: int | None = None

@@ -1,3 +1,5 @@
+> Cập nhật mã tích hợp 28/11/2026: xem [runtime contract](../../integration/orchestration/README.md). Các đề xuất version/hash/gate và SHA producer cũ bên dưới là lịch sử. Baseline hiện dùng topology `v1.0`, hash raw từ bundle, warm-up 60 s, L30/H1; G1–G6 QA và gate Network/S0 là hai namespace riêng. Xác nhận owner và nghiệm thu live vẫn PENDING.
+
 # SDN Traffic Engineering — Đặc tả triển khai thống nhất cho 6 role (Mục 1–13)
 
 **Phiên bản:** 1.4-network-id-trimmed  

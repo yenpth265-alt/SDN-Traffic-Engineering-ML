@@ -1,0 +1,38 @@
+{
+  "run_id": "run_g0_fixture",
+  "decision_batch_id": "dec_fixture_reroute_001",
+  "snapshot_id": "snap_001",
+  "expected_state_version": 5,
+  "config_version": "1.0",
+  "forecast_start": "2026-11-26T14:00:00Z",
+  "forecast_end": "2026-11-26T14:00:10Z",
+  "apply_deadline_utc": "2026-11-26T14:00:05Z",
+  "changes": [
+    {
+      "flow_group_id": "0x064",
+      "old_path_id": "p_0x064_a",
+      "new_path_id": "p_0x064_b"
+    },
+    {
+      "flow_group_id": "0x066",
+      "old_path_id": "p_0x066_a",
+      "new_path_id": "p_0x066_b"
+    },
+    {
+      "flow_group_id": "0x068",
+      "old_path_id": "p_0x068_a",
+      "new_path_id": "p_0x068_b"
+    },
+    {
+      "flow_group_id": "0x06a",
+      "old_path_id": "p_0x06a_a",
+      "new_path_id": "p_0x06a_b"
+    }
+  ],
+  "topology_version": "1.0",
+  "topology_hash": "sha256:topo_v1_0_fixture",
+  "config_hash": "sha256:1fcd04aa072584f9b067e76b870f5c40f716081eb2b5569e5019caf3a1e21388",
+  "snapshot_as_of_utc": "2026-11-26T14:00:00Z",
+  "history_cutoff_utc": "2026-11-26T13:59:00Z",
+  "payload_hash": "d4707dbd3cb7e3f84eeac46bdc66456fff5aeb5f132e082e0ff89d692c46441a"
+}

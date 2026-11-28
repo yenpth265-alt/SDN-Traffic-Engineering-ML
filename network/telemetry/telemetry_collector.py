@@ -156,8 +156,8 @@ class TelemetryOutbox:
                     continue
                 try:
                     rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+                except json.JSONDecodeError as exc:
+                    raise ValueError("Telemetry outbox is corrupt; repair is required before delivery") from exc
                 op = rec.get("op")
                 bid = rec.get("batch_id")
                 if op == "add" and bid and isinstance(rec.get("payload"), dict):
@@ -170,16 +170,19 @@ class TelemetryOutbox:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, separators=(",", ":")) + "\n")
             f.flush()
+            os.fsync(f.fileno())
 
     def add_if_missing(self, batch_id: str, payload: dict) -> None:
         if batch_id not in self._pending:
-            self._pending[batch_id] = payload
             self._append({"op": "add", "batch_id": batch_id, "payload": payload})
+            self._pending[batch_id] = json.loads(json.dumps(payload))
+        elif self._pending[batch_id] != payload:
+            raise ValueError(f"Telemetry batch ID reused with different payload: {batch_id}")
 
     def ack(self, batch_id: str) -> None:
         if batch_id in self._pending:
-            self._pending.pop(batch_id, None)
             self._append({"op": "ack", "batch_id": batch_id})
+            self._pending.pop(batch_id, None)
 
     def items(self) -> list[tuple[str, dict]]:
         return list(self._pending.items())
@@ -233,6 +236,8 @@ def emit_batch_event(
         jsonl_fp.flush()
     batch_id = batch_event["batch_id"]
     if telemetry_url:
+        if outbox is not None:
+            outbox.add_if_missing(batch_id, batch_event)
         ok, status_code, detail = _post_batch_with_retry(
             url=telemetry_url,
             body_bytes=payload.encode("utf-8"),
@@ -356,6 +361,11 @@ def main():
         for bin_idx in range(total_bins):
             if STOP or time.time() >= stop_at:
                 break
+
+            if args.telemetry_url and outbox.items():
+                flush_telemetry_outbox(outbox, args.telemetry_url, api_key=api_key,
+                                       timeout=args.telemetry_timeout,
+                                       backoff_base=args.telemetry_backoff)
 
             target_ts = t0 + (bin_idx + 1) * args.interval
             while time.time() < target_ts and not STOP:

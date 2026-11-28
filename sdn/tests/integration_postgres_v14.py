@@ -193,26 +193,40 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
         resp = self._client.post(path, content=raw, headers=headers)
         return int(resp.status_code), resp.text
 
-    def _align_fresh_cutoff(self, meas_start: datetime) -> tuple[int, datetime]:
+    def _seed_fresh_history(self, run_id, meas_start, lookback):
+        """Bulk-seed real store validation, then bounded catch-up using DB time.
+
+        HTTP/auth demand handling is covered by OnlineIngestionTest. Avoid
+        1,440 separate connections making fixture creation slower than traffic.
         """
-        Return `(cutoff_offset_s, w_end)` aligned to the latest completed 1s measurement bin
-        relative to PostgreSQL `clock_timestamp()`, waiting briefly if >0.45s into the current
-        second so subsequent 48-flow demand ingestion finishes well within `T_stale = 2.0s`.
-        """
-        with self._transaction() as cursor:
-            cursor.execute("SELECT clock_timestamp() AS now")
-            now_dt = cursor.fetchone()["now"]
-        elapsed = (now_dt - meas_start).total_seconds()
-        subsec = elapsed - int(elapsed)
-        if subsec > 0.45:
-            time.sleep(min(0.6, 1.02 - subsec))
+        from data.ingestion import online_store as store
+        from data.ingestion.online_models import Demand
+        seeded = set()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            with self._transaction() as cursor:
+                locked = store.lock_run(cursor, run_id)
+                cutoff = int((locked["now"] - meas_start).total_seconds())
+                self.assertGreaterEqual(cutoff, lookback)
+                for index in range(cutoff - lookback, cutoff):
+                    if index in seeded:
+                        continue
+                    for j, fg in enumerate(self._topo.get_all_flow_groups()):
+                        store.ingest_demand(cursor, locked, Demand(
+                            run_id=run_id, flow_group_id=fg.flow_group_id,
+                            bin_index=60 + index, event_id=f"net:{run_id}:{fg.flow_group_id}:{index}",
+                            window_start_utc=_fmt_utc(meas_start + timedelta(seconds=index)),
+                            window_end_utc=_fmt_utc(meas_start + timedelta(seconds=index + 1)),
+                            requested_mbps=round(1.5 + j * .05 + index * .02, 4),
+                            released_at_utc=_fmt_utc(meas_start + timedelta(seconds=index + 1))))
+                    seeded.add(index)
             with self._transaction() as cursor:
                 cursor.execute("SELECT clock_timestamp() AS now")
-                now_dt = cursor.fetchone()["now"]
-            elapsed = (now_dt - meas_start).total_seconds()
-        cutoff = max(1, int(elapsed))
-        w_end = meas_start + timedelta(seconds=cutoff)
-        return cutoff, w_end
+                as_of = cursor.fetchone()["now"]
+            end = meas_start + timedelta(seconds=cutoff)
+            if (as_of - end).total_seconds() < 1.5:
+                return cutoff, end, as_of
+        self.fail("Could not seed a fresh history within the 20-second fixture budget")
 
     def test_end_to_end_contracts_1_2_3_against_real_postgres(self) -> None:
         run_id = f"sdn-pg-v14-{uuid4().hex[:12]}"
@@ -273,32 +287,7 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
             r_rt1 = pub.publish_routing_state(rs_v1, deliver_now=True)
             self.assertEqual(r_rt1.status, DeliveryStatus.DELIVERED, r_rt1.last_error)
 
-            # Contract 1: Align cutoff to the latest completed 1s measurement bin (fresh within T_stale=2.0s)
-            # and ingest all 48 genuine Network DemandRelease observations for [cutoff-1, cutoff).
-            cutoff, w_end = self._align_fresh_cutoff(meas_start)
-            w_start = w_end - timedelta(seconds=1)
-            traffic_bin_idx = 60 + (cutoff - 1)
-            for fg in self._topo.get_all_flow_groups():
-                ev = {
-                    "run_id": run_id,
-                    "flow_group_id": fg.flow_group_id,
-                    "bin_index": traffic_bin_idx,
-                    "window_start_utc": _fmt_utc_sec(w_start),
-                    "window_end_utc": _fmt_utc_sec(w_end),
-                    "requested_mbps": 2.5,
-                    "released_at_utc": _fmt_utc_sec(w_end),
-                    "event_id": f"net:{run_id}:{fg.flow_group_id}:{traffic_bin_idx}",
-                }
-                r_dem = self._client.post("/v1/network/demand", headers={"X-API-Key": "qa-network"}, json=ev)
-                self.assertEqual(r_dem.status_code, 200, r_dem.text)
-
-            # Query fresh DB clock_timestamp() AFTER BOTH RoutingState v1 ACK AND demand ingestion
-            # so routing_versions(v1).available_at_utc <= snapshot_as_of_utc,
-            # demand_observations.available_at_utc <= snapshot_as_of_utc, AND
-            # (snapshot_as_of_utc - history_cutoff_utc) <= T_stale (2.0s).
-            with self._transaction() as cursor:
-                cursor.execute("SELECT clock_timestamp() AS now")
-                as_of_dt = cursor.fetchone()["now"]
+            cutoff, w_end, as_of_dt = self._seed_fresh_history(run_id, meas_start, 1)
 
             provider = DataAPIDemandHistoryProvider(
                 DataDemandHistoryConfig(
@@ -743,50 +732,7 @@ class SDNRealPostgresV14IntegrationTest(unittest.TestCase):
             r_rt1 = pub.publish_routing_state(rs_v1, deliver_now=True)
             self.assertEqual(r_rt1.status, DeliveryStatus.DELIVERED, r_rt1.last_error)
 
-            fgs = self._topo.get_all_flow_groups()
-
-            def _ingest_bin(meas_bin: int) -> None:
-                ws = meas_start + timedelta(seconds=meas_bin)
-                we = meas_start + timedelta(seconds=meas_bin + 1)
-                t_bin = 60 + meas_bin
-                for idx, fg in enumerate(fgs):
-                    val = round(1.5 + (idx * 0.05) + (meas_bin * 0.02), 4)
-                    r_dem = self._client.post(
-                        "/v1/network/demand",
-                        headers={"X-API-Key": "qa-network"},
-                        json={
-                            "run_id": run_id,
-                            "flow_group_id": fg.flow_group_id,
-                            "bin_index": t_bin,
-                            "window_start_utc": _fmt_utc_sec(ws),
-                            "window_end_utc": _fmt_utc_sec(we),
-                            "requested_mbps": val,
-                            "released_at_utc": _fmt_utc_sec(we),
-                            "event_id": f"net:{run_id}:{fg.flow_group_id}:{t_bin}",
-                        },
-                    )
-                    self.assertEqual(r_dem.status_code, 200, r_dem.text)
-
-            # Ingest initial 30 bins (0..29), then catch up to latest completed bin so cutoff >= 30 is VALID (<= T_stale)
-            for b in range(30):
-                _ingest_bin(b)
-            next_bin = 30
-            cutoff, w_end = self._align_fresh_cutoff(meas_start)
-            while next_bin < cutoff:
-                _ingest_bin(next_bin)
-                next_bin += 1
-            # Re-check if clock ticked during catch-up; ingest final bin if needed
-            with self._transaction() as cursor:
-                cursor.execute("SELECT clock_timestamp() AS now")
-                as_of_dt = cursor.fetchone()["now"]
-            if (as_of_dt - w_end).total_seconds() > 1.5:
-                cutoff, w_end = self._align_fresh_cutoff(meas_start)
-                while next_bin < cutoff:
-                    _ingest_bin(next_bin)
-                    next_bin += 1
-                with self._transaction() as cursor:
-                    cursor.execute("SELECT clock_timestamp() AS now")
-                    as_of_dt = cursor.fetchone()["now"]
+            cutoff, w_end, as_of_dt = self._seed_fresh_history(run_id, meas_start, 30)
 
             self.assertGreaterEqual(cutoff, 30)
             provider = DataAPIDemandHistoryProvider(

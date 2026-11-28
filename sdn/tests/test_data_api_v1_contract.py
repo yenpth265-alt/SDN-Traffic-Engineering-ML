@@ -407,10 +407,13 @@ def test_c04_data_v1_transport_auth_ack_errors_outage_and_contract_blocked(tmp_p
     assert r1_dup.duplicate is True
     assert len(calls) == before_calls
 
-    # RoutingHistory in data_v1 mode -> CONTRACT_BLOCKED, stays PENDING_DELIVERY, 0 HTTP calls
+    # Preserve standalone routing history using Data's existing SDN event endpoint.
     r_hist = pub.publish_routing_history("run_c04", rs.state_version, (), deliver_now=True)
-    assert r_hist.status == DeliveryStatus.PENDING_DELIVERY
-    assert len(calls) == before_calls
+    assert r_hist.status == DeliveryStatus.DELIVERED
+    assert len(calls) == before_calls + 1
+    assert calls[-1]["url"].endswith("/v1/runs/run_c04/events/sdn")
+    assert calls[-1]["payload"]["event_type"] == "RoutingHistory"
+    assert calls[-1]["payload"]["detail"]["intervals"] == []
 
     # 2. Non-persistence 200 body must NOT be treated as DELIVERED
     assert is_valid_data_v1_ack(200, '{"inserted": 1}') is True

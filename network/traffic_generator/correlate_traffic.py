@@ -115,6 +115,8 @@ class TrafficOutbox:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self._pending: dict[str, dict] = {}
         self._load()
+        if not os.path.exists(self.path):
+            self._rewrite()
 
     def _load(self) -> None:
         if not os.path.exists(self.path):
@@ -138,11 +140,15 @@ class TrafficOutbox:
                     json.dumps({"batch_key": batch_key, "payload": payload}, separators=(",", ":"))
                     + "\n"
                 )
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, self.path)
 
     def add_if_missing(self, batch_key: str, payload: dict) -> None:
+        if batch_key in self._pending and self._pending[batch_key] != payload:
+            raise ValueError(f"Traffic batch ID reused with different content: {batch_key}")
         if batch_key not in self._pending:
-            self._pending[batch_key] = payload
+            self._pending[batch_key] = json.loads(json.dumps(payload))
             self._rewrite()
 
     def ack(self, batch_key: str) -> None:
@@ -207,6 +213,7 @@ def _send_or_queue_batch(
     max_retries: int = 3,
     backoff_base: float = 0.15,
 ) -> None:
+    outbox.add_if_missing(batch_key, payload)
     body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     last_outcome = "retryable"
     last_status: int | None = None
@@ -481,7 +488,14 @@ def build_correlated_rows(
 
         actual_mbps = round((recv_bytes * 8.0) / 1e6, 6) if recv_bytes is not None else None
         # CF-30: Denominator == 0 -> loss_ratio is None (N/A), never 0.0
-        if pkts_sent is not None and recv_pkts is not None and pkts_sent > 0:
+        cohort_status = "MISSING_EVIDENCE"
+        if pkts_sent is not None and recv_pkts is not None and recv_pkts > pkts_sent:
+            cohort_status = "INVALID_RECEIVE_COUNT"
+        elif pkts_sent is not None and recv_pkts is not None and pkts_sent > 0:
+            cohort_status = "VALID"
+        elif pkts_sent == 0 and recv_pkts == 0:
+            cohort_status = "NO_SENT_PACKETS"
+        if cohort_status == "VALID":
             lost_cohort: int | None = pkts_sent - recv_pkts
             loss_ratio: float | None = round(lost_cohort / pkts_sent, 6)
         else:
@@ -505,6 +519,7 @@ def build_correlated_rows(
             "bytes_received": recv_bytes,
             "packets_lost_cohort": lost_cohort,
             "loss_ratio_cohort": loss_ratio,
+            "cohort_status": cohort_status,
             "unique_seqs_received": int(seq_info["unique_seqs_received"]) if seq_info else None,
             "duplicate_or_retrans_packets": int(seq_info["duplicate_or_retrans_packets"]) if seq_info else None,
             "seq_min": seq_info["seq_min"] if seq_info else None,
@@ -577,7 +592,7 @@ def main():
         "flow_group_id", "src_host", "dst_host", "requested_mbps", "traffic_actual_mbps",
         "packets_sent", "bytes_sent", "late_packets",
         "packets_received_cohort", "bytes_received", "packets_lost_cohort",
-        "loss_ratio_cohort", "unique_seqs_received", "duplicate_or_retrans_packets",
+        "loss_ratio_cohort", "cohort_status", "unique_seqs_received", "duplicate_or_retrans_packets",
         "seq_min", "seq_max", "delay_ms_mean", "delay_ms_p95", "delay_ms_max",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as fcsv:

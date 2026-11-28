@@ -94,7 +94,7 @@ def main():
     if args.packet_log:
         pk_fp = open(os.path.join(outdir, f"recvpkts_{args.host}.csv"), "w", encoding="utf-8", newline="")
         pk_w = csv.writer(pk_fp, lineterminator="\n")
-        pk_w.writerow(["flow_group_id", "seq", "send_bin", "recv_offset_s", "delay_ms"])
+        pk_w.writerow(["flow_group_id", "seq", "send_bin", "recv_offset_s", "delay_ms", "received_bytes"])
 
     def flush(upto):
         for k in sorted(k for k in bins if upto is None or k[0] <= upto):
@@ -138,7 +138,7 @@ def main():
                     sb["packets"] += 1
                     sb["bytes"] += len(data)
                     if pk_w:
-                        pk_w.writerow([fg, seq, send_bin, f"{now - t0:.6f}", f"{delay:.3f}"])
+                        pk_w.writerow([fg, seq, send_bin, f"{now - t0:.6f}", f"{delay:.3f}", len(data)])
             flush(int(time.time() - t0) - 2)
         flush(None)
     finally:

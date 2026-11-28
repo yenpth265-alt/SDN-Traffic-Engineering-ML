@@ -1,21 +1,18 @@
-# Cấu hình phân hệ Optimization - SDN Traffic Engineering ML
-# Hàm mục tiêu MILP: min J = U + (lambda_weight / |F|) * sum_{f in F} y_f
-# - U = max_{e in E} (k_e * load_e / C_e): mức sử dụng liên kết cực đại (0..1)
-# - |F| = 48 luồng; phạt nhẹ lambda_weight / 48 trên mỗi luồng đổi tuyến để chống dao động
+config_version: "v1.0"
+topology_version: "v1.0"
+warmup_seconds: 60
 
-config_version: "1.0"
-topology_version: "1.0"
+TH: 0.85
+N: 3
+h: 0.05
+T_hold: 10.0
+B: 4
+lambda_weight: 0.01
+C_e: 100.0
+
+deadline_ms: 200
+apply_guard_ms: 200
+sdn_base_url: "http://127.0.0.1:18080"
 network_config_dir: "configs/network"
-ml_deployment_config: "configs/ml/selected.yaml" # L/H/epsilon are frozen offline by ML
-
-TH: 0.85              # Ngưỡng utilization kích hoạt kiểm tra nghẽn (85%)
-N: 3                  # Số chu kỳ liên tiếp U_current vượt ngưỡng TH để kích hoạt trigger
-h: 0.05               # Mức giảm tối thiểu của mục tiêu J (J_old - J_new >= h) mới cho đổi tuyến
-T_hold: 10.0          # Thời gian khóa tuyến (giây) sau khi đổi đường thành công (VERIFIED)
-
-B: 4                  # Ngân sách tối đa số luồng đổi tuyến mỗi tick (0..48)
-lambda_weight: 0.01   # Trọng số phạt số lần chuyển tuyến (chia cho |F|=48)
-C_e: 100.0            # Dung lượng liên kết mặc định (Mbps) nếu topology không khai báo riêng
-
-deadline_ms: 200      # Giới hạn thời gian giải MILP tối đa (ms)
-apply_guard_ms: 200   # Quỹ thời gian dự phòng tối thiểu trước apply_deadline_utc (ms)
+# Frozen ML selection; horizon and calibration must match the model artifact.
+ml_deployment_config: "configs/ml/selected.yaml"

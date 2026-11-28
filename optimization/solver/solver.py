@@ -1,10 +1,9 @@
 import time
 from typing import Any, Mapping
 import pulp
-
+from optimization.input_validator import resolve_flow_path_id
 
 def _build_solver(time_limit_s: float):
-    """Khởi tạo bộ giải PuLP nếu môi trường có sẵn (PuLP 2.x/3.x CBC hoặc PuLP 4.x + HiGHS)."""
     if hasattr(pulp, "PULP_CBC_CMD"):
         return pulp.PULP_CBC_CMD(timeLimit=time_limit_s, msg=False)
 
@@ -74,10 +73,6 @@ def _solve_exact_branch_and_bound(
     start_time: float,
     time_limit_s: float,
 ) -> tuple[str, float, float, dict[str, int], dict[str, dict[str, int]], float]:
-    """
-    Bộ giải nhánh-và-cận (Exact Branch-and-Bound) tìm nghiệm tối ưu toàn cục cho bài toán MILP:
-    min U + lambda * sum(y_f) với ràng buộc R1, R3, R4, R5 (sum y_f <= B), R6 (hold-down).
-    """
     F: list[str] = list(topology["F"])
     P: Mapping[str, list[str]] = topology["P"]
     E: list[str] = list(topology["E"])
@@ -87,7 +82,7 @@ def _solve_exact_branch_and_bound(
     k_e = topology.get("k_e", {})
 
     B = int(config.get("B", 4))
-    lam = float(config.get("lambda_weight", 0.01))
+    lam_unit = float(config.get("lambda_weight", 0.01)) / max(1, len(F))
     locked_set = set(locked_groups)
 
     num_e = len(E)
@@ -100,7 +95,7 @@ def _solve_exact_branch_and_bound(
     flow_path_weights: dict[str, dict[str, list[tuple[int, float]]]] = {}
 
     for f in F:
-        p0 = routing_state[f].get("current_path") or routing_state[f].get("actual_path_id")
+        p0 = str(resolve_flow_path_id(routing_state[f]) or "")
         cur_path[f] = p0
         flow_path_weights[f] = {}
         demand = float(b_f[f])
@@ -152,7 +147,8 @@ def _solve_exact_branch_and_bound(
     suffix_drops: list[list[list[float]]] = [[[] for _ in range(n_cand + 1)] for _ in range(num_e)]
     for i in range(num_e):
         for pos in range(n_cand + 1):
-            suffix_drops[i][pos] = sorted(max_drop_on_link[i][pos:], reverse=True)
+            arr = sorted(max_drop_on_link[i][pos:], reverse=True)
+            suffix_drops[i][pos] = arr
 
     cur_choice = dict(cur_path)
     timed_out = False
@@ -166,7 +162,7 @@ def _solve_exact_branch_and_bound(
             return
 
         u_now = calc_u(loads)
-        j_now = u_now + lam * used
+        j_now = u_now + lam_unit * used
         if j_now < best_J - 1e-12:
             best_U = u_now
             best_J = j_now
@@ -180,12 +176,13 @@ def _solve_exact_branch_and_bound(
         for i in range(num_e):
             if cap[i] <= 0:
                 continue
-            max_possible_drop = sum(suffix_drops[i][pos][:rem_budget])
+            drops = suffix_drops[i][pos]
+            max_possible_drop = sum(drops[:rem_budget])
             min_u_i = max(0.0, loads[i] - max_possible_drop) / cap[i]
             if min_u_i > lb_u:
                 lb_u = min_u_i
 
-        if lb_u + lam * (used + 1) >= best_J - 1e-12:
+        if lb_u + lam_unit * (used + 1) >= best_J - 1e-12:
             return
 
         _, f, p0, alt_paths = candidates[pos]
@@ -232,7 +229,6 @@ def solve_model(
     locked_groups: set[str] | list[str] | tuple[str, ...] | None = None,
     config: Mapping[str, Any] | None = None,
 ):
-    """Gọi bộ giải MILP qua PuLP (nếu có solver) và tự động fallback sang Branch-and-Bound chính xác."""
     start_time = time.time()
     time_limit_s = max(0.05, float(deadline_ms) / 1000.0)
 

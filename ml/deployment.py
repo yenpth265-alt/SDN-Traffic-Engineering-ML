@@ -28,6 +28,24 @@ def read_deployment(filename):
     return deployment
 
 
+def verify_deployment(filename):
+    """Verify frozen metadata and bytes without deserializing the model."""
+    deployment = read_deployment(filename)
+    artifact = (Path(filename).resolve().parent / deployment["artifact_dir"]).resolve()
+    config = read_json(artifact / "ml_config.json")
+    metadata = read_json(artifact / "metadata.json")
+    for name, key in (("model.joblib", "model_sha256"), ("ml_config.json", "ml_config_sha256")):
+        require(deployment.get(key) == metadata[key] == file_hash(artifact / name),
+                f"MODEL_LOAD_FAIL: deployment {key} mismatch")
+    for key in FROZEN_FIELDS:
+        require(deployment.get(key) == config[key], f"MODEL_LOAD_FAIL: deployment {key} mismatch")
+    require(type(deployment["horizon_H"]) is int and deployment["horizon_H"] > 0,
+            "MODEL_LOAD_FAIL: invalid horizon")
+    require(type(deployment["delta_s"]) is int and deployment["delta_s"] == 1,
+            "MODEL_LOAD_FAIL: expected one-second bins")
+    return deployment
+
+
 def export_deployment(artifact_dir, filename):
     """Export only an already selected model; never inspect test labels or retune."""
     artifact, output = Path(artifact_dir).resolve(), Path(filename).resolve()

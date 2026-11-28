@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from data.ingestion.online_api import app
 from data.ingestion.online_store import transaction
+from testing.fixtures.snapshot_factory import canonical_snapshot
 
 
 class OnlineIngestionTest(unittest.TestCase):
@@ -24,7 +25,7 @@ class OnlineIngestionTest(unittest.TestCase):
         self.run = "fixture-" + uuid4().hex
         with transaction() as cursor:
             cursor.execute("""
-                INSERT INTO public.topologies VALUES (%(run)s,'v1',%(run)s,'{}');
+                INSERT INTO public.topologies VALUES (%(run)s,'v1',%(topology_hash)s,'{}');
                 INSERT INTO public.topology_nodes VALUES
                   (%(run)s,'h1','host',NULL), (%(run)s,'h3','host',NULL),
                   (%(run)s,'e1','edge',1), (%(run)s,'e2','edge',2);
@@ -40,8 +41,14 @@ class OnlineIngestionTest(unittest.TestCase):
                    config_version,config_hash,lookback_bins,git_commit,manifest)
                 VALUES (%(run)s,%(run)s,'live','M0',%(origin)s,%(origin)s,%(origin)s,0,360,'v1','running',
                         'v1','config',1,'fixture','{}');
-            """, {"run": self.run, "origin": self.origin})
+            """, {"run": self.run, "origin": self.origin, "topology_hash": sha256(self.run.encode()).hexdigest()})
         self.addCleanup(self.client.close)
+
+    @staticmethod
+    def db_now():
+        with transaction() as cursor:
+            cursor.execute("SELECT clock_timestamp() AS now")
+            return cursor.fetchone()["now"].isoformat()
 
     def at(self, seconds):
         return (self.origin + timedelta(seconds=seconds)).isoformat()
@@ -99,13 +106,13 @@ class OnlineIngestionTest(unittest.TestCase):
                     sampled_at_utc=self.at(1), interval_s=1, sample_count=1, samples=[sample])
         producer_sample = {key: value for key, value in sample.items() if key != "tx_bytes_total"}
         empty_poll = dict(body, samples=[], sample_count=0)
-        self.assert_post("sdn/links", empty_poll, self.net, inserted=0)
+        self.assert_post("sdn/links", empty_poll, self.net, 422)
         self.assert_post("sdn/links", dict(body, samples=[]), self.net, 422)
         self.assert_post("sdn/links", dict(body, samples=[producer_sample], batch_id="network-shaped"),
                          self.net, inserted=1)
         self.assert_post("sdn/links", dict(body, samples=[dict(sample, measure_port=2)]), self.net, 422)
         self.assert_post("sdn/links", body, self.net, inserted=1)
-        self.assert_post("sdn/links", empty_poll, self.net, 409)
+        self.assert_post("sdn/links", empty_poll, self.net, 422)
         self.assert_post("sdn/links", body, self.net, inserted=0)
         self.assert_post("sdn/links", dict(body, samples=[dict(sample, delta_bytes=200)]), self.net, 409)
 
@@ -117,7 +124,7 @@ class OnlineIngestionTest(unittest.TestCase):
         self.assert_post("sdn/routing", batch, self.sdn, inserted=1)
         self.assert_post("sdn/routing", batch, self.sdn, inserted=0)
         self.assert_post("network/demand", self.demand(), self.net, inserted=1)
-        as_of = datetime.now(timezone.utc).isoformat()
+        as_of = self.db_now()
         query = dict(cutoff=self.at(1), as_of=as_of, lookback=1)
         history_url = f"/v1/runs/{self.run}/demand-history"
         response = self.client.get(history_url, params=query, headers=self.sdn)
@@ -131,7 +138,7 @@ class OnlineIngestionTest(unittest.TestCase):
                     quality_status="VALID", history=history, routing_state=[route])
 
         def upload(payload, expected_status, expected_inserted=None, bad_hash=False):
-            raw = json.dumps(payload).encode()
+            raw = json.dumps(canonical_snapshot(payload)).encode()
             digest = "wrong" if bad_hash else sha256(raw).hexdigest()
             response = self.client.post("/v1/sdn/snapshots", content=raw,
                                         headers=dict(self.sdn, **{"Content-Type": "application/json",
@@ -175,7 +182,7 @@ class OnlineIngestionTest(unittest.TestCase):
         event = self.demand(2)
         self.assert_post("network/demand", event, self.net, inserted=1)
         url = f"/v1/runs/{self.run}/demand-history"
-        query = dict(cutoff=self.at(3), as_of=datetime.now(timezone.utc).isoformat(), lookback=1)
+        query = dict(cutoff=self.at(3), as_of=self.db_now(), lookback=1)
         response = self.client.get(url, params=dict(query, format="sdn"), headers=self.sdn)
         self.assertEqual(response.status_code, 200, response.text)
         [row] = response.json()
@@ -249,17 +256,17 @@ class OnlineIngestionTest(unittest.TestCase):
         self.assert_post("network/traffic", dict(run_id=self.run, rows=traffic), self.net, inserted=48)
         links = [dict(link_id=row["link_id"], measure_switch=row["from_node"], measure_port=row["from_port"],
                       delta_bytes=100, delta_t_s=1, port_tx_mbps=0.0008, counter_status="OK")
-                 for row in topology["links"] if row["is_fabric"]]
-        self.assertEqual(len(links), 16)
+                 for row in topology["links"] if row["from_node"].startswith(("e", "c"))]
+        self.assertEqual(len(links), 24)
         self.assert_post("sdn/links", dict(run_id=self.run, batch_id="mock-fabric", sampled_at_utc=self.at(3),
-                                           sample_count=len(links), samples=links), self.sdn, inserted=16)
+                                           sample_count=len(links), samples=links), self.sdn, inserted=24)
 
         root = f"/v1/runs/{self.run}"
-        query = dict(cutoff=self.at(4), as_of=datetime.now(timezone.utc).isoformat(), lookback=2)
+        query = dict(cutoff=self.at(4), as_of=self.db_now(), lookback=2)
         self.assert_post("network/demand", events[-1], self.net, inserted=1)
         late_history = self.client.get(root + "/demand-history", params=query, headers=self.sdn).json()
         self.assertEqual(len(late_history), 95)
-        query["as_of"] = datetime.now(timezone.utc).isoformat()
+        query["as_of"] = self.db_now()
         history = self.client.get(root + "/demand-history", params=query, headers=self.sdn).json()
         self.assertEqual(len(history), 96)
         snapshot = dict(run_id=self.run, snapshot_id="mock-snapshot", cutoff_bin=4, state_version=1,
@@ -267,7 +274,7 @@ class OnlineIngestionTest(unittest.TestCase):
                         quality_status="VALID", routing_state=routes, history=history)
 
         def publish_snapshot(rows, expected_status):
-            raw = json.dumps(dict(snapshot, history=rows)).encode()
+            raw = json.dumps(canonical_snapshot(dict(snapshot, history=rows))).encode()
             response = self.client.post("/v1/sdn/snapshots", content=raw, headers=dict(
                 self.sdn, **{"Content-Type": "application/json", "X-Content-SHA256": sha256(raw).hexdigest()}))
             self.assertEqual(response.status_code, expected_status, response.text)
@@ -278,7 +285,7 @@ class OnlineIngestionTest(unittest.TestCase):
         download = self.client.get(root + "/snapshots/mock-snapshot", headers={"X-API-Key": "test-reader"})
         self.assertEqual(download.content, raw)
         self.assertEqual(download.headers["X-Content-SHA256"], sha256(raw).hexdigest())
-        issued = datetime.now(timezone.utc).isoformat()
+        issued = self.db_now()
         predictions = [dict(run_id=self.run, flow_group_id=group, issued_at=issued, forecast_start=bin_index,
                             forecast_end=bin_index + 1, predicted_mbps=2.0, source="mock")
                        for group in groups for bin_index in range(2, 7)]
@@ -309,5 +316,5 @@ class OnlineIngestionTest(unittest.TestCase):
                        (SELECT count(*) FROM public.routing_history WHERE run_id=%(run)s) AS history,
                        (SELECT count(*) FROM public.predictions WHERE run_id=%(run)s) AS predictions
             """, {"run": self.run})
-            self.assertEqual(dict(cursor.fetchone()), dict(demand=96, traffic=48, links=16, state=96,
+            self.assertEqual(dict(cursor.fetchone()), dict(demand=96, traffic=48, links=24, state=96,
                                                            history=49, predictions=240))

@@ -1,3 +1,5 @@
+> Cập nhật mã tích hợp 28/11/2026: xem [runtime contract](../integration/orchestration/README.md). Các đề xuất version/hash/gate và SHA producer cũ bên dưới là lịch sử. Baseline hiện dùng topology `v1.0`, hash raw từ bundle, warm-up 60 s, L30/H1; G1–G6 QA và gate Network/S0 là hai namespace riêng. Xác nhận owner và nghiệm thu live vẫn PENDING.
+
 # SDN Team Decisions Required Before Cross-Role Integration (`Phase 11.2`)
 
 **Status:** SDN Release Candidate `SDN-RC-1.0-PHASE11.2` (`feature/sdn-controller` @ `d6bf9ad` + Phase 8.1–11 live-verified patch) is **frozen & standalone-verified** (`115/115` tests PASS on Windows/Ubuntu, `PASS_LIVE_OVS` across S0, Recovery, Dynamic Routing, and 3-cycle Stability).  

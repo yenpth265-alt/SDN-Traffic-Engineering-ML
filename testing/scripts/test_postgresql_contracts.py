@@ -14,6 +14,7 @@ from psycopg2 import sql
 
 from data.ingestion.online_api import app
 from data.ingestion.online_store import transaction
+from testing.fixtures.snapshot_factory import canonical_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -200,7 +201,7 @@ class PostgreSQLContracts(unittest.TestCase):
         return full
 
     def send_snapshot(self, payload, inserted=None, status=200, wrong_hash=False):
-        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        raw = json.dumps(canonical_snapshot(payload), separators=(",", ":"), sort_keys=True).encode("utf-8")
         digest = sha256(raw).hexdigest()
         headers = dict(self.headers("SDN"), **{
             "Content-Type": "application/json", "X-Content-SHA256": "bad" if wrong_hash else digest,
@@ -309,7 +310,7 @@ class PostgreSQLContracts(unittest.TestCase):
         # The only change between the two reads is in the schedule's future bin.
         from testing.scripts.capture_contract_fixtures import forecast_model, predict_forecast
 
-        before = self.predict_input(saved.json()["history"])
+        before = self.predict_input(complete)
         with transaction() as cursor:
             cursor.execute("""
                 UPDATE public.demand_plan SET requested_mbps=1999
@@ -339,6 +340,9 @@ class PostgreSQLContracts(unittest.TestCase):
     def ready_forecast(self, snapshot, test_invalid=False):
         raw = self.forecast_payload(snapshot)
         if test_invalid:
+            for row in raw["rows"]:
+                row["forecast_start"] = float(row["forecast_start"])
+                row["forecast_end"] = float(row["forecast_end"])
             rejection = self.post("ml/forecasts", "ML", raw, status=422)
             self.check("raw ML float bin rejected by field validator",
                        "forecast_start" in rejection["detail"][0]["loc"], True)
@@ -413,7 +417,7 @@ class PostgreSQLContracts(unittest.TestCase):
                         apply_deadline_utc=stamp(tick_at + timedelta(minutes=5)), optimizer_result={}, rows=rows)
         expired = dict(proposal, decision_batch_id="expired", tick_id="expired", apply_deadline_utc=stamp(tick_at))
         rejection = self.post("optimization/decisions", "OPTIMIZATION", expired, status=422)
-        self.assertIn("deadline has expired", rejection["detail"])
+        self.assertIn("Apply deadline", rejection["detail"])
         self.check("control_ticks and decision_batches after expired deadline",
                    [self.count("control_ticks"), self.count("decision_batches")], [0, 0])
         self.post("optimization/decisions", "OPTIMIZATION", proposal, {"inserted": 1})
@@ -484,3 +488,40 @@ class PostgreSQLContracts(unittest.TestCase):
         self.check("HTTP and ACK for identical run registration",
                    {"http": response.status_code, "body": response.json()},
                    {"http": 200, "body": {"inserted": 0}})
+
+    def test_sdn_history_and_verification_events_persist_and_replay(self):
+        from sdn.adapters.data_event_publisher import DataEventPublisher, DataPublisherConfig, DeliveryStatus
+        from sdn.controller.state_manager import StateManager
+        from sdn.controller.topology_registry import TopologyRegistry
+        from sdn.flow_management.flow_matcher import FlowMatcher
+        from sdn.flow_management.route_compiler import RouteCompiler
+        from sdn.flow_management.rule_installer import RuleInstaller
+        from sdn.flow_management.switch_driver import InMemorySwitchDriver
+        from sdn.route_verification.rule_verifier import RuleVerifier
+        self.register()
+        topology = TopologyRegistry.from_bundle_file(ROOT / "configs/network/topology_bundle.json",
+                                                    csv_config_dir=ROOT / "configs/network")
+        driver = InMemorySwitchDriver(topology)
+        compiler = RouteCompiler(topology, FlowMatcher(topology))
+        installer = RuleInstaller(compiler, driver, RuleVerifier(compiler, driver))
+        boot_at = self.at(1)
+        evidence = installer.bootstrap_initial_paths(self.run_id, boot_at)
+        manager = StateManager(topology)
+        manager.initialize_run(self.run_id, boot_at, verification_evidences=evidence)
+        def sender(url, payload, headers, timeout_s):
+            reply = self.client.post(url.removeprefix("http://testserver"), json=payload, headers=headers)
+            return reply.status_code, reply.text
+        with TemporaryDirectory() as directory:
+            publisher = DataEventPublisher(DataPublisherConfig(endpoint_base_url="http://testserver",
+                outbox_dir=Path(directory), api_mode="data_v1", api_key="qa-sdn"), sender_fn=sender)
+            history = manager.get_routing_history(self.run_id)
+            first = publisher.publish_routing_history(self.run_id, 1, history, deliver_now=True)
+            proof = publisher.publish_verification_evidence(self.run_id, next(iter(evidence.values())), deliver_now=True)
+            self.assertEqual((first.status, proof.status), (DeliveryStatus.DELIVERED, DeliveryStatus.DELIVERED))
+            self.assertTrue(publisher.publish_routing_history(self.run_id, 1, history, deliver_now=True).duplicate)
+            self.assertEqual(self.count("events"), 2)
+            with transaction() as cursor:
+                cursor.execute("SELECT event_type,detail FROM public.events WHERE run_id=%s", (self.run_id,))
+                saved = {row["event_type"]: row["detail"] for row in cursor}
+            self.assertEqual(saved["RoutingHistory"]["intervals"], [r.to_dict() for r in history])
+            self.assertEqual(saved["VerificationEvidence"]["evidence"], next(iter(evidence.values())).to_dict())

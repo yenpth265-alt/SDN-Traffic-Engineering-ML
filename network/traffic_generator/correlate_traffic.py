@@ -121,28 +121,47 @@ class TrafficOutbox:
     def _load(self) -> None:
         if not os.path.exists(self.path):
             return
+        corrupt_lines = 0
         with open(self.path, encoding="utf-8") as f:
-            for line in f:
+            for line_no, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
-                rec = json.loads(line)
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError as err:
+                    corrupt_lines += 1
+                    print(
+                        f"[!] Skipping corrupt outbox line {line_no} in {self.path}: {err}",
+                        file=sys.stderr,
+                    )
+                    continue
                 batch_key = rec.get("batch_key")
                 payload = rec.get("payload")
                 if batch_key and isinstance(payload, dict):
                     self._pending[batch_key] = payload
+        if corrupt_lines:
+            self._rewrite()
 
     def _rewrite(self) -> None:
         tmp_path = f"{self.path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            for batch_key, payload in self._pending.items():
-                f.write(
-                    json.dumps({"batch_key": batch_key, "payload": payload}, separators=(",", ":"))
-                    + "\n"
-                )
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, self.path)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                for batch_key, payload in self._pending.items():
+                    f.write(
+                        json.dumps({"batch_key": batch_key, "payload": payload}, separators=(",", ":"))
+                        + "\n"
+                    )
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
 
     def add_if_missing(self, batch_key: str, payload: dict) -> None:
         if batch_key in self._pending and self._pending[batch_key] != payload:
@@ -244,9 +263,8 @@ def _send_or_queue_batch(
     elif last_outcome == "invalid_422":
         print(f"[!] 422 Invalid payload for TrafficBatch {batch_key}: {last_detail}", file=sys.stderr)
     else:
-        outbox.add_if_missing(batch_key, payload)
         print(
-            f"[!] Queued TrafficBatch {batch_key} in outbox "
+            f"[!] TrafficBatch {batch_key} retained in outbox "
             f"(Data unavailable, status={last_status}): {last_detail}",
             file=sys.stderr,
         )

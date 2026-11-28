@@ -5,34 +5,29 @@
   "expected_state_version": 5,
   "config_version": "1.0",
   "forecast_start": "2026-11-26T14:00:00Z",
-  "forecast_end": "2026-11-26T14:00:10Z",
-  "apply_deadline_utc": "2026-11-26T14:00:05Z",
+  "forecast_end": "2026-11-26T14:00:01Z",
+  "apply_deadline_utc": "2026-11-26T14:00:00.900Z",
   "changes": [
     {
-      "flow_group_id": "0x064",
-      "old_path_id": "p_0x064_a",
-      "new_path_id": "p_0x064_b"
+      "flow_group_id": "0x108",
+      "old_path_id": "0x108_P1",
+      "new_path_id": "0x108_P2"
     },
     {
-      "flow_group_id": "0x066",
-      "old_path_id": "p_0x066_a",
-      "new_path_id": "p_0x066_b"
+      "flow_group_id": "0x203",
+      "old_path_id": "0x203_P1",
+      "new_path_id": "0x203_P2"
     },
     {
-      "flow_group_id": "0x068",
-      "old_path_id": "p_0x068_a",
-      "new_path_id": "p_0x068_b"
-    },
-    {
-      "flow_group_id": "0x06a",
-      "old_path_id": "p_0x06a_a",
-      "new_path_id": "p_0x06a_b"
+      "flow_group_id": "0x204",
+      "old_path_id": "0x204_P1",
+      "new_path_id": "0x204_P2"
     }
   ],
-  "topology_version": "1.0",
-  "topology_hash": "sha256:topo_v1_0_fixture",
-  "config_hash": "sha256:1fcd04aa072584f9b067e76b870f5c40f716081eb2b5569e5019caf3a1e21388",
+  "topology_version": "v1.0",
+  "topology_hash": "ec6c6969019b1c36744339fb54f0f608c95402ae972859b30710dc44b5dc3956",
+  "config_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "snapshot_as_of_utc": "2026-11-26T14:00:00Z",
   "history_cutoff_utc": "2026-11-26T13:59:00Z",
-  "payload_hash": "d4707dbd3cb7e3f84eeac46bdc66456fff5aeb5f132e082e0ff89d692c46441a"
+  "payload_hash": "a43dc710655240be8706f5a3824e598205b15f217af8b9b02e5428bb3417b9d7"
 }

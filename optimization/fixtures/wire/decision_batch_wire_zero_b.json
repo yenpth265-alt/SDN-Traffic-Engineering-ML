@@ -6,22 +6,23 @@
   "snapshot_id": "snap_001",
   "forecast_batch_id": "fc_batch_001",
   "expected_state_version": 5,
-  "apply_deadline_utc": "2026-11-26T14:00:05Z",
+  "apply_deadline_utc": "2026-11-26T14:00:00.900Z",
   "optimizer_result": {
     "decision_status": "KEPT",
     "reason": "BUDGET_ZERO",
     "total_flows": 48,
     "changed_flows_count": 0,
     "solver_status": "NotRun",
-    "max_utilization_before": 2.533333,
-    "max_utilization_after": 2.533333,
-    "objective_before": 2.533333,
-    "objective_after": 2.533333,
+    "max_utilization_before": 1.04,
+    "max_utilization_after": 1.04,
+    "objective_before": 1.04,
+    "objective_after": 1.04,
     "solve_ms": 0.0,
-    "topology_version": "1.0",
-    "topology_hash": "sha256:topo_v1_0_fixture",
+    "topology_version": "v1.0",
+    "topology_hash": "ec6c6969019b1c36744339fb54f0f608c95402ae972859b30710dc44b5dc3956",
     "config_version": "1.0",
-    "config_hash": "sha256:aabd367c141e506282d9eb47d03dbc9e5ec647d1b7a135089c51c7ab290d3a5c",
+    "config_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "optimizer_config_hash": "sha256:d7e895eff0a6b09cf3fa635c8ecb1bcd1cd23bca5e9e799a3e926f5a6108e13c",
     "snapshot_as_of_utc": "2026-11-26T14:00:00Z",
     "history_cutoff_utc": "2026-11-26T13:59:00Z",
     "forecast_start": 0,
@@ -29,244 +30,244 @@
   },
   "rows": [
     {
-      "flow_group_id": "0x064",
-      "old_path_id": "p_0x064_a",
-      "proposed_path_id": "p_0x064_a"
+      "flow_group_id": "0x103",
+      "old_path_id": "0x103_P1",
+      "proposed_path_id": "0x103_P1"
     },
     {
-      "flow_group_id": "0x065",
-      "old_path_id": "p_0x065_a",
-      "proposed_path_id": "p_0x065_a"
+      "flow_group_id": "0x104",
+      "old_path_id": "0x104_P1",
+      "proposed_path_id": "0x104_P1"
     },
     {
-      "flow_group_id": "0x066",
-      "old_path_id": "p_0x066_a",
-      "proposed_path_id": "p_0x066_a"
+      "flow_group_id": "0x105",
+      "old_path_id": "0x105_P1",
+      "proposed_path_id": "0x105_P1"
     },
     {
-      "flow_group_id": "0x067",
-      "old_path_id": "p_0x067_a",
-      "proposed_path_id": "p_0x067_a"
+      "flow_group_id": "0x106",
+      "old_path_id": "0x106_P1",
+      "proposed_path_id": "0x106_P1"
     },
     {
-      "flow_group_id": "0x068",
-      "old_path_id": "p_0x068_a",
-      "proposed_path_id": "p_0x068_a"
+      "flow_group_id": "0x107",
+      "old_path_id": "0x107_P1",
+      "proposed_path_id": "0x107_P1"
     },
     {
-      "flow_group_id": "0x069",
-      "old_path_id": "p_0x069_a",
-      "proposed_path_id": "p_0x069_a"
+      "flow_group_id": "0x108",
+      "old_path_id": "0x108_P1",
+      "proposed_path_id": "0x108_P1"
     },
     {
-      "flow_group_id": "0x06a",
-      "old_path_id": "p_0x06a_a",
-      "proposed_path_id": "p_0x06a_a"
+      "flow_group_id": "0x203",
+      "old_path_id": "0x203_P1",
+      "proposed_path_id": "0x203_P1"
     },
     {
-      "flow_group_id": "0x06b",
-      "old_path_id": "p_0x06b_a",
-      "proposed_path_id": "p_0x06b_a"
+      "flow_group_id": "0x204",
+      "old_path_id": "0x204_P1",
+      "proposed_path_id": "0x204_P1"
     },
     {
-      "flow_group_id": "0x06c",
-      "old_path_id": "p_0x06c_a",
-      "proposed_path_id": "p_0x06c_a"
+      "flow_group_id": "0x205",
+      "old_path_id": "0x205_P1",
+      "proposed_path_id": "0x205_P1"
     },
     {
-      "flow_group_id": "0x06d",
-      "old_path_id": "p_0x06d_a",
-      "proposed_path_id": "p_0x06d_a"
+      "flow_group_id": "0x206",
+      "old_path_id": "0x206_P1",
+      "proposed_path_id": "0x206_P1"
     },
     {
-      "flow_group_id": "0x06e",
-      "old_path_id": "p_0x06e_a",
-      "proposed_path_id": "p_0x06e_a"
+      "flow_group_id": "0x207",
+      "old_path_id": "0x207_P1",
+      "proposed_path_id": "0x207_P1"
     },
     {
-      "flow_group_id": "0x06f",
-      "old_path_id": "p_0x06f_a",
-      "proposed_path_id": "p_0x06f_a"
+      "flow_group_id": "0x208",
+      "old_path_id": "0x208_P1",
+      "proposed_path_id": "0x208_P1"
     },
     {
-      "flow_group_id": "0x070",
-      "old_path_id": "p_0x070_a",
-      "proposed_path_id": "p_0x070_a"
+      "flow_group_id": "0x301",
+      "old_path_id": "0x301_P1",
+      "proposed_path_id": "0x301_P1"
     },
     {
-      "flow_group_id": "0x071",
-      "old_path_id": "p_0x071_a",
-      "proposed_path_id": "p_0x071_a"
+      "flow_group_id": "0x302",
+      "old_path_id": "0x302_P1",
+      "proposed_path_id": "0x302_P1"
     },
     {
-      "flow_group_id": "0x072",
-      "old_path_id": "p_0x072_a",
-      "proposed_path_id": "p_0x072_a"
+      "flow_group_id": "0x305",
+      "old_path_id": "0x305_P1",
+      "proposed_path_id": "0x305_P1"
     },
     {
-      "flow_group_id": "0x073",
-      "old_path_id": "p_0x073_a",
-      "proposed_path_id": "p_0x073_a"
+      "flow_group_id": "0x306",
+      "old_path_id": "0x306_P1",
+      "proposed_path_id": "0x306_P1"
     },
     {
-      "flow_group_id": "0x074",
-      "old_path_id": "p_0x074_a",
-      "proposed_path_id": "p_0x074_a"
+      "flow_group_id": "0x307",
+      "old_path_id": "0x307_P1",
+      "proposed_path_id": "0x307_P1"
     },
     {
-      "flow_group_id": "0x075",
-      "old_path_id": "p_0x075_a",
-      "proposed_path_id": "p_0x075_a"
+      "flow_group_id": "0x308",
+      "old_path_id": "0x308_P1",
+      "proposed_path_id": "0x308_P1"
     },
     {
-      "flow_group_id": "0x076",
-      "old_path_id": "p_0x076_a",
-      "proposed_path_id": "p_0x076_a"
+      "flow_group_id": "0x401",
+      "old_path_id": "0x401_P1",
+      "proposed_path_id": "0x401_P1"
     },
     {
-      "flow_group_id": "0x077",
-      "old_path_id": "p_0x077_a",
-      "proposed_path_id": "p_0x077_a"
+      "flow_group_id": "0x402",
+      "old_path_id": "0x402_P1",
+      "proposed_path_id": "0x402_P1"
     },
     {
-      "flow_group_id": "0x078",
-      "old_path_id": "p_0x078_a",
-      "proposed_path_id": "p_0x078_a"
+      "flow_group_id": "0x405",
+      "old_path_id": "0x405_P1",
+      "proposed_path_id": "0x405_P1"
     },
     {
-      "flow_group_id": "0x079",
-      "old_path_id": "p_0x079_a",
-      "proposed_path_id": "p_0x079_a"
+      "flow_group_id": "0x406",
+      "old_path_id": "0x406_P1",
+      "proposed_path_id": "0x406_P1"
     },
     {
-      "flow_group_id": "0x07a",
-      "old_path_id": "p_0x07a_a",
-      "proposed_path_id": "p_0x07a_a"
+      "flow_group_id": "0x407",
+      "old_path_id": "0x407_P1",
+      "proposed_path_id": "0x407_P1"
     },
     {
-      "flow_group_id": "0x07b",
-      "old_path_id": "p_0x07b_a",
-      "proposed_path_id": "p_0x07b_a"
+      "flow_group_id": "0x408",
+      "old_path_id": "0x408_P1",
+      "proposed_path_id": "0x408_P1"
     },
     {
-      "flow_group_id": "0x07c",
-      "old_path_id": "p_0x07c_a",
-      "proposed_path_id": "p_0x07c_a"
+      "flow_group_id": "0x501",
+      "old_path_id": "0x501_P1",
+      "proposed_path_id": "0x501_P1"
     },
     {
-      "flow_group_id": "0x07d",
-      "old_path_id": "p_0x07d_a",
-      "proposed_path_id": "p_0x07d_a"
+      "flow_group_id": "0x502",
+      "old_path_id": "0x502_P1",
+      "proposed_path_id": "0x502_P1"
     },
     {
-      "flow_group_id": "0x07e",
-      "old_path_id": "p_0x07e_a",
-      "proposed_path_id": "p_0x07e_a"
+      "flow_group_id": "0x503",
+      "old_path_id": "0x503_P1",
+      "proposed_path_id": "0x503_P1"
     },
     {
-      "flow_group_id": "0x07f",
-      "old_path_id": "p_0x07f_a",
-      "proposed_path_id": "p_0x07f_a"
+      "flow_group_id": "0x504",
+      "old_path_id": "0x504_P1",
+      "proposed_path_id": "0x504_P1"
     },
     {
-      "flow_group_id": "0x080",
-      "old_path_id": "p_0x080_a",
-      "proposed_path_id": "p_0x080_a"
+      "flow_group_id": "0x507",
+      "old_path_id": "0x507_P1",
+      "proposed_path_id": "0x507_P1"
     },
     {
-      "flow_group_id": "0x081",
-      "old_path_id": "p_0x081_a",
-      "proposed_path_id": "p_0x081_a"
+      "flow_group_id": "0x508",
+      "old_path_id": "0x508_P1",
+      "proposed_path_id": "0x508_P1"
     },
     {
-      "flow_group_id": "0x082",
-      "old_path_id": "p_0x082_a",
-      "proposed_path_id": "p_0x082_a"
+      "flow_group_id": "0x601",
+      "old_path_id": "0x601_P1",
+      "proposed_path_id": "0x601_P1"
     },
     {
-      "flow_group_id": "0x083",
-      "old_path_id": "p_0x083_a",
-      "proposed_path_id": "p_0x083_a"
+      "flow_group_id": "0x602",
+      "old_path_id": "0x602_P1",
+      "proposed_path_id": "0x602_P1"
     },
     {
-      "flow_group_id": "0x084",
-      "old_path_id": "p_0x084_a",
-      "proposed_path_id": "p_0x084_a"
+      "flow_group_id": "0x603",
+      "old_path_id": "0x603_P1",
+      "proposed_path_id": "0x603_P1"
     },
     {
-      "flow_group_id": "0x085",
-      "old_path_id": "p_0x085_a",
-      "proposed_path_id": "p_0x085_a"
+      "flow_group_id": "0x604",
+      "old_path_id": "0x604_P1",
+      "proposed_path_id": "0x604_P1"
     },
     {
-      "flow_group_id": "0x086",
-      "old_path_id": "p_0x086_a",
-      "proposed_path_id": "p_0x086_a"
+      "flow_group_id": "0x607",
+      "old_path_id": "0x607_P1",
+      "proposed_path_id": "0x607_P1"
     },
     {
-      "flow_group_id": "0x087",
-      "old_path_id": "p_0x087_a",
-      "proposed_path_id": "p_0x087_a"
+      "flow_group_id": "0x608",
+      "old_path_id": "0x608_P1",
+      "proposed_path_id": "0x608_P1"
     },
     {
-      "flow_group_id": "0x088",
-      "old_path_id": "p_0x088_a",
-      "proposed_path_id": "p_0x088_a"
+      "flow_group_id": "0x701",
+      "old_path_id": "0x701_P1",
+      "proposed_path_id": "0x701_P1"
     },
     {
-      "flow_group_id": "0x089",
-      "old_path_id": "p_0x089_a",
-      "proposed_path_id": "p_0x089_a"
+      "flow_group_id": "0x702",
+      "old_path_id": "0x702_P1",
+      "proposed_path_id": "0x702_P1"
     },
     {
-      "flow_group_id": "0x08a",
-      "old_path_id": "p_0x08a_a",
-      "proposed_path_id": "p_0x08a_a"
+      "flow_group_id": "0x703",
+      "old_path_id": "0x703_P1",
+      "proposed_path_id": "0x703_P1"
     },
     {
-      "flow_group_id": "0x08b",
-      "old_path_id": "p_0x08b_a",
-      "proposed_path_id": "p_0x08b_a"
+      "flow_group_id": "0x704",
+      "old_path_id": "0x704_P1",
+      "proposed_path_id": "0x704_P1"
     },
     {
-      "flow_group_id": "0x08c",
-      "old_path_id": "p_0x08c_a",
-      "proposed_path_id": "p_0x08c_a"
+      "flow_group_id": "0x705",
+      "old_path_id": "0x705_P1",
+      "proposed_path_id": "0x705_P1"
     },
     {
-      "flow_group_id": "0x08d",
-      "old_path_id": "p_0x08d_a",
-      "proposed_path_id": "p_0x08d_a"
+      "flow_group_id": "0x706",
+      "old_path_id": "0x706_P1",
+      "proposed_path_id": "0x706_P1"
     },
     {
-      "flow_group_id": "0x08e",
-      "old_path_id": "p_0x08e_a",
-      "proposed_path_id": "p_0x08e_a"
+      "flow_group_id": "0x801",
+      "old_path_id": "0x801_P1",
+      "proposed_path_id": "0x801_P1"
     },
     {
-      "flow_group_id": "0x08f",
-      "old_path_id": "p_0x08f_a",
-      "proposed_path_id": "p_0x08f_a"
+      "flow_group_id": "0x802",
+      "old_path_id": "0x802_P1",
+      "proposed_path_id": "0x802_P1"
     },
     {
-      "flow_group_id": "0x090",
-      "old_path_id": "p_0x090_a",
-      "proposed_path_id": "p_0x090_a"
+      "flow_group_id": "0x803",
+      "old_path_id": "0x803_P1",
+      "proposed_path_id": "0x803_P1"
     },
     {
-      "flow_group_id": "0x091",
-      "old_path_id": "p_0x091_a",
-      "proposed_path_id": "p_0x091_a"
+      "flow_group_id": "0x804",
+      "old_path_id": "0x804_P1",
+      "proposed_path_id": "0x804_P1"
     },
     {
-      "flow_group_id": "0x092",
-      "old_path_id": "p_0x092_a",
-      "proposed_path_id": "p_0x092_a"
+      "flow_group_id": "0x805",
+      "old_path_id": "0x805_P1",
+      "proposed_path_id": "0x805_P1"
     },
     {
-      "flow_group_id": "0x093",
-      "old_path_id": "p_0x093_a",
-      "proposed_path_id": "p_0x093_a"
+      "flow_group_id": "0x806",
+      "old_path_id": "0x806_P1",
+      "proposed_path_id": "0x806_P1"
     }
   ]
 }

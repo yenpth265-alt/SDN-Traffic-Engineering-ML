@@ -1,7 +1,7 @@
 {
   "run_id": "run_interoperability_01",
   "decision_batch_id": "dec_interoperability_b0_tick_101",
-  "tick_id": 101,
+  "tick_id": "101",
   "tick_at_utc": "2026-11-26T05:00:00Z",
   "snapshot_id": "snap_interoperability_001",
   "forecast_batch_id": "fc_interoperability_100",
